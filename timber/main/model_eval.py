@@ -1,5 +1,6 @@
 import os
 import pathlib
+import warnings
 
 import torch
 import transformers
@@ -26,17 +27,21 @@ from timber.utils import seed
 def load_vllm_model(args: ArgsType):
     from vllm import LLM
     
+    if int(os.getenv('HIP_K', '512')) != args.k:
+        warnings.warn(f'WARN!!! your command line argument of hip_k is {args.k} but environment variable is {os.getenv("HIP_K", "512")}. OS environment is higher priority.')
+    
     device = 'cuda:0'
     MODELS = {
         'vllm_llama32k': 'togethercomputer/LLaMA-2-7B-32K',
         'vllm_llama128k': 'NousResearch/Yarn-Llama-2-7b-128k',
         'vllm_llama13b_128k': 'NousResearch/Yarn-Llama-2-13b-128k',
+        'vllm_llama13b_32k': 'Yukang/Llama-2-13b-chat-longlora-32k-sft',
         'vllm_llama100k': 'Yukang/Llama-2-7b-longlora-100k-ft',
         'vllm_llama32k_instruct': 'togethercomputer/Llama-2-7B-32K-Instruct',
         'vllm_llama1b': 'princeton-nlp/Sheared-LLaMA-1.3B',
         'vllm_llama7b': 'meta-llama/Llama-2-7b-hf',
         'vllm_llama13b': 'meta-llama/Llama-2-13b-hf',
-        'vllm_qwen14b': 'Qwen/Qwen1.5-14B-Chat-GPTQ-Int4',
+        # 'vllm_qwen14b': 'Qwen/Qwen1.5-14B-Chat-GPTQ-Int4',
         'vllm_qwen14b_local': './Qwen1.5-14B-Chat-GPTQ-Int4',
         'vllm_qwen14b_int8_local': './Qwen1.5-14B-Chat-GPTQ-Int8',
         'vllm_qwen14b_noquant_local': './Qwen1.5-14B-Chat',
@@ -98,8 +103,10 @@ def load_model(args):
         'llama1b': 'princeton-nlp/Sheared-LLaMA-1.3B',
         'llama3b': 'princeton-nlp/Sheared-LLaMA-2.7B',
         'llama32k': 'togethercomputer/LLaMA-2-7B-32K',
+        'llama32k_instruct': 'togethercomputer/Llama-2-7B-32K-Instruct',
         'llama13b': 'meta-llama/Llama-2-13b-hf',
         'llama13b_32k': 'Yukang/Llama-2-13b-longlora-32k-ft',
+        'llama13b_32k_instruct': 'Yukang/Llama-2-13b-chat-longlora-32k-sft',
         'qwen14b': 'Qwen/Qwen1.5-14B-Chat',
         'qwen7b': 'Qwen/Qwen1.5-7B-Chat',
         'qwen0.5b': 'Qwen/Qwen1.5-0.5B-Chat',
@@ -118,8 +125,13 @@ def load_model(args):
         config = LlamaConfig.from_pretrained(model_id)
         config._attn_implementation = config.attn_implementation = 'sdpa'
     
-    infer_dtype = torch.bfloat16
-    # infer_dtype = torch.float32
+    if torch.cuda.is_bf16_supported():
+        infer_dtype = torch.bfloat16
+    else:
+        infer_dtype = torch.float16
+    
+    if os.getenv('FORCE_FP32', '0') == '1':
+        infer_dtype = torch.float32
 
     ModelClass = LlamaForCausalLM
     if args.model.startswith('qwen'):
@@ -128,7 +140,7 @@ def load_model(args):
     model = ModelClass.from_pretrained(
         model_id,
         config=config,
-        device_map="auto",
+        device_map={'': device},
         quantization_config=transformers.BitsAndBytesConfig(
             load_in_4bit=True,
             llm_int8_skip_modules=['tree_avgpool_scaler'],

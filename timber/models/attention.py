@@ -129,7 +129,7 @@ def custom_attention(
             attn_output = tree_performer(q.to(torch.float32), k.to(torch.float32), v.to(torch.float32))
         attn_output = attn_output.to(q.dtype)
 
-    elif attention_method == 'timber':
+    elif attention_method == 'timber' or attention_method == 'hip' or attention_method == 'tree':
         q = query_states / (query_states.shape[-1] ** 0.5)
         k = key_states
         v = value_states
@@ -241,6 +241,31 @@ def custom_attention(
             attn_output = torch.cat(attn_outputs, dim=-2)
         else:
             attn_output = attn_outputs[0]
+
+        attn_output = attn_output.view(N, H, TDST, HID)  # .to(hidden_states.dtype)
+
+    elif attention_method == 'streaming_llm':
+        from timber.models.sink_attention.sink_attention import sink_attention
+        
+        q = query_states # / (query_states.shape[-1] ** 0.5)
+        k = key_states
+        v = value_states
+
+        N, H, TDST, HID = q.shape
+        _, _, TSRC, _ = k.shape
+        assert k.shape == v.shape
+
+        q = q.reshape(N * H, TDST, HID)  # .contiguous()
+        k = k.reshape(N * H, TSRC, HID)  # .contiguous()
+        v = v.reshape(N * H, TSRC, HID)  # .contiguous()
+
+        attn_output = sink_attention(
+            q, k, v, 
+            rope_cos.squeeze(0), 
+            rope_sin.squeeze(0), 
+            num_sink=4, 
+            window_size=tree_k,
+        )
 
         attn_output = attn_output.view(N, H, TDST, HID)  # .to(hidden_states.dtype)
 

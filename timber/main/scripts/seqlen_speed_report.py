@@ -3,13 +3,14 @@ import os, json
 
 from matplotlib import pyplot as plt
 import seaborn as sns
-sns.set_style('whitegrid')
+from timber.utils import setup_seaborn
+setup_seaborn(legend_fontsize=6)
 
 dups = range(1, 17)
 
 def samples(query_size = 1, step_size = 1):
     block_size = 32
-    block_size_ks = [1, 2, 4]
+    block_size_ks = [2, 4]
     k = 1024
     batch_sizes = {
         1: 256,
@@ -111,6 +112,8 @@ def samples(query_size = 1, step_size = 1):
         json.dump(results, f, indent=2)
     print('dumped', path)
 
+LINEWIDTH = 1.5
+
 def plot(query_size=1, step_size=1):
     path = f'./saves/seqlen_speed_report/result_q{query_size}.json'
     with open(path, 'r') as f:
@@ -142,43 +145,46 @@ def plot(query_size=1, step_size=1):
         ys_timbers.append(ys_timber)
         ys_speedups.append(ys_speedup)
     
-    plt.figure(figsize=(5,4))
+    figsize = (2.5, 2.0)
     
-    sns.lineplot(x=xs, y=ys_base, label='Torch')
-    sns.lineplot(x=xs, y=ys_flash, label='FlashAttenion2')
+    plt.figure(figsize=figsize)
+    
+    sns.lineplot(x=xs, y=ys_base, label='Torch', linewidth=LINEWIDTH)
+    sns.lineplot(x=xs, y=ys_flash, label='FlashAttenion2', linewidth=LINEWIDTH)
     for iks, block_size_k in enumerate(block_size_ks):
-        sns.lineplot(x=xs, y=ys_timbers[iks], label=f'HiP-Attention (bk={block_size_k})')
+        sns.lineplot(x=xs, y=ys_timbers[iks], label=f'HiP ($b_k$={block_size_k})', linewidth=LINEWIDTH)
     plt.legend()
     if query_size == 1:
-        plt.title('Decoding Latency (k=1024, bq=32)')
+        plt.title('Decoding Latency ($k$=1024, $b_q$=32)')
     else:
-        plt.title('Prompt Latency (k=1024, bq=32)')
-    plt.xlabel('Seq. Length (k)')
-    plt.ylabel('Latency (us)')
+        plt.title('Prompt Latency ($k$=1024, $b_q$=32)')
+    plt.xlabel('Seq. Length (k) ↑')
+    plt.ylabel('Latency (us) ↓')
     plt.xlim(0, 17*step_size)
     
     fig_path = f'./saves/seqlen_speed_report/plot_seqlen_latency_q{query_size}'
-    plt.savefig(fig_path + '.png', dpi=200, bbox_inches='tight')
-    plt.savefig(fig_path + '.pdf', dpi=200, bbox_inches='tight')
+    plt.savefig(fig_path + '.png', dpi=200, bbox_inches='tight', pad_inches=0)
+    plt.savefig(fig_path + '.pdf', dpi=200, bbox_inches='tight', pad_inches=0)
     print(f'saved {fig_path}.png')
     
-    plt.figure(figsize=(5,4))
+    plt.figure(figsize=figsize)
     
     if query_size == 1:
-        plt.title('Decoding Speedup (k=1024, bq=32)')
+        plt.title('Decoding Speedup ($k$=1024, $b_q$=32)')
     else:
-        plt.title('Prompt Speedup (k=1024, bq=32)')
-    sns.lineplot(x=xs, y=[1.0,] * len(xs), label='Torch')
-    sns.lineplot(x=xs, y=ys_speedup_flash, label='FlashAttention2')
+        plt.title('Prompt Speedup ($k$=1024, $b_q$=32)')
+    sns.lineplot(x=xs, y=[1.0,] * len(xs), label='Torch', linewidth=LINEWIDTH)
+    sns.lineplot(x=xs, y=ys_speedup_flash, label='FlashAttention2', linewidth=LINEWIDTH)
     for iks, block_size_k in enumerate(block_size_ks):
-        sns.lineplot(x=xs, y=ys_speedups[iks], label=f'HiP-Attention (bk={block_size_k})')
-    plt.xlabel('Seq. Length (k)')
-    plt.ylabel('Speedup')
+        sns.lineplot(x=xs, y=ys_speedups[iks], label=f'HiP ($b_k$={block_size_k})', linewidth=LINEWIDTH)
+    plt.xlabel('Seq. Length (k) ↑')
+    plt.ylabel('Speedup ↑')
     plt.xlim(0, 17*step_size)
+    plt.legend()
     
     fig_path = f'./saves/seqlen_speed_report/plot_seqlen_speedup_q{query_size}'
-    plt.savefig(fig_path + '.png', dpi=200, bbox_inches='tight')
-    plt.savefig(fig_path + '.pdf', dpi=200, bbox_inches='tight')
+    plt.savefig(fig_path + '.png', dpi=200, bbox_inches='tight', pad_inches=0)
+    plt.savefig(fig_path + '.pdf', dpi=200, bbox_inches='tight', pad_inches=0)
     print(f'saved {fig_path}.png')
 
 def main():

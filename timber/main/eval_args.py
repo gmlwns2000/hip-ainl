@@ -37,8 +37,8 @@ def eval_args(
     parser.add_argument('--dense_layers', type=int, default=3)
     parser.add_argument('--dense_queries', type=int, default=0)
     parser.add_argument('--name', type=str, default='dev')
-    parser.add_argument('--give_prompt', default=False, action='store_true')
-    parser.add_argument('--do_sample', default=False, action='store_true')
+    parser.add_argument('--disable_prompt', default=False, action='store_true')
+    parser.add_argument('--no_sample', default=False, action='store_true')
     parser.add_argument('--input', type=str, default=None)
     parser.add_argument('--output', type=str, default=None)
     parser.add_argument('--no_quantize', default=False, action='store_true')
@@ -48,6 +48,7 @@ def eval_args(
     parser.add_argument('--disable_sparq', default=False, action='store_true')
     parser.add_argument('--disable_sliding_window', default=False, action='store_true')
     parser.add_argument('--sampling_method', default='random', type=str)
+    parser.add_argument('--overwrite', default=False, action='store_true')
     args = parser.parse_args()
     print(args)
     return args
