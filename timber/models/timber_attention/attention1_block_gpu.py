@@ -813,6 +813,9 @@ def hip_attention_mask(
     
     SAMPLING_METHOD: str = 'first',
 
+    ENSEMBLE_PER_ATTN_ITER_N : int = 5,
+    MODEL_I : int = 0,
+    
     USING_SLIDING_WINDOW=True,
     SLIDING_WINDOW_SIZE=128,
     
@@ -921,7 +924,7 @@ def hip_attention_mask(
         )
         
         B_SRC = triton.cdiv(T_SRC, BLOCK_SIZE_K)
-        B_DST = triton.cdiv(T_DST, BLOCK_SIZE_Q)
+        B_DST = triton.cdiv(T_DST, BLOCK_SIZE_Q) # CHECK upper bound?
         
         sparq_indices = None
         sparq_indices_strides = (1, 1, 1)
@@ -1031,6 +1034,8 @@ def hip_attention_mask(
             USING_SLIDING_WINDOW,
             SLIDING_WINDOW_SIZE,
             
+            ENSEMBLE_PER_ATTN_ITER_N,
+            MODEL_I,
             DEBUG,
         )
         if DEBUG:
@@ -1820,7 +1825,17 @@ def timber_attention(
     enable_sparq: bool = True,
     
     sampling_method: str = 'random',
-    
+
+    ensemble : bool = False,
+    ensemble_model_setting : str = "random_pruning",
+    ensemble_method :str = "final_attn",
+    ensemble_method_final : str = "all_agree",
+    ensemble_per_layer_n : int = 1,
+    ensemble_per_attn_iter_n : int = 5,
+    ensemble_model_n : int = 5,
+    ensemble_particular_layer : int = 0,
+
+    layer_id : int = 0,    
     using_sliding_window: bool = True,
     sliding_window_size: int = 128,
     
@@ -1941,10 +1956,10 @@ def timber_attention(
         
     CHUNKING = chunking
     CHUNK_SIZE = chunk_size
-    if q.shape[1] > CHUNK_SIZE and CHUNKING:
-        N, T_DST, HID = q.shape
+    
+    if q.shape[1] > CHUNK_SIZE and CHUNKING: # CHECK WHY
+        N, T_DST, HID = q.shape # q.view(N*H, T_DST, HID)[idx:idx+window, :seq_len]
         N, T_SRC, HID = k.shape
-        
         contexts = []
         
         for ichunk in range(triton.cdiv(T_DST, CHUNK_SIZE)):
@@ -1980,6 +1995,7 @@ def timber_attention(
                 enable_sparq=enable_sparq,
                 
                 sampling_method=sampling_method,
+                ensemble_per_attn_iter_n=ensemble_per_attn_iter_n,
                 
                 using_sliding_window=using_sliding_window,
                 sliding_window_size=sliding_window_size,
@@ -2040,13 +2056,15 @@ def timber_attention(
     with timer('timber_attention'):
         if not using_precomputed_mask:
             with timer('attention_matrix'):
-                # if prompt (exceed single tensor-core block), 
-                # do not use topk strding. this will cause more resource
-                estimated_ksrc_stride = min(32, max(1, round(mask_k / (block_size_k * 16))))
-                if q.shape[1] > 32:
-                    estimated_ksrc_stride = 1
-                
-                indices, ks = hip_attention_mask(
+                if not ensemble:
+                    real_ensemble = False
+                    # if prompt (exceed single tensor-core block), 
+                    # do not use topk strding. this will cause more resource
+                    estimated_ksrc_stride = min(32, max(1, round(mask_k / (block_size_k * 16))))
+                    if q.shape[1] > 32:
+                        estimated_ksrc_stride = 1
+                    
+                    indices, ks = hip_attention_mask( # indices, ks, probs_or_context, scores = attention_matrix(
                     queries=q,
                     keys=k,
                     values=v,
@@ -2067,7 +2085,6 @@ def timber_attention(
                     IS_FLASH=is_flash,
                     SPARQ=enable_sparq,
                     SAMPLING_METHOD=sampling_method,
-                    
                     USING_SLIDING_WINDOW=using_sliding_window,
                     SLIDING_WINDOW_SIZE=sliding_window_size,
                     
@@ -2081,7 +2098,184 @@ def timber_attention(
                     
                     GRID_SRC_STRIDE=estimated_ksrc_stride,
                     GRID_K_STRIDE=estimated_ksrc_stride,
+
+                    ENSEMBLE_PER_ATTN_ITER_N=ensemble_per_attn_iter_n,
                 )
+                # if os.environ.get('CHECKOUT_ENSEMBLE', '0') == '1':
+                #     os.makedirs(f'./cache/ensemble/llama13b_32k/models/default', exist_ok=True)
+                #     torch.save({
+                #         'indices': indices,
+                #         'ks' : ks,
+                #         'q_timber': q,
+                #         'k': k,
+                #         'v': v,
+                #         'mask_k':mask_k,
+                #         'block_size_q':block_size_q,
+                #         'block_size_k':block_size_k,
+                        
+                #         'probs_or_context' : probs_or_context,
+                #         'scores': scores,
+                #         'layer_id' : layer_id,
+                #     }, f'./cache/ensemble/llama13b_32k/models/default/l_{layer_id}_{sampling_method}.pth')
+                #     print(">>> STORED.")
+                #     # input('stored. press enter to continue >>> ')
+                else:
+                    real_ensemble = True
+                    ### ENSEMBLE: MODIFY indices
+                    print("######")
+                    print("ensemble : ", ensemble)
+                    print('layer_id : ', layer_id)
+                    print("ensemble_model_setting : ", ensemble_model_setting)
+                    print("ensemble_method : ", ensemble_method)
+                    print("ensemble_method_final : ", ensemble_method_final)
+                    print('ensemble_per_layer_n : ', ensemble_per_layer_n)
+                    print('ensemble_model_n : ', ensemble_model_n)
+                    print('ensemble_particular_layer : ', ensemble_particular_layer)
+                        
+                    assert ensemble_model_setting in ['random_pruning', 'model_zoo', 'transformer_suggest']
+                    assert ensemble_method in ['final_attn', ] # TODO 'per_attn_iteration'
+                    if ensemble_model_setting == "random_pruning":
+                        if ensemble_method == 'final_attn':
+                            assert ensemble_method_final in ['all_agree', 'union', 'union_bounded_mask_k',
+                                                            'more_sparse', 'same_sparse', 'less_sparse', 
+                                                            'avg', 'max', 'min', 'med',]
+                            if ((layer_id) == ensemble_particular_layer) or (ensemble_particular_layer == None and (layer_id+1) % ensemble_per_layer_n == 0):
+                                real_ensemble = True
+                                ensemble_attn_mask_per_layer = [] # TODO not efficient?
+                                for i in range(ensemble_model_n):
+                                    indices, ks = hip_attention_mask( # indices, ks, probs_or_context, scores
+                                        queries=q,
+                                        keys=k,
+                                        values=v,
+                                        attention_mask=attention_mask,
+                                        kv_repeat_interleave=KV_REPEAT_INTERLEAVE,
+                                        
+                                        w_start=w_start,
+                                        n_patches=n_patches,
+                                        mask_k=mask_k,
+                                        scale_up=scale_up,
+                                        is_causal=is_causal,
+                                        
+                                        BLOCK_SIZE_Q=block_size_q,
+                                        BLOCK_SIZE_K=block_size_k,
+                                        REDUCE_METHOD=reduce_method,
+                                        REDUCE_STRIDE=reduce_stride,
+                                        
+                                        IS_FLASH=is_flash,
+                                        SPARQ=enable_sparq,
+                                        SAMPLING_METHOD=sampling_method,
+                                        
+                                        USING_SLIDING_WINDOW=using_sliding_window,
+                                        SLIDING_WINDOW_SIZE=sliding_window_size,
+                                        
+                                        ROPE_METHOD=rope_method,
+                                        ROPE_COS=rope_cos,
+                                        ROPE_SIN=rope_sin,
+                                        POSITION_IDS=position_ids,
+                                        
+                                        SELF_EXTEND_SCALE=self_extend_scale,
+                                        SELF_EXTEND_WINDOW=self_extend_window,
+
+                                        ENSEMBLE_PER_ATTN_ITER_N=ensemble_per_attn_iter_n,
+                                        MODEL_I = i,
+                                    )
+                                    N_H, TDST_BQ, MASK_K_BK = indices.shape
+                                    N_H, TDST_BQ = ks.shape
+                                    print("* ENSEMBLE: INPUT 32000 IN INDICES WHERE OUT OF RANGE KS") # NOTE
+                                    range_tensor = torch.arange(MASK_K_BK, device=indices.device).expand_as(indices)
+                                    mask = range_tensor >= ks.unsqueeze(-1)
+                                    assert 32000 > ks.max().item()
+                                    indices[mask] = 32000
+                                    ensemble_attn_mask_per_layer.append(indices)
+                                    
+                                    if os.environ.get('CHECKOUT_ENSEMBLE', '0') == '1':
+                                        os.makedirs(f'./cache/ensemble/llama13b_32k/models/{ensemble_model_setting}_{ensemble_method}_{ensemble_method_final}', exist_ok=True)
+                                        torch.save({
+                                            'indices': indices,
+                                            'ks' : ks,
+                                            'q_timber': q,
+                                            'k': k,
+                                            'v': v,
+                                            'mask_k':mask_k,
+                                            'block_size_q':block_size_q,
+                                            'block_size_k':block_size_k,
+                                            'ensemble': ensemble,
+                                            'ensemble_model_setting' : ensemble_model_setting,
+                                            'ensemble_method' : ensemble_method,
+                                            'ensemble_method_final' : ensemble_method_final,
+                                            'ensemble_per_layer_n' : ensemble_per_layer_n,
+                                            'ensemble_per_attn_iter_n' : ensemble_per_attn_iter_n,
+                                            'ensemble_model_n' : ensemble_model_n,
+                                            'ensemble_particular_layer' : ensemble_particular_layer,
+                                            'layer_id' : layer_id,
+                                            'model_i': i,
+                                        }, f'./cache/ensemble/llama13b_32k/models/{ensemble_model_setting}_{ensemble_method}_{ensemble_method_final}/l_{layer_id}_m_{ensemble_model_n}_{i}_pl_{ensemble_per_layer_n}_pat{ensemble_per_attn_iter_n}_ln{ensemble_particular_layer}.pth')
+                                        print(">>> STORED.")
+                                        # input('stored. press enter to continue >>> ')
+
+                                from llm_ensemble.method.random_pruning import ensemble_random_pruning
+                                indices, sparsity_per_layer = ensemble_random_pruning(
+                                    ks,
+                                    q,
+                                    k,
+                                    v,
+                                    mask_k,
+                                    block_size_q,
+                                    block_size_k,
+
+                                    ensemble,
+                                    ensemble_model_setting,
+                                    ensemble_method, 
+                                    ensemble_method_final,
+                                    ensemble_per_layer_n,
+                                    ensemble_per_attn_iter_n,
+                                    ensemble_model_n,
+                                    ensemble_particular_layer,
+                                    ensemble_attn_mask_per_layer, 
+
+                                    layer_id,
+                                )
+                                # NOTE indices: garbage filled with 32000
+                            else:
+                                real_ensemble = False
+                                print(f"@ l_{layer_id} NOT USING ENSEMBLE")
+                                indices, ks = hip_attention_mask( # indices, ks, probs_or_context, scores
+                                queries=q,
+                                keys=k,
+                                values=v,
+                                attention_mask=attention_mask,
+                                kv_repeat_interleave=KV_REPEAT_INTERLEAVE,
+                                
+                                w_start=w_start,
+                                n_patches=n_patches,
+                                mask_k=mask_k,
+                                scale_up=scale_up,
+                                is_causal=is_causal,
+                                
+                                BLOCK_SIZE_Q=block_size_q,
+                                BLOCK_SIZE_K=block_size_k,
+                                REDUCE_METHOD=reduce_method,
+                                REDUCE_STRIDE=reduce_stride,
+                                
+                                IS_FLASH=is_flash,
+                                SPARQ=enable_sparq,
+                                SAMPLING_METHOD=sampling_method,
+
+                                USING_SLIDING_WINDOW=using_sliding_window,
+                                SLIDING_WINDOW_SIZE=sliding_window_size,
+                                
+                                ROPE_METHOD=rope_method,
+                                ROPE_COS=rope_cos,
+                                ROPE_SIN=rope_sin,
+                                POSITION_IDS=position_ids,
+                                
+                                SELF_EXTEND_SCALE=self_extend_scale,
+                                SELF_EXTEND_WINDOW=self_extend_window,
+
+                                ENSEMBLE_PER_ATTN_ITER_N=ensemble_per_attn_iter_n,
+                            )
+                    print('real_ensemble : ', real_ensemble)
+                    ### END OF ENSEMBLE
         else:
             assert precomputed_ks is not None
             assert precomputed_indices is not None
@@ -2168,7 +2362,7 @@ def timber_attention(
                     SELF_EXTEND_WINDOW=self_extend_window,
                 )
     
-    return context, (indices, ks, probs)
+    return context, (indices, ks, probs, sparsity_per_layer if real_ensemble else None)
 
 import torch.nn.functional as F
 
@@ -2318,6 +2512,10 @@ def main_latency_benchmark():
                         block_size_k=args.block_size_k,
                         scale_up=args.scale_up,
                         is_causal=is_causal,
+
+                        sampling_method = sampling_method, ###CHECK
+                        ensemble_per_attn_iter_n = ensemble_per_attn_iter_n,
+                        model_i = model_i
                     )
                 else:
                     indices, ks = state
@@ -2336,6 +2534,10 @@ def main_latency_benchmark():
                         using_precomputed_mask=True,
                         precomputed_indices=indices,
                         precomputed_ks=ks,
+
+                        sampling_method = sampling_method, ###CHECK
+                        ensemble_per_attn_iter_n = ensemble_per_attn_iter_n,
+                        model_i = model_i
                     )
                 return mask[0], mask[1]
             else:

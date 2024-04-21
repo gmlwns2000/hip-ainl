@@ -618,7 +618,6 @@ class LlamaFlashAttention2(LlamaAttention):
             (max_seqlen_in_batch_q, max_seqlen_in_batch_k),
         )
 
-
 class LlamaSdpaAttention(LlamaAttention):
     """
     Llama attention module using torch.nn.functional.scaled_dot_product_attention. This module inherits from
@@ -742,6 +741,17 @@ class LlamaCustomAttention(LlamaAttention):
             nn.ReLU(),
             nn.Linear(config.hidden_size // 4, config.num_attention_heads)
         )
+
+        ### ensemble
+        self.ensemble = False
+        self.ensemble_model_setting = "random_pruning"
+        self.ensemble_method = "final_attn"
+        self.ensemble_method_final = "all_agree"
+        self.ensemble_per_layer_n = 1
+        self.ensemble_per_attn_iter_n = 5
+        self.ensemble_model_n = 5
+        self.ensemble_particular_layer = None
+        self.sparsity_per_layer = None
 
         self.tree_reformer = self.tree_performer = None
 
@@ -886,6 +896,19 @@ class LlamaCustomAttention(LlamaAttention):
             # Attention sparsity loss
             output_attn_sparsity_loss=output_attn_sparsity_loss,
             tree_lp_norm_coeff=self.tree_lp_norm_coeff,
+
+            # Ensemble
+            ensemble = self.ensemble,
+            ensemble_model_setting = self.ensemble_model_setting,
+            ensemble_method = self.ensemble_method,
+            ensemble_method_final = self.ensemble_method_final,
+            ensemble_per_layer_n = self.ensemble_per_layer_n,
+            ensemble_per_attn_iter_n = self.ensemble_per_attn_iter_n,
+            ensemble_model_n = self.ensemble_model_n,
+            ensemble_particular_layer = self.ensemble_particular_layer,
+
+            layer_id = self.layer_idx,
+
         )
 
         if last_cumsum is not None:

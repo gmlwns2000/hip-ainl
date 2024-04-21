@@ -31,6 +31,18 @@ def custom_attention(
 
         # Attention sparsity loss
         output_attn_sparsity_loss=False, tree_lp_norm_coeff=0.5,
+
+        ensemble = False,
+        ensemble_model_setting = "random_pruning",
+        ensemble_method = "final_attn",
+        ensemble_method_final = "all_agree",
+        ensemble_per_layer_n = 1,
+        ensemble_per_attn_iter_n = 5,
+        ensemble_model_n = 5,
+        ensemble_particular_layer = None,
+
+        layer_id = 0,
+
 ):
     """
     @param query_states: (N, H, TDST, HID)
@@ -183,6 +195,18 @@ def custom_attention(
                 is_flash=tree_enable_flash,
                 using_sliding_window=tree_use_sliding_window,
                 sampling_method=tree_sampling_method,
+
+                # Ensemble
+                ensemble = ensemble,
+                ensemble_model_setting = ensemble_model_setting,
+                ensemble_method = ensemble_method,
+                ensemble_method_final = ensemble_method_final,
+                ensemble_per_layer_n = ensemble_per_layer_n,
+                ensemble_per_attn_iter_n = ensemble_per_attn_iter_n,
+                ensemble_model_n = ensemble_model_n,
+                ensemble_particular_layer = ensemble_particular_layer,
+
+                layer_id = layer_idx,
             )
         except RuntimeError as ex:
             os.makedirs('cache/timber', exist_ok=True)
