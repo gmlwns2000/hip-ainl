@@ -28,7 +28,7 @@
 # for ((thresh=5; thresh>0; thresh--)); do
 for ((thresh=5; thresh<21; thresh+=5)); do
   for ((bdd=0; bdd<2; bdd++)); do
-    PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:32 CUDA_VISIBLE_DEVICES=0 \
+    PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:32 CUDA_VISIBLE_DEVICES=1 \
     python -m timber.main.model_eval \
       --model llama32k \
       --stride 4096 \
@@ -48,6 +48,6 @@ for ((thresh=5; thresh<21; thresh+=5)); do
       --dense_layers 0 \
       --overwrite \
       --count -1 \
-      --ensemble-model-n 20
+      --ensemble-model-n 20 
   done
 done
