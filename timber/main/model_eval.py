@@ -171,10 +171,15 @@ def load_model(args):
             m.ensemble_model_setting = args.ensemble_model_setting
             m.ensemble_method = args.ensemble_method
             m.ensemble_method_final = args.ensemble_method_final
+            m.ensemble_method_final_inter_thresh = args.ensemble_method_final_inter_thresh
+            m.ensemble_method_final_bdd_mask_k = args.ensemble_method_final_bdd_mask_k
+
             m.ensemble_per_layer_n = args.ensemble_per_layer_n
             m.ensemble_per_attn_iter_n = args.ensemble_per_attn_iter_n
             m.ensemble_model_n = args.ensemble_model_n
             m.ensemble_particular_layer = args.ensemble_particular_layer
+            m.ensemble_layer_till = args.ensemble_layer_till
+
             m.tree_dense_layers = list(range(args.dense_layers))
             m.tree_rope_method = args.rope_method
             m.tree_enable_sparq = not args.disable_sparq

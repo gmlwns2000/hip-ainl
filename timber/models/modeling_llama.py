@@ -746,11 +746,14 @@ class LlamaCustomAttention(LlamaAttention):
         self.ensemble = False
         self.ensemble_model_setting = "random_pruning"
         self.ensemble_method = "final_attn"
-        self.ensemble_method_final = "all_agree"
+        self.ensemble_method_final = "intersection"
+        self.ensemble_method_final_inter_thresh = 1
+        self.ensemble_method_final_bdd_mask_k = 0
         self.ensemble_per_layer_n = 1
         self.ensemble_per_attn_iter_n = 5
         self.ensemble_model_n = 5
         self.ensemble_particular_layer = None
+        self.ensemble_layer_till = 6
         self.sparsity_per_layer = None
 
         self.tree_reformer = self.tree_performer = None
@@ -859,7 +862,7 @@ class LlamaCustomAttention(LlamaAttention):
         # plt.savefig('dump.png')
         # input('b')
 
-        attn_output, cur_cumsum, attn_sparsity_loss = custom_attention(
+        attn_output, cur_cumsum, attn_sparsity_loss, sparsity = custom_attention(
             query_states=query_states, key_states=key_states, value_states=value_states,
             attention_mask=attention_mask, causal_mask=causal_mask,
             attention_dropout=self.attention_dropout if self.training else 0.0,
@@ -902,15 +905,20 @@ class LlamaCustomAttention(LlamaAttention):
             ensemble_model_setting = self.ensemble_model_setting,
             ensemble_method = self.ensemble_method,
             ensemble_method_final = self.ensemble_method_final,
+            ensemble_method_final_inter_thresh = self.ensemble_method_final_inter_thresh,
+            ensemble_method_final_bdd_mask_k = self.ensemble_method_final_bdd_mask_k,
             ensemble_per_layer_n = self.ensemble_per_layer_n,
             ensemble_per_attn_iter_n = self.ensemble_per_attn_iter_n,
             ensemble_model_n = self.ensemble_model_n,
             ensemble_particular_layer = self.ensemble_particular_layer,
+            ensemble_layer_till = self.ensemble_layer_till,
 
             layer_id = self.layer_idx,
 
         )
 
+        self.sparsity_per_layer = sparsity
+        
         if last_cumsum is not None:
             past_key_value.update_cumsum(last_cumsum. layer_idx)
 

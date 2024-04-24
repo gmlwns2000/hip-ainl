@@ -35,11 +35,14 @@ def custom_attention(
         ensemble = False,
         ensemble_model_setting = "random_pruning",
         ensemble_method = "final_attn",
-        ensemble_method_final = "all_agree",
+        ensemble_method_final = "intersection",
+        ensemble_method_final_inter_thresh = 1,
+        ensemble_method_final_bdd_mask_k = 0,
         ensemble_per_layer_n = 1,
         ensemble_per_attn_iter_n = 5,
         ensemble_model_n = 5,
         ensemble_particular_layer = None,
+        ensemble_layer_till = 6,
 
         layer_id = 0,
 
@@ -75,7 +78,7 @@ def custom_attention(
     @param tree_lp_norm_coeff: Lp norm coefficient for attention sparsity regularization
     @return: Attention output, last cumsum, attention sparsity loss
     """
-    attn_sparsity_loss = None
+    sparsity = attn_sparsity_loss = None
 
     if attention_method == 'none':
         # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
@@ -104,15 +107,16 @@ def custom_attention(
                 is_causal=attention_mask is None and query_states.shape[-2] > 1,
             )
 
-        if os.environ.get('CHECKOUT_STATES', '0') == '1':
+        if os.environ.get('CHECKOUT_STATES', '0') == '1' and (layer_id == 0 or layer_id == 31) :
             os.makedirs('./cache/llama/', exist_ok=True)
             torch.save({
                 'q': query_states,
                 'k': key_states,
                 'v': value_states,
+                'attn' : causal_mask if causal_mask is not None else attention_mask,
                 'out': attn_output,
-            }, './cache/llama/qkvout.pth')
-            input('stored. press enter to continue >>> ')
+            }, f'./cache/llama/qkvout_l{layer_id}.pth')
+            # input('stored. press enter to continue >>> ')
 
     elif attention_method == 'reformer':
         q = query_states  # / (query_states.shape[-1] ** 0.5)
@@ -179,7 +183,7 @@ def custom_attention(
 
         q_timber = q[:, :LAST_DENSE_QUERIES, :]
         try:
-            attn_output_timber, _ = timber_attention(
+            attn_output_timber, (indices, ks, attn_probs, sparsity) = timber_attention(
                 q_timber,
                 k[:, :LAST_DENSE_QUERIES, :],
                 v[:, :LAST_DENSE_QUERIES, :],
@@ -201,12 +205,15 @@ def custom_attention(
                 ensemble_model_setting = ensemble_model_setting,
                 ensemble_method = ensemble_method,
                 ensemble_method_final = ensemble_method_final,
+                ensemble_method_final_inter_thresh = ensemble_method_final_inter_thresh,
+                ensemble_method_final_bdd_mask_k = ensemble_method_final_bdd_mask_k,
                 ensemble_per_layer_n = ensemble_per_layer_n,
                 ensemble_per_attn_iter_n = ensemble_per_attn_iter_n,
                 ensemble_model_n = ensemble_model_n,
                 ensemble_particular_layer = ensemble_particular_layer,
+                ensemble_layer_till = ensemble_layer_till,
 
-                layer_id = layer_idx,
+                layer_id = layer_id,
             )
         except RuntimeError as ex:
             os.makedirs('cache/timber', exist_ok=True)
@@ -267,6 +274,31 @@ def custom_attention(
             attn_output = attn_outputs[0]
 
         attn_output = attn_output.view(N, H, TDST, HID)  # .to(hidden_states.dtype)
+        
+        if os.environ.get('CHECKOUT_STATES', '0') == '1' and (layer_id == 0 or layer_id == 31):
+            os.makedirs('./cache/llama/ensemble', exist_ok=True)
+            torch.save({
+                'q': query_states,
+                'k': key_states,
+                'v': value_states,
+                'indices' : indices,
+                'ks' : ks,
+                'attn' : attn_probs,
+                'out': attn_output,
+                'ensemble' : ensemble,
+                'ensemble_model_setting' : ensemble_model_setting,
+                'ensemble_method' : ensemble_method,
+                'ensemble_method_final' : ensemble_method_final,
+                'ensemble_method_final_inter_thresh' : ensemble_method_final_inter_thresh,
+                'ensemble_method_final_bdd_mask_k' : ensemble_method_final_bdd_mask_k,
+                'ensemble_per_layer_n' : ensemble_per_layer_n,
+                'ensemble_per_attn_iter_n' : ensemble_per_attn_iter_n,
+                'ensemble_model_n' : ensemble_model_n,
+                'ensemble_particular_layer' : ensemble_particular_layer,
+                'ensemble_layer_till' : ensemble_layer_till,
+                'layer_id' : layer_id,
+            }, f'./cache/llama/ensemble/qkvout_ensbn{ensemble_model_n}_mft{ensemble_method_final_inter_thresh}_bmk{ensemble_method_final_bdd_mask_k}_lt{ensemble_layer_till}_l{layer_id}.pth')
+            # input('stored. press enter to continue >>> ')
 
     elif attention_method == 'streaming_llm':
         from timber.models.sink_attention.sink_attention import sink_attention
@@ -296,4 +328,4 @@ def custom_attention(
     else:
         raise Exception(attention_method)
 
-    return attn_output, last_cumsum, attn_sparsity_loss
+    return attn_output, last_cumsum, attn_sparsity_loss, sparsity

@@ -23,7 +23,11 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, visuali
         LLM = torch.Tensor
         warnings.warn('oops')
     
-    outfile = f'./cache/llama_eval/{args.name}/ppl_{args.method}_{args.model}_s{args.stride}_dl{args.dense_layers}_k{args.k}_ckpt{args.checkpoint is not None}.json'
+    if not args.ensemble:
+        outfile = f'./cache/llama_eval/{args.name}/ppl_{args.method}_{args.model}_s{args.stride}_dl{args.dense_layers}_k{args.k}_ckpt{args.checkpoint is not None}.json'
+    else:
+        outfile = f'./cache/llama_eval/{args.name}/ppl_{args.method}_{args.model}_s{args.stride}_dl{args.dense_layers}_k{args.k}_ckpt{args.checkpoint is not None}_ensbn{args.ensemble_model_n}_mft{args.ensemble_method_final_inter_thresh}_bmk{args.ensemble_method_final_bdd_mask_k}_lt{args.ensemble_layer_till}.json'
+
     pathlib.Path(outfile).parent.mkdir(parents=True, exist_ok=True)
     print("Will write to", outfile)
     if os.path.exists(outfile) and not args.overwrite:
@@ -49,7 +53,7 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, visuali
     viz_i = 0
     sparse_sum = 0
     sparse_cnt = 0
-    with tqdm(range(0, seq_len, stride)[:args.count]) as pbar:
+    with tqdm(range(0, seq_len, stride)[:args.count]) as pbar: # [:1]
         for begin_loc in pbar:
             if visualize and viz_i == 0:
                 print("STORE FOR VISUALIZATION")
