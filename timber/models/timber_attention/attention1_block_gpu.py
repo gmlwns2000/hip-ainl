@@ -2193,6 +2193,7 @@ def timber_attention(
                                     assert 32000 > ks.max().item()
                                     indices[mask] = 32000
                                     ensemble_attn_mask_per_layer = torch.cat((ensemble_attn_mask_per_layer, indices.unsqueeze(-1)), dim=-1)
+                                    breakpoint()
                                     
                                     if os.environ.get('CHECKOUT_ENSEMBLE', '0') == '1':
                                         os.makedirs(f'./cache/ensemble/llama13b_32k/models/{ensemble_model_setting}_{ensemble_method}_{ensemble_method_final}', exist_ok=True)

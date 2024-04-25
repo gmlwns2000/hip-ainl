@@ -50,6 +50,7 @@ for ((thresh=5; thresh<21; thresh+=5)); do
         --ensemble-layer-till "${layer_till}" \
         --dense_layers 0 \
         --overwrite \
+        --count -1 \
         --ensemble-model-n 20
     done
   done
