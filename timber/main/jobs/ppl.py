@@ -111,6 +111,6 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, visuali
     
     os.makedirs('./cache/llama_eval/', exist_ok=True)
     with open(outfile, 'w') as f:
-        json.dump({'ppl': ppl}, f)
+        json.dump({'ppl': ppl, 'sparsity': sparsity}, f)
 
     print(f'PPL: {ppl:.4f} SPARSE: {sparsity:.3f}')
