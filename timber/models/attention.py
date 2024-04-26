@@ -43,6 +43,7 @@ def custom_attention(
         ensemble_model_n = 5,
         ensemble_particular_layer = None,
         ensemble_layer_till = 6,
+        ensemble_randomness = 0.5,
 
         layer_id = 0,
 
@@ -212,6 +213,7 @@ def custom_attention(
                 ensemble_model_n = ensemble_model_n,
                 ensemble_particular_layer = ensemble_particular_layer,
                 ensemble_layer_till = ensemble_layer_till,
+                ensemble_randomness = ensemble_randomness,
 
                 layer_id = layer_id,
             )
@@ -301,6 +303,7 @@ def custom_attention(
                     'ensemble_model_n' : ensemble_model_n,
                     'ensemble_particular_layer' : ensemble_particular_layer,
                     'ensemble_layer_till' : ensemble_layer_till,
+                    'ensemble_randomness' : ensemble_randomness,
                     'layer_id' : layer_id,
                 }, f'./cache/llama/ensemble/qkvout_ensbn{ensemble_model_n}_mft{ensemble_method_final_inter_thresh}_bmk{ensemble_method_final_bdd_mask_k}_lt{ensemble_layer_till}_l{layer_id}.pth')
             else:

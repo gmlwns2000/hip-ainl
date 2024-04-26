@@ -145,4 +145,5 @@ html2text~=2024.2.26
 pypdf~=4.0.2
 PyMuPDF~=1.23.25
 tiktoken~=0.6.0
-# pillow~=10.2.0
+pillow~=10.2.0
+bitsandbytes
