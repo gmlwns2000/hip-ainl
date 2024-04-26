@@ -155,7 +155,19 @@ def ensemble_random_pruning(
         sparsity_per_layer = torch.sum(ensemble_filtered<32000).item()
         sparsity_ratio = (sparsity_per_layer/origin_sparsity)
 
-
+        # NOTE per_query_token_cnt_diclist is just for analysis
+        if os.environ.get('ENSEMBLE_AGREE_DICLIST', '0') == '1':
+            os.makedirs('./cache/llama/bef_ensb', exist_ok=True)
+            torch.save({
+                "initial_indices": result,
+                "initial_cnt" : result_cnt,
+                'sorted_indices' : ensemble_sorted,
+                'sorted_cnt' : ensemble_cnt_sorted,
+                'randomness' : 0.5,
+                'final_indices' : ensemble_filtered,
+                'final_cnt' : ensemble_cnt_filtered
+            }, f'./cache/llama/bef_ensb/ensbn{ensemble_model_n}_agreement_0.5.pth')
+            input('>>> ')
 
         # for r in ensemble_attn_mask_per_layer:
         #     unique_ensemble, ensemble_cnt = torch.unique(r, return_counts=True)
