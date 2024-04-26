@@ -179,6 +179,7 @@ def load_model(args):
             m.ensemble_model_n = args.ensemble_model_n
             m.ensemble_particular_layer = args.ensemble_particular_layer
             m.ensemble_layer_till = args.ensemble_layer_till
+            m.ensemble_randomness = args.ensemble_randomness
 
             m.tree_dense_layers = list(range(args.dense_layers))
             m.tree_rope_method = args.rope_method

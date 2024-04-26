@@ -30,6 +30,7 @@ class ArgsType:
 
     ensemble_particular_layer : int = None
     ensemble_layer_till : int = None
+    ensemble_randomness : float = 0.5
 
 
 
@@ -71,6 +72,7 @@ def eval_args(
     parser.add_argument('--ensemble-model-n', type=int, default=5)
     parser.add_argument('--ensemble-particular-layer', type=int, default=None)
     parser.add_argument('--ensemble-layer-till', type=int, default=None)
+    parser.add_argument('--ensemble-randomness', type=float, default=0.5)
 
     parser.add_argument('--visualize', action='store_true')
 

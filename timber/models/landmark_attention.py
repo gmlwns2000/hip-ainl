@@ -67,7 +67,7 @@ def _fwd_kernel(#debug, sdz, sdh, sdm, sdn,
         landmark_p = tl.exp(landmark_qk - m_curr_)
         l_curr = landmark_p + l_prev 
         l_rcp = 1. / l_curr # rescale operands of matmuls
-        # l_rcp = tl.where((l_rcp == float('inf')), 0, l_rcp)  # ADDITIONAL CHECK IF YOU GET NaNs
+        # l_rcp = tl.where((l_rcp == 9999999), 0, l_rcp)  # ADDITIONAL CHECK IF YOU GET NaNs
         landmark_p *= l_rcp
 
         acc *= (l_prev * l_rcp)[:, None] # weight for each value vector
@@ -101,7 +101,7 @@ def _fwd_kernel(#debug, sdz, sdh, sdm, sdn,
     l_curr = tl.sum(p, 1) + l_prev 
 
     l_rcp = 1. / l_curr # rescale operands of matmuls
-    # l_rcp = tl.where((l_rcp == float('inf')), 0, l_rcp)  # ADDITIONAL CHECK IF YOU GET NaNs
+    # l_rcp = tl.where((l_rcp == 9999999), 0, l_rcp)  # ADDITIONAL CHECK IF YOU GET NaNs
     p *= l_rcp[:, None]
     acc *= (l_prev * l_rcp)[:, None] # weight for each value vector
     # update acc
