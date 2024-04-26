@@ -38,7 +38,7 @@
 
 stride=(4096 8192 12288 16384)
 t=(5 1)
-r=(2.5 5.0 7.5 10.0 12.5 15.0)
+r=(5.0 7.5 10.0 12.5 15.0)
 
 for ((si=0; si<${#stride[@]}; si++)); do
     for ((ti=0; ti<${#t[@]}; ti+=1)); do
@@ -71,6 +71,29 @@ for ((si=0; si<${#stride[@]}; si++)); do
         done
     done
 done
+
+PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:32 CUDA_VISIBLE_DEVICES=4 \
+    python -m timber.main.model_eval \
+    --model llama32k \
+    --stride 4096 \
+    --method timber \
+    --k 512 \
+    --block_size_q 32 \
+    --block_size_k 2 \
+    --job ppl \
+    --dense_queries 0 \
+    --ensemble \
+    --ensemble-model-setting random_pruning \
+    --ensemble-method final_attn \
+    --ensemble-method-final intersection \
+    --ensemble-method-final-inter-thresh 1 \
+    --ensemble-method-final-bdd-mask-k 0 \
+    --ensemble-layer-till 32 \
+    --dense_layers 0 \
+    --overwrite \
+    --ensemble-model-n 20 \
+    --count -1 \
+    --ensemble-randomness 2.5
 
 ######### LONG CONTEXT
 
