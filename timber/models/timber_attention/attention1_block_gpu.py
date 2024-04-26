@@ -815,6 +815,7 @@ def hip_attention_mask(
 
     ENSEMBLE_PER_ATTN_ITER_N : int = 5,
     MODEL_I : int = 0,
+    ENSEMBLE_RANDOMNESS : float = 0.5,
     
     USING_SLIDING_WINDOW=True,
     SLIDING_WINDOW_SIZE=128,
@@ -1036,6 +1037,8 @@ def hip_attention_mask(
             
             ENSEMBLE_PER_ATTN_ITER_N,
             MODEL_I,
+            ENSEMBLE_RANDOMNESS,
+
             DEBUG,
         )
         if DEBUG:
@@ -1837,6 +1840,7 @@ def timber_attention(
     ensemble_model_n : int = 5,
     ensemble_particular_layer : int = 0,
     ensemble_layer_till : int = 6,
+    ensemble_randomness : float = 0.5,
 
     layer_id : int = 0,    
     using_sliding_window: bool = True,
@@ -2103,6 +2107,7 @@ def timber_attention(
                     GRID_K_STRIDE=estimated_ksrc_stride,
 
                     ENSEMBLE_PER_ATTN_ITER_N=ensemble_per_attn_iter_n,
+                    # ENSEMBLE_RANDOMNESS = ensemble_randomness
                 )
                 # if os.environ.get('CHECKOUT_ENSEMBLE', '0') == '1':
                 #     os.makedirs(f'./cache/ensemble/llama13b_32k/models/default', exist_ok=True)
@@ -2182,16 +2187,17 @@ def timber_attention(
 
                                         ENSEMBLE_PER_ATTN_ITER_N=ensemble_per_attn_iter_n,
                                         MODEL_I = i,
+                                        ENSEMBLE_RANDOMNESS = ensemble_randomness
                                     )
                                     N_H, TDST_BQ, MASK_K_BK = indices.shape
                                     N_H, TDST_BQ = ks.shape
                                     assert ensemble_attn_mask_per_layer.shape[:-1] == indices.shape
                                     
-                                    # print("* ENSEMBLE: INPUT 32000 IN INDICES WHERE OUT OF RANGE KS") # NOTE
+                                    # print("* ENSEMBLE: INPUT float('inf') IN INDICES WHERE OUT OF RANGE KS") # NOTE
                                     range_tensor = torch.arange(MASK_K_BK, device=indices.device).expand_as(indices)
                                     mask = range_tensor >= ks.unsqueeze(-1)
-                                    assert 32000 > ks.max().item()
-                                    indices[mask] = 32000
+                                    assert float('inf') > ks.max().item()
+                                    indices[mask] = float('inf')
                                     ensemble_attn_mask_per_layer = torch.cat((ensemble_attn_mask_per_layer, indices.unsqueeze(-1)), dim=-1)
                                     
                                     if os.environ.get('CHECKOUT_ENSEMBLE', '0') == '1':
@@ -2213,9 +2219,10 @@ def timber_attention(
                                             'ensemble_per_attn_iter_n' : ensemble_per_attn_iter_n,
                                             'ensemble_model_n' : ensemble_model_n,
                                             'ensemble_particular_layer' : ensemble_particular_layer,
+                                            'ensemble_randomness' : ensemble_randomness,
                                             'layer_id' : layer_id,
                                             'model_i': i,
-                                        }, f'./cache/ensemble/llama13b_32k/models/{ensemble_model_setting}_{ensemble_method}_{ensemble_method_final}/l_{layer_id}_m_{ensemble_model_n}_{i}_pl_{ensemble_per_layer_n}_pat{ensemble_per_attn_iter_n}_ln{ensemble_particular_layer}.pth')
+                                        }, f'./cache/ensemble/llama13b_32k/models/{ensemble_model_setting}_{ensemble_method}_{ensemble_method_final}/l_{layer_id}_m_{ensemble_model_n}_{i}_pl_{ensemble_per_layer_n}_pat{ensemble_per_attn_iter_n}_ln{ensemble_particular_layer}_r{ensemble_randomness}.pth')
                                         print(">>> STORED.")
                                         # input('stored. press enter to continue >>> ')
 
@@ -2240,13 +2247,14 @@ def timber_attention(
                                     ensemble_model_n,
                                     ensemble_particular_layer,
                                     ensemble_attn_mask_per_layer, 
+                                    ensemble_randomness,
 
                                     layer_id,
                                 )
                                 indices = indices.to(q.device)
                                 ks = ks.to(q.device)
 
-                                # NOTE indices: garbage filled with 32000
+                                # NOTE indices: garbage filled with float('inf')
                                 # if os.environ.get('CHECKOUT_ENSEMBLE', '0') == '1':
                                 #     os.makedirs(f'./cache/ensemble/llama13b_32k/method/{ensemble_model_setting}_{ensemble_method}_{ensemble_method_final}', exist_ok=True)
                                 #     torch.save({

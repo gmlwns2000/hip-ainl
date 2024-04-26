@@ -125,6 +125,7 @@ def _masking_iteration_topk(
     stride_keys_vllm_x, 
 
     MODEL_I,
+    ENSEMBLE_RANDOMNESS,
     
     # rope support
     ROPE_METHOD,
@@ -241,7 +242,7 @@ def _masking_iteration_topk(
     if SAMPLING_METHOD == 'random':
         # if ((idx_iteration > 0) and (idx_iteration < (N_ITERATION - 1))):
         if (idx_iteration > 0) and (idx_iteration == (N_ITERATION // 2)):
-            idx_tsrc_block += tl.random.rand(idx_bdst+MODEL_I, idx_tsrc_block) * ((0.5 / (idx_iteration + 1)) / (tl.cdiv(w_new, BLOCK_SIZE_K) + 1.0))
+            idx_tsrc_block += tl.random.rand(idx_bdst+MODEL_I, idx_tsrc_block) * ((ENSEMBLE_RANDOMNESS / (idx_iteration + 1)) / (tl.cdiv(w_new, BLOCK_SIZE_K) + 1.0))
     idx_tsrc_block = (idx_tsrc_block * t_src.to(tl.float32)).to(tl.int64)
     idx_tsrc_block = tl.maximum(0, tl.minimum(t_src - 1, idx_tsrc_block))
     idx_tsrc_block = (idx_tsrc_block // BLOCK_SIZE_K) * BLOCK_SIZE_K
@@ -790,6 +791,7 @@ def _masking_iteration_compute(
     SLIDING_WINDOW_SIZE: tl.constexpr,
     ENSEMBLE_PER_ATTN_ITER_N: tl.constexpr,
     MODEL_I: tl.constexpr,
+    ENSEMBLE_RANDOMNESS : tl.constexpr,
 ):
     idx_n = tl.program_id(2).to(tl.int64)
     
@@ -1099,6 +1101,7 @@ def _masking_iteration_compute(
 
                     # ensemble
                     MODEL_I,
+                    ENSEMBLE_RANDOMNESS,
                     
                     ROPE_METHOD,
                     ROPE_COS, stride_rope_cos_idx, stride_rope_cos_hid,
@@ -1196,6 +1199,7 @@ def _masking_iteration_compute(
 
                     # ensemble
                     MODEL_I,
+                    ENSEMBLE_RANDOMNESS,
                     
                     ROPE_METHOD,
                     ROPE_COS, stride_rope_cos_idx, stride_rope_cos_hid,
@@ -1323,6 +1327,7 @@ def masking_iteration(
     SLIDING_WINDOW_SIZE: int,
     ENSEMBLE_PER_ATTN_ITER_N: int,
     MODEL_I: int = 0,
+    ENSEMBLE_RANDOMNESS : float = 0.5,
     DEBUG: bool = False,
 ):
     if DEBUG:
@@ -1597,6 +1602,7 @@ def masking_iteration(
         SLIDING_WINDOW_SIZE,
         ENSEMBLE_PER_ATTN_ITER_N,
         MODEL_I,
+        ENSEMBLE_RANDOMNESS,
         
         # num_warps=max(2, (min(8, max(BLOCK_TMASK_K//32, 1)) if SPARQ else 4) // GRID_KSTRIDE),
         # num_warps=1,

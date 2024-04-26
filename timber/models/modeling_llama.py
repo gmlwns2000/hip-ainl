@@ -754,6 +754,7 @@ class LlamaCustomAttention(LlamaAttention):
         self.ensemble_model_n = 5
         self.ensemble_particular_layer = None
         self.ensemble_layer_till = 6
+        self.ensemble_randomneses = 0.5
         self.sparsity_per_layer = None
 
         self.tree_reformer = self.tree_performer = None
@@ -912,6 +913,7 @@ class LlamaCustomAttention(LlamaAttention):
             ensemble_model_n = self.ensemble_model_n,
             ensemble_particular_layer = self.ensemble_particular_layer,
             ensemble_layer_till = self.ensemble_layer_till,
+            ensemble_randomness= self.ensemble_randomness,
 
             layer_id = self.layer_idx,
 

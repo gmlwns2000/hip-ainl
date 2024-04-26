@@ -23,6 +23,7 @@ def ensemble_random_pruning(
     ensemble_model_n : int,
     ensemble_particular_layer : int,
     ensemble_attn_mask_per_layer : torch.Tensor, 
+    ensemble_randomness : float,
 
     layer_id : int,
     ):
@@ -57,7 +58,7 @@ def ensemble_random_pruning(
             ensemble_indices_k_size = MASK_K_BK * MODEL_N 
 
         # TODO: Is it better to start plain and concatenate?
-        # ensembled_indices = torch.full((_N_H*TDST_BQ, ensemble_indices_k_size), 32000) # change to (N_H, TDST_BQ, ensemble_indices_k_size)
+        # ensembled_indices = torch.full((_N_H*TDST_BQ, ensemble_indices_k_size), float('inf')) # change to (N_H, TDST_BQ, ensemble_indices_k_size)
 
         # k_size_max = 0
 
@@ -83,7 +84,7 @@ def ensemble_random_pruning(
         cnt_x = torch.cat(cnt_xs, dim=0)
         
         
-        result = torch.full_like(ensemble_attn_mask_per_layer, 32000)
+        result = torch.full_like(ensemble_attn_mask_per_layer, float('inf'))
         result = result.scatter_(1, indices.clamp(0, K-1), ensemble_attn_mask_per_layer)
         
         
@@ -102,7 +103,7 @@ def ensemble_random_pruning(
 
         # torch.Size([4096, 1280]) torch.Size([64, 1280]) torch.Size([4096, 2094])
         # print(result.shape, t.shape, cnt_x.shape)
-        result_cnt = torch.where(result < 32000, cnt_x.gather(-1, t), -9999999)
+        result_cnt = torch.where(result < float('inf'), cnt_x.gather(-1, t), -9999999)
 
         '''
         ensemble_attn_mask_per_layer
@@ -127,11 +128,11 @@ def ensemble_random_pruning(
         ensemble_sorted = result.gather(-1, indices)
         mask = ensemble_cnt_sorted >= ensemble_method_final_inter_thresh
 
-        ensemble_filtered = torch.where(mask, ensemble_sorted, torch.tensor(32000, device=mask.device))
-        ensemble_cnt_filtered = torch.where(mask, ensemble_cnt_sorted, torch.tensor(32000, device=mask.device))
+        ensemble_filtered = torch.where(mask, ensemble_sorted, torch.tensor(float('inf'), device=mask.device))
+        ensemble_cnt_filtered = torch.where(mask, ensemble_cnt_sorted, torch.tensor(float('inf'), device=mask.device))
         
         ## mask_i : where to discard leftovers 
-        filtered_mask = ensemble_filtered == 32000
+        filtered_mask = ensemble_filtered == float('inf')
         # Determine which columns have all rows as -1
         columns_with_all_negative_one = torch.all(filtered_mask, dim=0)
 
@@ -150,9 +151,9 @@ def ensemble_random_pruning(
         ensemble_cnt_filtered = ensemble_cnt_filtered[:, :k_final]
         ensemble_filtered = ensemble_filtered.view(_N_H, TDST_BQ, -1)
 
-        k_mask = ensemble_filtered < 32000
+        k_mask = ensemble_filtered < float('inf')
         ks = k_mask.sum(dim=-1).view(_N_H, TDST_BQ)
-        sparsity_per_layer = torch.sum(ensemble_filtered<32000).item()
+        sparsity_per_layer = torch.sum(ensemble_filtered<float('inf')).item()
         sparsity_ratio = (sparsity_per_layer/origin_sparsity)
 
         # NOTE per_query_token_cnt_diclist is just for analysis
@@ -163,7 +164,7 @@ def ensemble_random_pruning(
                 "initial_cnt" : result_cnt,
                 'sorted_indices' : ensemble_sorted,
                 'sorted_cnt' : ensemble_cnt_sorted,
-                'randomness' : 0.5,
+                'randomness' : ensemble_randomness,
                 'final_indices' : ensemble_filtered,
                 'final_cnt' : ensemble_cnt_filtered
             }, f'./cache/llama/bef_ensb/ensbn{ensemble_model_n}_agreement_0.5.pth')
@@ -176,7 +177,7 @@ def ensemble_random_pruning(
         #     if os.environ.get('ENSEMBLE_AGREE_DICLIST', '0') == '1':
         #         d = dict(zip(unique_ensemble.tolist(), ensemble_cnt.tolist()))
         #         sorted_dic = dict(sorted(d.items(), key=lambda item: item[1], reverse=True))
-        #         sorted_dic.pop(32000, None)
+        #         sorted_dic.pop(float('inf'), None)
         #         per_query_token_cnt_diclist.append(sorted_dic)
         #     #####
 
@@ -198,13 +199,13 @@ def ensemble_random_pruning(
 
         # assert k_size_max <= ensemble_indices_k_size
         # # breakpoint()
-        # assert torch.all(ensembled_indices[:, k_size_max:] == 32000)
+        # assert torch.all(ensembled_indices[:, k_size_max:] == float('inf'))
         # ensembled_indices = ensembled_indices[:, :k_size_max] # TODO : Is undoing better for padding's perspective?
         # ensembled_indices = ensembled_indices.view(_N_H, TDST_BQ, -1)
 
-    # k_mask = ensembled_indices != 32000
+    # k_mask = ensembled_indices != float('inf')
     # ks = k_mask.sum(dim=2)
-    # sparsity_per_layer = torch.sum(ensembled_indices!=32000).item()
+    # sparsity_per_layer = torch.sum(ensembled_indices!=float('inf')).item()
     # sparsity_ratio = (sparsity_per_layer/origin_sparsity)
 
     ########
