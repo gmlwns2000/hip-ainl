@@ -2193,11 +2193,11 @@ def timber_attention(
                                     N_H, TDST_BQ = ks.shape
                                     assert ensemble_attn_mask_per_layer.shape[:-1] == indices.shape
                                     
-                                    # print("* ENSEMBLE: INPUT float('inf') IN INDICES WHERE OUT OF RANGE KS") # NOTE
+                                    # print("* ENSEMBLE: INPUT 9999999 IN INDICES WHERE OUT OF RANGE KS") # NOTE
                                     range_tensor = torch.arange(MASK_K_BK, device=indices.device).expand_as(indices)
                                     mask = range_tensor >= ks.unsqueeze(-1)
-                                    assert float('inf') > ks.max().item()
-                                    indices[mask] = float('inf')
+                                    assert 9999999 > ks.max().item()
+                                    indices[mask] = 9999999
                                     ensemble_attn_mask_per_layer = torch.cat((ensemble_attn_mask_per_layer, indices.unsqueeze(-1)), dim=-1)
                                     
                                     if os.environ.get('CHECKOUT_ENSEMBLE', '0') == '1':
@@ -2254,7 +2254,7 @@ def timber_attention(
                                 indices = indices.to(q.device)
                                 ks = ks.to(q.device)
 
-                                # NOTE indices: garbage filled with float('inf')
+                                # NOTE indices: garbage filled with 9999999
                                 # if os.environ.get('CHECKOUT_ENSEMBLE', '0') == '1':
                                 #     os.makedirs(f'./cache/ensemble/llama13b_32k/method/{ensemble_model_setting}_{ensemble_method}_{ensemble_method_final}', exist_ok=True)
                                 #     torch.save({

@@ -58,7 +58,7 @@ def ensemble_random_pruning(
             ensemble_indices_k_size = MASK_K_BK * MODEL_N 
 
         # TODO: Is it better to start plain and concatenate?
-        # ensembled_indices = torch.full((_N_H*TDST_BQ, ensemble_indices_k_size), float('inf')) # change to (N_H, TDST_BQ, ensemble_indices_k_size)
+        # ensembled_indices = torch.full((_N_H*TDST_BQ, ensemble_indices_k_size), 9999999) # change to (N_H, TDST_BQ, ensemble_indices_k_size)
 
         # k_size_max = 0
 
@@ -84,7 +84,7 @@ def ensemble_random_pruning(
         cnt_x = torch.cat(cnt_xs, dim=0)
         
         
-        result = torch.full_like(ensemble_attn_mask_per_layer, float('inf'))
+        result = torch.full_like(ensemble_attn_mask_per_layer, 9999999)
         result = result.scatter_(1, indices.clamp(0, K-1), ensemble_attn_mask_per_layer)
         
         
@@ -103,7 +103,7 @@ def ensemble_random_pruning(
 
         # torch.Size([4096, 1280]) torch.Size([64, 1280]) torch.Size([4096, 2094])
         # print(result.shape, t.shape, cnt_x.shape)
-        result_cnt = torch.where(result < float('inf'), cnt_x.gather(-1, t), -9999999)
+        result_cnt = torch.where(result < 9999999, cnt_x.gather(-1, t), -9999999)
 
         '''
         ensemble_attn_mask_per_layer
@@ -128,11 +128,11 @@ def ensemble_random_pruning(
         ensemble_sorted = result.gather(-1, indices)
         mask = ensemble_cnt_sorted >= ensemble_method_final_inter_thresh
 
-        ensemble_filtered = torch.where(mask, ensemble_sorted, torch.tensor(float('inf'), device=mask.device))
-        ensemble_cnt_filtered = torch.where(mask, ensemble_cnt_sorted, torch.tensor(float('inf'), device=mask.device))
+        ensemble_filtered = torch.where(mask, ensemble_sorted, torch.tensor(9999999, device=mask.device))
+        ensemble_cnt_filtered = torch.where(mask, ensemble_cnt_sorted, torch.tensor(9999999, device=mask.device))
         
         ## mask_i : where to discard leftovers 
-        filtered_mask = ensemble_filtered == float('inf')
+        filtered_mask = ensemble_filtered == 9999999
         # Determine which columns have all rows as -1
         columns_with_all_negative_one = torch.all(filtered_mask, dim=0)
 
@@ -151,9 +151,9 @@ def ensemble_random_pruning(
         ensemble_cnt_filtered = ensemble_cnt_filtered[:, :k_final]
         ensemble_filtered = ensemble_filtered.view(_N_H, TDST_BQ, -1)
 
-        k_mask = ensemble_filtered < float('inf')
+        k_mask = ensemble_filtered < 9999999
         ks = k_mask.sum(dim=-1).view(_N_H, TDST_BQ)
-        sparsity_per_layer = torch.sum(ensemble_filtered<float('inf')).item()
+        sparsity_per_layer = torch.sum(ensemble_filtered<9999999).item()
         sparsity_ratio = (sparsity_per_layer/origin_sparsity)
 
         # NOTE per_query_token_cnt_diclist is just for analysis
@@ -177,7 +177,7 @@ def ensemble_random_pruning(
         #     if os.environ.get('ENSEMBLE_AGREE_DICLIST', '0') == '1':
         #         d = dict(zip(unique_ensemble.tolist(), ensemble_cnt.tolist()))
         #         sorted_dic = dict(sorted(d.items(), key=lambda item: item[1], reverse=True))
-        #         sorted_dic.pop(float('inf'), None)
+        #         sorted_dic.pop(9999999, None)
         #         per_query_token_cnt_diclist.append(sorted_dic)
         #     #####
 
@@ -199,13 +199,13 @@ def ensemble_random_pruning(
 
         # assert k_size_max <= ensemble_indices_k_size
         # # breakpoint()
-        # assert torch.all(ensembled_indices[:, k_size_max:] == float('inf'))
+        # assert torch.all(ensembled_indices[:, k_size_max:] == 9999999)
         # ensembled_indices = ensembled_indices[:, :k_size_max] # TODO : Is undoing better for padding's perspective?
         # ensembled_indices = ensembled_indices.view(_N_H, TDST_BQ, -1)
 
-    # k_mask = ensembled_indices != float('inf')
+    # k_mask = ensembled_indices != 9999999
     # ks = k_mask.sum(dim=2)
-    # sparsity_per_layer = torch.sum(ensembled_indices!=float('inf')).item()
+    # sparsity_per_layer = torch.sum(ensembled_indices!=9999999).item()
     # sparsity_ratio = (sparsity_per_layer/origin_sparsity)
 
     ########
