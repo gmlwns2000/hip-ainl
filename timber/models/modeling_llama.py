@@ -735,6 +735,7 @@ class LlamaCustomAttention(LlamaAttention):
         self.tree_use_sliding_window = True
         self.tree_sampling_method = 'random'
         self.tree_lp_norm_coeff = 0.5
+        self.tree_stride = -1
 
         self.tree_avgpool_scaler = nn.Sequential(
             nn.Linear(config.hidden_size, config.hidden_size // 4),
@@ -747,7 +748,7 @@ class LlamaCustomAttention(LlamaAttention):
         self.ensemble_model_setting = "random_pruning"
         self.ensemble_method = "final_attn"
         self.ensemble_method_final = "intersection"
-        self.ensemble_method_final_inter_thresh = 1
+        self.ensemble_method_final_inter_thresh = None
         self.ensemble_method_final_bdd_mask_k = 0
         self.ensemble_per_layer_n = 1
         self.ensemble_per_attn_iter_n = 5
@@ -879,6 +880,7 @@ class LlamaCustomAttention(LlamaAttention):
             tree_dense_queries=self.tree_dense_queries,
             tree_last_dense_queries=self.tree_last_dense_queries,
             tree_sampling_method=self.tree_sampling_method,
+            tree_stride=self.tree_stride,
 
             # Latency optimization tweaks
             tree_enable_flash=self.tree_enable_flash,

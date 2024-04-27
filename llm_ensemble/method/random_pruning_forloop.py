@@ -32,7 +32,7 @@ def ensemble_random_pruning(
     assert TDST_BQ == TDST//block_size_q
     # indices : [40, 128, 256] = [N*H, TDST//BLOCK_SIZE_Q, mask_k//BLOCK_SIZE_K]
     assert ensemble_method in ['final_attn']
-    assert ensemble_method_final in ['intersection',]
+    assert ensemble_method_final in ['query',]
 
     origin_sparsity = (torch.sum(ensemble_attn_mask_per_layer < TSRC)//ensemble_model_n).item()
     if ensemble_method == "final_attn":

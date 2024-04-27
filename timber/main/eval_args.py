@@ -22,7 +22,7 @@ class ArgsType:
     ensemble_model_setting : str = "random_pruning"
     ensemble_method : str = "final_attn"
     ensemble_method_final : str = "intersection"
-    ensemble_method_final_inter_thresh : int = 1
+    ensemble_method_final_inter_thresh : int = None
     ensemble_method_final_bdd_mask_k : int = 0
     ensemble_per_layer_n : int = 1
     ensemble_per_attn_iter_n : int = 5
@@ -63,8 +63,8 @@ def eval_args(
     parser.add_argument('--ensemble', action='store_true')
     parser.add_argument('--ensemble-model-setting', type=str, default='random_pruning')
     parser.add_argument('--ensemble-method', type=str, default='final_attn')
-    parser.add_argument('--ensemble-method-final', type=str, default='intersection')
-    parser.add_argument('--ensemble-method-final-inter-thresh', type=int, default=1) # union
+    parser.add_argument('--ensemble-method-final', type=str, default='query')
+    parser.add_argument('--ensemble-method-final-inter-thresh', type=int, default=None) # union
     parser.add_argument('--ensemble-method-final-bdd-mask-k', type=int, default=0)
 
     parser.add_argument('--ensemble-per-layer-n', type=int, default=1)

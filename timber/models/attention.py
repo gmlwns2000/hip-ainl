@@ -19,6 +19,7 @@ def custom_attention(
         tree_k=512, tree_block_size_q=32, tree_block_size_k=2,
         tree_dense_queries=0, tree_last_dense_queries=0,
         tree_sampling_method='first',
+        tree_stride = -1,
 
         # Latency optimization tweaks
         tree_enable_flash=False, tree_enable_sparq=False, tree_use_sliding_window=False,
@@ -36,7 +37,7 @@ def custom_attention(
         ensemble_model_setting = "random_pruning",
         ensemble_method = "final_attn",
         ensemble_method_final = "intersection",
-        ensemble_method_final_inter_thresh = 1,
+        ensemble_method_final_inter_thresh = None,
         ensemble_method_final_bdd_mask_k = 0,
         ensemble_per_layer_n = 1,
         ensemble_per_attn_iter_n = 5,
@@ -192,6 +193,7 @@ def custom_attention(
                 block_size_q=tree_block_size_q,
                 block_size_k=tree_block_size_k,
                 dense_queries_exp=tree_dense_queries,
+
                 rope_method=tree_rope_method,
                 rope_cos=rope_cos.squeeze(0) if rope_cos is not None else None,
                 rope_sin=rope_sin.squeeze(0) if rope_sin is not None else None,
@@ -305,7 +307,8 @@ def custom_attention(
                     'ensemble_layer_till' : ensemble_layer_till,
                     'ensemble_randomness' : ensemble_randomness,
                     'layer_id' : layer_id,
-                }, f'./cache/llama/ensemble/qkvout_ensbn{ensemble_model_n}_mft{ensemble_method_final_inter_thresh}_bmk{ensemble_method_final_bdd_mask_k}_lt{ensemble_layer_till}_l{layer_id}.pth')
+                    'stride' : tree_stride
+                }, f'./cache/llama/ensemble/qkvout_s{tree_stride}_k{tree_k}_ensbn{ensemble_model_n}_{ensemble_method_final}_mft{ensemble_method_final_inter_thresh}_bmk{ensemble_method_final_bdd_mask_k}_lt{ensemble_layer_till}_l{layer_id}.pth')
             else:
                 # breakpoint()
                 os.makedirs('./cache/llama/default', exist_ok=True)
@@ -323,7 +326,7 @@ def custom_attention(
                     'bk' : tree_block_size_k,
                     'ensemble' : ensemble,
                     'layer_id' : layer_id,
-                }, f'./cache/llama/default/qkvout_k{tree_k}_l{layer_id}.pth')
+                }, f'./cache/llama/default/qkvout_s{tree_stride}_k{tree_k}_l{layer_id}.pth')
 
             # input('stored. press enter to continue >>> ')
 

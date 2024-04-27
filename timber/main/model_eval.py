@@ -163,6 +163,7 @@ def load_model(args):
             m.tree_block_size_k = args.block_size_k
             m.tree_using_context_avg = True
             m.tree_dense_queries = args.dense_queries
+            m.tree_stride = args.stride
 
             m.sampling_method = args.sampling_method
 

@@ -34,7 +34,7 @@ def ensemble_random_pruning(
     assert TDST_BQ == TDST//block_size_q
     # indices : [40, 128, 256] = [N*H, TDST//BLOCK_SIZE_Q, mask_k//BLOCK_SIZE_K]
     assert ensemble_method in ['final_attn']
-    assert ensemble_method_final in ['intersection',]
+    assert ensemble_method_final in ['query',]
 
     origin_sparsity = (torch.sum(ensemble_attn_mask_per_layer < TSRC)//ensemble_model_n).item()
     if ensemble_method == "final_attn":
@@ -66,90 +66,104 @@ def ensemble_random_pruning(
         if os.environ.get('ENSEMBLE_AGREE_DICLIST', '0') == '1':
             per_query_token_cnt_diclist = []
         
-        # ensemble_attn_mask_per_layer [40, 128, 256, 5] to [N*H * TDST//BLOCK_SIZE_Q, mask_k//BLOCK_SIZE_K * ensemble_model_n]
-        ensemble_attn_mask_per_layer = ensemble_attn_mask_per_layer.view(_N_H * TDST_BQ, MASK_K_BK * MODEL_N)
-        # ensemble_attn_mask_per_layer : [N*H * TDST//BLOCK_SIZE_Q, mask_k//BLOCK_SIZE_K * ensemble_model_n]
-        unique_x, indices, unique_cnt = torch.unique(ensemble_attn_mask_per_layer, return_inverse=True, sorted=False, return_counts=True)
-        # indices -= indices.min(dim=1, keepdims=True)[0]
+        if ensemble_method_final == 'intersection' or ensemble_method_final == "query":
+            # ensemble_attn_mask_per_layer [40, 128, 256, 5] to [N*H * TDST//BLOCK_SIZE_Q, mask_k//BLOCK_SIZE_K * ensemble_model_n]
+            ensemble_attn_mask_per_layer = ensemble_attn_mask_per_layer.view(_N_H * TDST_BQ, MASK_K_BK * MODEL_N)
+            # ensemble_attn_mask_per_layer : [N*H * TDST//BLOCK_SIZE_Q, mask_k//BLOCK_SIZE_K * ensemble_model_n]
+            unique_x, indices, unique_cnt = torch.unique(ensemble_attn_mask_per_layer, return_inverse=True, sorted=False, return_counts=True)
+            # indices -= indices.min(dim=1, keepdims=True)[0]
+            
+            # cnt_x = (unique_x[None, None, :] == ensemble_attn_mask_per_layer[:, :, None]).long().sum(1)
+            N, K = ensemble_attn_mask_per_layer.shape
+
+            cnt_xs = []
+            chunk_n = 64
+            for icn in range(int(math.ceil(N / chunk_n))):
+                cnt_xs.append(
+                    (unique_x[None, None, :] == ensemble_attn_mask_per_layer[icn*chunk_n:icn*chunk_n+chunk_n, :, None]).long().sum(1)
+                )
+            cnt_x = torch.cat(cnt_xs, dim=0)
+            
+            
+            result = torch.full_like(ensemble_attn_mask_per_layer, 9999999)
+            result = result.scatter_(1, indices.clamp(0, K-1), ensemble_attn_mask_per_layer)
+            
+            
+            # t = result[:, :, None] == unique_x[None, None, :]
+            # t = t * torch.arange(len(unique_x), device=t.device)[None, None, :]
+            # t = t.sum(-1)
+            N, K = result.shape
+            ts = []
+            chunk_n = 64
+            for icn in range(int(math.ceil(N / chunk_n))):
+                t = result[icn*chunk_n:icn*chunk_n+chunk_n, :, None] == unique_x[None, None, :]
+                t = t * torch.arange(len(unique_x), device=t.device)[None, None, :]
+                t = t.sum(-1)
+                ts.append(t)
+            t = torch.cat(ts, dim=0)
+
+            # torch.Size([4096, 1280]) torch.Size([64, 1280]) torch.Size([4096, 2094])
+            # print(result.shape, t.shape, cnt_x.shape)
+            result_cnt = torch.where(result < 9999999, cnt_x.gather(-1, t), -9999999)
+
+            '''
+            ensemble_attn_mask_per_layer
+            tensor([[1, 1, 3, 3, 3, 5],\
+                    [3, 3, 4, 4, 4, 4]])
+            ensemble_cnt_sorted
+            tensor([[       6,        4,        3,        3,        2,        1,        1,
+            -9999999, -9999999, -9999999, -9999999, -9999999, -9999999, -9999999,
+            -9999999, -9999999, -9999999, -9999999, -9999999, -9999999],\
+            [       6,        4,        3,        3,        2,        2, -9999999,
+            -9999999, -9999999, -9999999, -9999999, -9999999, -9999999, -9999999,
+            -9999999, -9999999, -9999999, -9999999, -9999999, -9999999]])
+            ensemble_sorted
+            tensor([[   10,     6,     3,     8,     1,     5,    11, 32000, 32000, 32000,
+            32000, 32000, 32000, 32000, 32000, 32000, 32000, 32000, 32000, 32000],\
+            [    5,     4,     7,     9,     6,     3, 32000, 32000, 32000, 32000,
+            32000, 32000, 32000, 32000, 32000, 32000, 32000, 32000, 32000, 32000]]))
+            '''
+            # ensemble_sorted : [N*H * TDST//BLOCK_SIZE_Q, mask_k//BLOCK_SIZE_K * ensemble_model_n]
+            # ensemble_cnt_sorted : [N*H * TDST//BLOCK_SIZE_Q, mask_k//BLOCK_SIZE_K * ensemble_model_n]
+            ensemble_cnt_sorted, indices = torch.sort(result_cnt, dim=-1, descending=True)
+            ensemble_sorted = result.gather(-1, indices)
+            if ensemble_method_final_inter_thresh == None and ensemble_method_final_bdd_mask_k == 1:
+                ensemble_filtered = ensemble_sorted
+                ensemble_cnt_filtered = ensemble_cnt_sorted
+            else:
+                mask = ensemble_cnt_sorted >= ensemble_method_final_inter_thresh
+
+                ensemble_filtered = torch.where(mask, ensemble_sorted, torch.tensor(9999999, device=mask.device))
+                ensemble_cnt_filtered = torch.where(mask, ensemble_cnt_sorted, torch.tensor(9999999, device=mask.device))
+                
+            ## mask_i : where to discard leftovers 
+            filtered_mask = ensemble_filtered == 9999999
+            # Determine which columns have all rows as -1
+            columns_with_all_negative_one = torch.all(filtered_mask, dim=0)
+
+            # Get the first index where all rows have -1
+            nonzero_indices = torch.nonzero(columns_with_all_negative_one, as_tuple=True)
+
+            # If there are any such columns, find the first one
+            if len(nonzero_indices[0]) > 0:
+                mask_k_i = nonzero_indices[0][0].item()
+                k_final = min(mask_k_i, ensemble_indices_k_size)
+            else:
+                mask_k_i = -1  # If no such index is found
+                k_final = ensemble_indices_k_size # CHECK - is it min(ensemble_indices_k_size, ensemble_filtered.shape[1])
+
+            ensemble_filtered = ensemble_filtered[:, :k_final] # TODO is this meaningful??
+            ensemble_cnt_filtered = ensemble_cnt_filtered[:, :k_final]
+            ensemble_filtered = ensemble_filtered.view(_N_H, TDST_BQ, -1)
+        elif ensemble_method_final == "time_dim":
+            pass
+            # assert ensemble_method_final_timedim != None
         
-        # cnt_x = (unique_x[None, None, :] == ensemble_attn_mask_per_layer[:, :, None]).long().sum(1)
-        N, K = ensemble_attn_mask_per_layer.shape
+        elif ensemble_method_final == "head":
+            pass
+        elif ensemble_method_final == "batch":
+            pass
 
-        cnt_xs = []
-        chunk_n = 64
-        for icn in range(int(math.ceil(N / chunk_n))):
-            cnt_xs.append(
-                (unique_x[None, None, :] == ensemble_attn_mask_per_layer[icn*chunk_n:icn*chunk_n+chunk_n, :, None]).long().sum(1)
-            )
-        cnt_x = torch.cat(cnt_xs, dim=0)
-        
-        
-        result = torch.full_like(ensemble_attn_mask_per_layer, 9999999)
-        result = result.scatter_(1, indices.clamp(0, K-1), ensemble_attn_mask_per_layer)
-        
-        
-        # t = result[:, :, None] == unique_x[None, None, :]
-        # t = t * torch.arange(len(unique_x), device=t.device)[None, None, :]
-        # t = t.sum(-1)
-        N, K = result.shape
-        ts = []
-        chunk_n = 64
-        for icn in range(int(math.ceil(N / chunk_n))):
-            t = result[icn*chunk_n:icn*chunk_n+chunk_n, :, None] == unique_x[None, None, :]
-            t = t * torch.arange(len(unique_x), device=t.device)[None, None, :]
-            t = t.sum(-1)
-            ts.append(t)
-        t = torch.cat(ts, dim=0)
-
-        # torch.Size([4096, 1280]) torch.Size([64, 1280]) torch.Size([4096, 2094])
-        # print(result.shape, t.shape, cnt_x.shape)
-        result_cnt = torch.where(result < 9999999, cnt_x.gather(-1, t), -9999999)
-
-        '''
-        ensemble_attn_mask_per_layer
-        tensor([[1, 1, 3, 3, 3, 5],\
-                [3, 3, 4, 4, 4, 4]])
-        ensemble_cnt_sorted
-        tensor([[       6,        4,        3,        3,        2,        1,        1,
-          -9999999, -9999999, -9999999, -9999999, -9999999, -9999999, -9999999,
-          -9999999, -9999999, -9999999, -9999999, -9999999, -9999999],\
-         [       6,        4,        3,        3,        2,        2, -9999999,
-          -9999999, -9999999, -9999999, -9999999, -9999999, -9999999, -9999999,
-          -9999999, -9999999, -9999999, -9999999, -9999999, -9999999]])
-        ensemble_sorted
-         tensor([[   10,     6,     3,     8,     1,     5,    11, 32000, 32000, 32000,
-          32000, 32000, 32000, 32000, 32000, 32000, 32000, 32000, 32000, 32000],\
-         [    5,     4,     7,     9,     6,     3, 32000, 32000, 32000, 32000,
-          32000, 32000, 32000, 32000, 32000, 32000, 32000, 32000, 32000, 32000]]))
-        '''
-        # ensemble_sorted : [N*H * TDST//BLOCK_SIZE_Q, mask_k//BLOCK_SIZE_K * ensemble_model_n]
-        # ensemble_cnt_sorted : [N*H * TDST//BLOCK_SIZE_Q, mask_k//BLOCK_SIZE_K * ensemble_model_n]
-        ensemble_cnt_sorted, indices = torch.sort(result_cnt, dim=-1, descending=True)
-        ensemble_sorted = result.gather(-1, indices)
-        mask = ensemble_cnt_sorted >= ensemble_method_final_inter_thresh
-
-        ensemble_filtered = torch.where(mask, ensemble_sorted, torch.tensor(9999999, device=mask.device))
-        ensemble_cnt_filtered = torch.where(mask, ensemble_cnt_sorted, torch.tensor(9999999, device=mask.device))
-        
-        ## mask_i : where to discard leftovers 
-        filtered_mask = ensemble_filtered == 9999999
-        # Determine which columns have all rows as -1
-        columns_with_all_negative_one = torch.all(filtered_mask, dim=0)
-
-        # Get the first index where all rows have -1
-        nonzero_indices = torch.nonzero(columns_with_all_negative_one, as_tuple=True)
-
-        # If there are any such columns, find the first one
-        if len(nonzero_indices[0]) > 0:
-            mask_k_i = nonzero_indices[0][0].item()
-            k_final = min(mask_k_i, ensemble_indices_k_size)
-        else:
-            mask_k_i = -1  # If no such index is found
-            k_final = ensemble_indices_k_size
-
-        ensemble_filtered = ensemble_filtered[:, :k_final] # TODO is this meaningful??
-        ensemble_cnt_filtered = ensemble_cnt_filtered[:, :k_final]
-        ensemble_filtered = ensemble_filtered.view(_N_H, TDST_BQ, -1)
 
         k_mask = ensemble_filtered < 9999999
         ks = k_mask.sum(dim=-1).view(_N_H, TDST_BQ)

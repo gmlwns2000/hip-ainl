@@ -1833,7 +1833,7 @@ def timber_attention(
     ensemble_model_setting : str = "random_pruning",
     ensemble_method :str = "final_attn",
     ensemble_method_final : str = "intersection",
-    ensemble_method_final_inter_thresh : int = 1,
+    ensemble_method_final_inter_thresh : int = None,
     ensemble_method_final_bdd_mask_k : int = 0,
     ensemble_per_layer_n : int = 1,
     ensemble_per_attn_iter_n : int = 5,
@@ -2147,7 +2147,7 @@ def timber_attention(
                     assert ensemble_method in ['final_attn', ] # TODO 'per_attn_iteration'
                     if ensemble_model_setting == "random_pruning":
                         if ensemble_method == 'final_attn':
-                            assert ensemble_method_final in ['intersection',]
+                            assert ensemble_method_final in ['query',]
                             if (ensemble_layer_till != None and layer_id < ensemble_layer_till) or (ensemble_layer_till == None and (layer_id) == ensemble_particular_layer) or (ensemble_layer_till == None and ensemble_particular_layer == None and (layer_id+1) % ensemble_per_layer_n == 0):
                                 real_ensemble = True
                                 ensemble_attn_mask_per_layer = torch.empty((N, T_DST//block_size_q, mask_k//block_size_k, 0), device=q.device)
