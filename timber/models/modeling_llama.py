@@ -863,6 +863,63 @@ class LlamaCustomAttention(LlamaAttention):
         # plt.colorbar()
         # plt.savefig('dump.png')
         # input('b')
+        # os.makedirs('./cache/stride_debug/', exist_ok=True)
+        # torch.save({
+        #     'query_states': query_states, 
+        #     'key_states': key_states, 
+        #     'value_states': value_states,
+        #     'attention_mask': attention_mask, 
+        #     'causal_mask': causal_mask,
+        #     'attention_dropout': 0.0,
+
+        #     # Attention method
+        #     'attention_method': self.attention_method,  # 'none', 'reformer', 'performer', 'timber'
+        #     'tree_reformer': self.tree_reformer, 
+        #     'tree_performer': self.tree_performer,
+
+        #     # Timber parameters
+        #     'tree_k': mask_k, 
+        #     'tree_block_size_q': self.tree_block_size_q, 
+        #     'tree_block_size_k': self.tree_block_size_k,
+        #     'tree_dense_queries': self.tree_dense_queries, 
+        #     'tree_last_dense_queries': self.tree_last_dense_queries,
+        #     'tree_sampling_method': self.tree_sampling_method,
+        #     'tree_stride': self.tree_stride,
+
+        #     # Latency optimization tweaks
+        #     'tree_enable_flash': self.tree_enable_flash, 
+        #     'tree_enable_sparq': self.tree_enable_sparq, 
+        #     'tree_use_sliding_window': self.tree_use_sliding_window,
+
+        #     # Context averaging parameters
+        #     'tree_using_context_avg': self.tree_using_context_avg, 
+        #     # 'tree_avgpool_scaler': self.tree_avgpool_scaler, 
+        #     'last_cumsum': last_cumsum, 
+        #     'hidden_states': hidden_states,
+
+        #     # RoPE parameters
+        #     'tree_rope_method': self.tree_rope_method, 
+        #     'rope_cos': cos, 'rope_sin': sin, 'position_ids': position_ids,
+
+        #     # Attention sparsity loss
+        #     'output_attn_sparsity_loss': output_attn_sparsity_loss, 'tree_lp_norm_coeff': self.tree_lp_norm_coeff,
+
+        #     'ensemble': self.ensemble,
+        #     'ensemble_model_setting': self.ensemble_model_setting,
+        #     'ensemble_method': self.ensemble_method,
+        #     'ensemble_method_final': self.ensemble_method_final,
+        #     'ensemble_method_final_inter_thresh': self.ensemble_method_final_inter_thresh,
+        #     'ensemble_method_final_bdd_mask_k': self.ensemble_method_final_bdd_mask_k,
+        #     'ensemble_per_layer_n': self.ensemble_per_layer_n,
+        #     'ensemble_per_attn_iter_n': self.ensemble_per_attn_iter_n,
+        #     'ensemble_model_n': self.ensemble_model_n,
+        #     'ensemble_particular_layer': self.ensemble_particular_layer,
+        #     'ensemble_layer_till': self.ensemble_layer_till,
+        #     'ensemble_randomness': self.ensemble_randomness,
+
+        #     'layer_id': self.layer_idx,
+        # }, f'./cache/stride_debug/s{self.tree_stride}.pth')
+        # input('>>> ')
 
         attn_output, cur_cumsum, attn_sparsity_loss, sparsity = custom_attention(
             query_states=query_states, key_states=key_states, value_states=value_states,

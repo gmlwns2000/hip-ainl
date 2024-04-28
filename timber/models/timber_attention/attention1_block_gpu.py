@@ -1860,6 +1860,65 @@ def timber_attention(
     precomputed_indices: Tensor = None,
     precomputed_ks: Tensor = None,
 ):
+    # os.makedirs('./cache/stride_debug/', exist_ok=True)
+    # torch.save({
+    #     'q': q, 
+    #     'k': k, 
+    #     'v': v,
+    #     'attention_mask': attention_mask, 
+    #     'w_start': w_start,
+    #     'n_patches': n_patches,
+
+    #     # Attention method
+    #     'mask_k': mask_k,  # 'none', 'reformer', 'performer', 'timber'
+    #     'scale_up': scale_up, 
+    #     'is_causal': is_causal,
+
+    #     # Timber parameters
+    #     'block_size_q': block_size_q, 
+    #     'block_size_k': block_size_k, 
+    #     'reduce_method': reduce_method,
+    #     'reduce_stride': reduce_stride, 
+    #     'chunking': chunking,
+    #     'chunk_size': chunk_size,
+    #     'is_flash': is_flash,
+
+    #     # Latency optimization tweaks
+    #     'enable_sparq': enable_sparq, 
+    #     'sampling_method': sampling_method, 
+
+    #     'ensemble': ensemble,
+    #     'ensemble_model_setting': ensemble_model_setting,
+    #     'ensemble_method': ensemble_method,
+    #     'ensemble_method_final': ensemble_method_final,
+    #     'ensemble_method_final_inter_thresh': ensemble_method_final_inter_thresh,
+    #     'ensemble_method_final_bdd_mask_k': ensemble_method_final_bdd_mask_k,
+    #     'ensemble_per_layer_n': ensemble_per_layer_n,
+    #     'ensemble_per_attn_iter_n': ensemble_per_attn_iter_n,
+    #     'ensemble_model_n': ensemble_model_n,
+    #     'ensemble_particular_layer': ensemble_particular_layer,
+    #     'ensemble_layer_till': ensemble_layer_till,
+    #     'ensemble_randomness': ensemble_randomness,
+
+    #     'layer_id': layer_id,
+    #     'using_sliding_window': using_sliding_window,
+    #     'sliding_window_size': sliding_window_size,
+        
+    #     'dense_queries_exp': dense_queries_exp,
+        
+    #     'rope_method': rope_method,
+    #     'rope_cos': rope_cos,
+    #     'rope_sin': rope_sin,
+    #     'position_ids': position_ids,
+        
+    #     'self_extend_scale': self_extend_scale,
+    #     'self_extend_window': self_extend_window,
+        
+    #     'using_precomputed_mask': using_precomputed_mask,
+    #     'precomputed_indices': precomputed_indices,
+    #     'precomputed_ks': precomputed_ks,
+    # }, f'./cache/stride_debug/s16384.pth')
+    # input('>>> ')
     assert sampling_method in ['random', 'first']
     
     if q.requires_grad:
@@ -2150,7 +2209,7 @@ def timber_attention(
                             assert ensemble_method_final in ['query',]
                             if (ensemble_layer_till != None and layer_id < ensemble_layer_till) or (ensemble_layer_till == None and (layer_id) == ensemble_particular_layer) or (ensemble_layer_till == None and ensemble_particular_layer == None and (layer_id+1) % ensemble_per_layer_n == 0):
                                 real_ensemble = True
-                                ensemble_attn_mask_per_layer = torch.empty((N, T_DST//block_size_q, mask_k//block_size_k, 0), device=q.device)
+                                ensemble_attn_mask_per_layer = torch.empty((N, T_DST//block_size_q, mask_k//block_size_k, 0), device=q.device, dtype=torch.int64)
                                 for i in range(ensemble_model_n):
                                     indices, ks = hip_attention_mask( # indices, ks, probs_or_context, scores
                                         queries=q,
@@ -2192,12 +2251,19 @@ def timber_attention(
                                     N_H, TDST_BQ, MASK_K_BK = indices.shape
                                     N_H, TDST_BQ = ks.shape
                                     assert ensemble_attn_mask_per_layer.shape[:-1] == indices.shape
-                                    
+                                    # os.makedirs('./cache/stride_debug/', exist_ok=True)
+                                    # torch.save({
+                                    #     # ks : torch.Tensor,
+                                    # 'indices' : indices,
+                                    # 'ks' : ks
+                                    # }, f'./cache/stride_debug/hip_attention{i}_s16384.pth')
+                                    # input('hip >>> ')
                                     # print("* ENSEMBLE: INPUT 9999999 IN INDICES WHERE OUT OF RANGE KS") # NOTE
-                                    range_tensor = torch.arange(MASK_K_BK, device=indices.device).expand_as(indices)
+                                    range_tensor = torch.arange(MASK_K_BK, device=indices.device)[None, None, :]
                                     mask = range_tensor >= ks.unsqueeze(-1)
                                     assert 9999999 > ks.max().item()
-                                    indices[mask] = 9999999
+                                    # indices[mask] = 9999999
+                                    indices.masked_fill_(mask, 9999999)
                                     ensemble_attn_mask_per_layer = torch.cat((ensemble_attn_mask_per_layer, indices.unsqueeze(-1)), dim=-1)
                                     
                                     if os.environ.get('CHECKOUT_ENSEMBLE', '0') == '1':

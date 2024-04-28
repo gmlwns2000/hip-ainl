@@ -49,6 +49,64 @@ def custom_attention(
         layer_id = 0,
 
 ):
+    # os.makedirs('./cache/stride_debug/', exist_ok=True)
+    # torch.save({
+    #     'query_states': query_states, 
+    #     'key_states': key_states, 
+    #     'value_states': value_states,
+    #     'attention_mask': attention_mask, 
+    #     'causal_mask': causal_mask,
+    #     'attention_dropout': attention_dropout,
+
+    #     # Attention method
+    #     'attention_method': attention_method,  # 'none', 'reformer', 'performer', 'timber'
+    #     'tree_reformer': tree_reformer, 
+    #     'tree_performer': tree_performer,
+
+    #     # Timber parameters
+    #     'tree_k': tree_k, 
+    #     'tree_block_size_q': tree_block_size_q, 
+    #     'tree_block_size_k': tree_block_size_k,
+    #     'tree_dense_queries': tree_dense_queries, 
+    #     'tree_last_dense_queries': tree_last_dense_queries,
+    #     'tree_sampling_method': tree_sampling_method,
+    #     'tree_stride': tree_stride,
+
+    #     # Latency optimization tweaks
+    #     'tree_enable_flash': tree_enable_flash, 
+    #     'tree_enable_sparq': tree_enable_sparq, 
+    #     'tree_use_sliding_window': tree_use_sliding_window,
+
+    #     # Context averaging parameters
+    #     'tree_using_context_avg': tree_using_context_avg, 
+    #     'tree_avgpool_scaler': tree_avgpool_scaler, 
+    #     'last_cumsum': last_cumsum, 
+    #     'hidden_states': hidden_states,
+
+    #     # RoPE parameters
+    #     'tree_rope_method': tree_rope_method, 
+    #     'rope_cos': rope_cos, 'rope_sin': rope_sin, 'position_ids': position_ids,
+
+    #     # Attention sparsity loss
+    #     'output_attn_sparsity_loss': output_attn_sparsity_loss, 'tree_lp_norm_coeff': tree_lp_norm_coeff,
+
+    #     'ensemble': ensemble,
+    #     'ensemble_model_setting': ensemble_model_setting,
+    #     'ensemble_method': ensemble_method,
+    #     'ensemble_method_final': ensemble_method_final,
+    #     'ensemble_method_final_inter_thresh': ensemble_method_final_inter_thresh,
+    #     'ensemble_method_final_bdd_mask_k': ensemble_method_final_bdd_mask_k,
+    #     'ensemble_per_layer_n': ensemble_per_layer_n,
+    #     'ensemble_per_attn_iter_n': ensemble_per_attn_iter_n,
+    #     'ensemble_model_n': ensemble_model_n,
+    #     'ensemble_particular_layer': ensemble_particular_layer,
+    #     'ensemble_layer_till': ensemble_layer_till,
+    #     'ensemble_randomness': ensemble_randomness,
+
+    #     'layer_id': layer_id,
+    # }, f'./cache/stride_debug/s{tree_stride}.pth')
+    # input('>>> ')
+    
     """
     @param query_states: (N, H, TDST, HID)
     @param key_states: (N, H, TSRC, HID)

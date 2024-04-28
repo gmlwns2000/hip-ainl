@@ -18,22 +18,21 @@ stride=( 16384) # 12288
 #       --count -1
 
 #   # llama13b_32k default
-for ((si=0; si<${#stride[@]}; si++)); do
-  PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:32 CUDA_VISIBLE_DEVICES=4 \
-  python -m timber.main.model_eval \
-      --model llama32k \
-      --stride "${stride[si]}" \
-      --method timber \
-      --k 512 \
-      --block_size_q 32 \
-      --block_size_k 2 \
-      --job ppl \
-      --dense_queries 0 \
-      --dense_layers 0 \
-      --overwrite \
-      --count 1 \
-      --ensemble-randomness 0.5
-done
+# for ((si=0; si<${#stride[@]}; si++)); do
+#   PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:32 CUDA_VISIBLE_DEVICES=4 \
+#   python -m timber.main.model_eval \
+#       --model llama32k \
+#       --stride "${stride[si]}" \
+#       --method timber \
+#       --k 512 \
+#       --block_size_q 32 \
+#       --block_size_k 2 \
+#       --job ppl \
+#       --dense_queries 0 \
+#       --dense_layers 0 \
+#       --overwrite \
+#       --count 1
+# done
 
 # ensemble loop : TODO change thresh hardcoded as 5
 # for ((thresh=5; thresh>0; thresh--)); do

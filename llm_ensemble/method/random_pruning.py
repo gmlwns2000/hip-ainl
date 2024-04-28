@@ -27,6 +27,33 @@ def ensemble_random_pruning(
 
     layer_id : int,
     ):
+    # os.makedirs('./cache/stride_debug/', exist_ok=True)
+    # torch.save({
+    #     # ks : torch.Tensor,
+    # 'q_timber': q_timber,
+    # 'k': k,
+    # 'v' : v,
+    # 'mask_k' : mask_k,
+    # 'block_size_q' : block_size_q,
+    # 'block_size_k' : block_size_k,
+
+    # 'ensemble' : ensemble,
+    # 'ensemble_model_setting' : ensemble_model_setting,
+    # 'ensemble_method' : ensemble_method, 
+    # 'ensemble_method_final' : ensemble_method_final,
+    # 'ensemble_method_final_inter_thresh' : ensemble_method_final_inter_thresh,
+    # 'ensemble_method_final_bdd_mask_k' : ensemble_method_final_bdd_mask_k,
+    # 'ensemble_per_layer_n' : ensemble_per_layer_n,
+    # 'ensemble_per_attn_iter_n' : ensemble_per_attn_iter_n,
+    # 'ensemble_model_n' : ensemble_model_n,
+    # 'ensemble_particular_layer' : ensemble_particular_layer,
+    # 'ensemble_attn_mask_per_layer' : ensemble_attn_mask_per_layer, 
+    # 'ensemble_randomness' : ensemble_randomness,
+
+    # 'layer_id' : layer_id,
+    # }, f'./cache/stride_debug/random_pruning_s16384.pth')
+    # input('rand >>> ')
+
     N_H, TDST, HID = q_timber.shape
     _, TSRC, _ = k.shape
     _N_H, TDST_BQ, MASK_K_BK, MODEL_N = ensemble_attn_mask_per_layer.shape
@@ -85,8 +112,8 @@ def ensemble_random_pruning(
             cnt_x = torch.cat(cnt_xs, dim=0)
             
             
-            result = torch.full_like(ensemble_attn_mask_per_layer, 9999999)
-            result = result.scatter_(1, indices.clamp(0, K-1), ensemble_attn_mask_per_layer)
+            result = torch.full((N, unique_x.shape[0]), 9999999, device=indices.device, dtype=torch.int64)
+            result = result.scatter_(1, indices, ensemble_attn_mask_per_layer)
             
             
             # t = result[:, :, None] == unique_x[None, None, :]
