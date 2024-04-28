@@ -36,16 +36,16 @@
 # # ensemble loop : TODO change thresh hardcoded as 5
 # # for ((thresh=5; thresh>0; thresh--)); do
 
-stride=(4096 8192 12288 16384)
+stride=(12288 16384) # 4096 8192 
 t=(1)
-r=(2.5 5.0 7.5 10.0 12.5 15.0)
+r=(7.5 10.0 12.5 2.5 0.5 15.0)
 
-for ((si=0; si<${#stride[@]}; si++)); do
+for ((bdd=0; bdd<=1; bdd++)); do
+    for ((si=0; si<${#stride[@]}; si++)); do
     # for ((ti=0; ti<${#t[@]}; ti+=1)); do
     # for ((layer_till=5; layer_till<26; layer_till+=5)); do
-    for ((bdd=1; bdd>0; bdd--)); do
         for ((ri=0; ri<${#r[@]}; ri++)); do
-        PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:32 CUDA_VISIBLE_DEVICES=4 \
+        PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True CUDA_VISIBLE_DEVICES=4 \
         python -m timber.main.model_eval \
         --model llama32k \
         --stride "${stride[si]}" \
@@ -85,7 +85,7 @@ done
 #     --ensemble \
 #     --ensemble-model-setting random_pruning \
 #     --ensemble-method final_attn \
-#     --ensemble-method-final intersection \
+#     --ensemble-method-final query \
 #     --ensemble-method-final-inter-thresh 1 \
 #     --ensemble-method-final-bdd-mask-k 0 \
 #     --ensemble-layer-till 32 \
@@ -112,7 +112,7 @@ done
 #     --ensemble \
 #     --ensemble-model-setting random_pruning \
 #     --ensemble-method final_attn \
-#     --ensemble-method-final intersection \
+#     --ensemble-method-final query \
 #     --ensemble-method-final-inter-thresh 1 \
 #     --ensemble-method-final-bdd-mask-k "${bdd}" \
 #     --ensemble-layer-till 32 \
@@ -136,7 +136,7 @@ done
 #         --ensemble \
 #         --ensemble-model-setting random_pruning \
 #         --ensemble-method final_attn \
-#         --ensemble-method-final intersection \
+#         --ensemble-method-final query \
 #         --ensemble-method-final-inter-thresh 1 \
 #         --ensemble-method-final-bdd-mask-k "${bdd}" \
 #         --ensemble-layer-till "${layer_till}" \

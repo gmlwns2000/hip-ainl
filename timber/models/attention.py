@@ -36,7 +36,7 @@ def custom_attention(
         ensemble = False,
         ensemble_model_setting = "random_pruning",
         ensemble_method = "final_attn",
-        ensemble_method_final = "intersection",
+        ensemble_method_final = "query",
         ensemble_method_final_inter_thresh = None,
         ensemble_method_final_bdd_mask_k = 0,
         ensemble_per_layer_n = 1,

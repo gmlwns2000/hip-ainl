@@ -747,7 +747,7 @@ class LlamaCustomAttention(LlamaAttention):
         self.ensemble = False
         self.ensemble_model_setting = "random_pruning"
         self.ensemble_method = "final_attn"
-        self.ensemble_method_final = "intersection"
+        self.ensemble_method_final = "query"
         self.ensemble_method_final_inter_thresh = None
         self.ensemble_method_final_bdd_mask_k = 0
         self.ensemble_per_layer_n = 1
