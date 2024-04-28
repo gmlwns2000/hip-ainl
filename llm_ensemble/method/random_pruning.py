@@ -208,7 +208,7 @@ def ensemble_random_pruning(
                 'randomness' : ensemble_randomness,
                 'final_indices' : ensemble_filtered,
                 'final_cnt' : ensemble_cnt_filtered
-            }, f'./cache/llama/bef_ensb/ensbn{ensemble_model_n}_agreement_0.5.pth')
+            }, f'./cache/llama/bef_ensb/ensbn{ensemble_model_n}_agreement_r{ensemble_randomness}.pth')
             input('>>> ')
 
         # for r in ensemble_attn_mask_per_layer:
