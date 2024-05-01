@@ -3,7 +3,7 @@ import torch
 
 t = torch.load(f'./cache/stride_debug/s16384.pth', map_location=torch.device('cpu'))
 
-attn_output_timber, (indices, ks, attn_probs, sparsity) = timber_attention(
+attn_output_timber, (indices, ks, attn_probs, sparsity, ensemble_cnt_filtered_or_none) = timber_attention(
     q = t['q'],
     k = t['k'],
     v = t['v'],
@@ -34,6 +34,7 @@ attn_output_timber, (indices, ks, attn_probs, sparsity) = timber_attention(
     ensemble_method_final=t['ensemble_method_final'],
     ensemble_method_final_inter_thresh=t['ensemble_method_final_inter_thresh'],
     ensemble_method_final_bdd_mask_k=t['ensemble_method_final_bdd_mask_k'],
+    ensemble_method_final_timedim=t['ensemble_method_final_timedim'],
     ensemble_per_layer_n=t['ensemble_per_layer_n'],
     ensemble_per_attn_iter_n=t['ensemble_per_attn_iter_n'],
     ensemble_model_n=t['ensemble_model_n'],
