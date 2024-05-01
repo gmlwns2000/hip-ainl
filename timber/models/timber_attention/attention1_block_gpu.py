@@ -1835,6 +1835,7 @@ def timber_attention(
     ensemble_method_final : str = "query",
     ensemble_method_final_inter_thresh : int = None,
     ensemble_method_final_bdd_mask_k : int = 0,
+    ensemble_method_final_timedim : int = None,
     ensemble_per_layer_n : int = 1,
     ensemble_per_attn_iter_n : int = 5,
     ensemble_model_n : int = 5,
@@ -1893,6 +1894,7 @@ def timber_attention(
     #     'ensemble_method_final': ensemble_method_final,
     #     'ensemble_method_final_inter_thresh': ensemble_method_final_inter_thresh,
     #     'ensemble_method_final_bdd_mask_k': ensemble_method_final_bdd_mask_k,
+    #     'ensemble_method_final_timedim': ensemble_method_final_timedim,
     #     'ensemble_per_layer_n': ensemble_per_layer_n,
     #     'ensemble_per_attn_iter_n': ensemble_per_attn_iter_n,
     #     'ensemble_model_n': ensemble_model_n,
@@ -2197,6 +2199,7 @@ def timber_attention(
                     # print("ensemble_method_final : ", ensemble_method_final)
                     # print("ensemble_method_final_inter_thresh : ", ensemble_method_final_inter_thresh)
                     # print("ensemble_method_final_bdd_mask_k : ", ensemble_method_final_bdd_mask_k)
+                    # print("ensemble_method_final_timedim : ", ensemble_method_final_timedim)
                     # print('ensemble_per_layer_n : ', ensemble_per_layer_n)
                     # print('ensemble_model_n : ', ensemble_model_n)
                     # print('ensemble_particular_layer : ', ensemble_particular_layer)
@@ -2293,7 +2296,7 @@ def timber_attention(
                                         # input('stored. press enter to continue >>> ')
 
                                 from llm_ensemble.method.random_pruning import ensemble_random_pruning
-                                indices, ks, origin_sparsity, sparsity_per_layer, sparsity_ratio = ensemble_random_pruning(
+                                indices, ks, origin_sparsity, sparsity_per_layer, sparsity_ratio, ensemble_cnt_filtered = ensemble_random_pruning(
                                     # ks,
                                     q,
                                     k,
@@ -2308,6 +2311,7 @@ def timber_attention(
                                     ensemble_method_final,
                                     ensemble_method_final_inter_thresh,
                                     ensemble_method_final_bdd_mask_k,
+                                    ensemble_method_final_timedim,
                                     ensemble_per_layer_n,
                                     ensemble_per_attn_iter_n,
                                     ensemble_model_n,
@@ -2337,6 +2341,7 @@ def timber_attention(
                                 #         'ensemble_method_final' : ensemble_method_final,
                                 #         'ensemble_method_final_inter_thresh' : ensemble_method_final_inter_thresh,
                                 #         'ensemble_method_final_bdd_mask_k' : ensemble_method_final_bdd_mask_k,
+                                #         'ensemble_method_final_timedim' : ensemble_method_final_timedim,
                                 #         'ensemble_per_layer_n' : ensemble_per_layer_n,
                                 #         'ensemble_per_attn_iter_n' : ensemble_per_attn_iter_n,
                                 #         'ensemble_model_n' : ensemble_model_n,
@@ -2479,7 +2484,7 @@ def timber_attention(
                     SELF_EXTEND_WINDOW=self_extend_window,
                 )
     
-    return context, (indices, ks, probs, sparsity_ratio if real_ensemble else None)
+    return context, (indices, ks, probs, sparsity_ratio if real_ensemble else None, ensemble_cnt_filtered if real_ensemble else None)
 
 import torch.nn.functional as F
 
