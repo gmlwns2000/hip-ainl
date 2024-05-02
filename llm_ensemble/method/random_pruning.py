@@ -18,6 +18,7 @@ def ensemble_random_pruning(
     ensemble_method_final : str,
     ensemble_method_final_inter_thresh : int,
     ensemble_method_final_bdd_mask_k : int,
+    ensemble_method_final_timedim : int,
     ensemble_per_layer_n : int,
     ensemble_per_attn_iter_n : int,
     ensemble_model_n : int,
@@ -43,6 +44,8 @@ def ensemble_random_pruning(
     # 'ensemble_method_final' : ensemble_method_final,
     # 'ensemble_method_final_inter_thresh' : ensemble_method_final_inter_thresh,
     # 'ensemble_method_final_bdd_mask_k' : ensemble_method_final_bdd_mask_k,
+    # 'ensemble_method_final_timedim' : ensemble_method_final_timedim,
+    # 'ensemble_method_final_timedim' : ensemble_method_final_timedim,
     # 'ensemble_per_layer_n' : ensemble_per_layer_n,
     # 'ensemble_per_attn_iter_n' : ensemble_per_attn_iter_n,
     # 'ensemble_model_n' : ensemble_model_n,
@@ -182,9 +185,10 @@ def ensemble_random_pruning(
             ensemble_filtered = ensemble_filtered[:, :k_final] # TODO is this meaningful??
             ensemble_cnt_filtered = ensemble_cnt_filtered[:, :k_final]
             ensemble_filtered = ensemble_filtered.view(_N_H, TDST_BQ, -1)
+            ensemble_cnt_filtered = ensemble_cnt_filtered.view(_N_H, TDST_BQ, -1)
         elif ensemble_method_final == "time_dim":
-            pass
-            # assert ensemble_method_final_timedim != None
+            assert ensemble_method_final_timedim != None
+
         
         elif ensemble_method_final == "head":
             pass
@@ -208,7 +212,7 @@ def ensemble_random_pruning(
                 'randomness' : ensemble_randomness,
                 'final_indices' : ensemble_filtered,
                 'final_cnt' : ensemble_cnt_filtered
-            }, f'./cache/llama/bef_ensb/ensbn{ensemble_model_n}_agreement_0.5.pth')
+            }, f'./cache/llama/bef_ensb/ensbn{ensemble_model_n}_agreement_r{ensemble_randomness}.pth')
             input('>>> ')
 
         # for r in ensemble_attn_mask_per_layer:
@@ -289,4 +293,4 @@ def ensemble_random_pruning(
     # breakpoint()
     ##########
     # breakpoint()
-    return ensemble_filtered, ks, origin_sparsity, sparsity_per_layer, sparsity_ratio
+    return ensemble_filtered, ks, origin_sparsity, sparsity_per_layer, sparsity_ratio, ensemble_cnt_filtered

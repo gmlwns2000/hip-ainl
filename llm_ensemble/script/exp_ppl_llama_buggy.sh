@@ -1,7 +1,7 @@
 # llama13b_32k default
-stride=(4096 8192 12288 16384)
+stride=(16384)
 for ((si=0; si<${#stride[@]}; si++)); do
-    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  CUDA_VISIBLE_DEVICES=0 \
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  CUDA_VISIBLE_DEVICES=5 \
     python -m timber.main.model_eval \
     --model llama32k \
     --stride "${stride[si]}" \

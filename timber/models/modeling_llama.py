@@ -747,9 +747,10 @@ class LlamaCustomAttention(LlamaAttention):
         self.ensemble = False
         self.ensemble_model_setting = "random_pruning"
         self.ensemble_method = "final_attn"
-        self.ensemble_method_final = "intersection"
+        self.ensemble_method_final = "query"
         self.ensemble_method_final_inter_thresh = None
         self.ensemble_method_final_bdd_mask_k = 0
+        self.ensemble_method_final_timedim = None
         self.ensemble_per_layer_n = 1
         self.ensemble_per_attn_iter_n = 5
         self.ensemble_model_n = 5
@@ -910,6 +911,7 @@ class LlamaCustomAttention(LlamaAttention):
         #     'ensemble_method_final': self.ensemble_method_final,
         #     'ensemble_method_final_inter_thresh': self.ensemble_method_final_inter_thresh,
         #     'ensemble_method_final_bdd_mask_k': self.ensemble_method_final_bdd_mask_k,
+        #     'ensemble_method_final_timedim': self.ensemble_method_final_timedim,
         #     'ensemble_per_layer_n': self.ensemble_per_layer_n,
         #     'ensemble_per_attn_iter_n': self.ensemble_per_attn_iter_n,
         #     'ensemble_model_n': self.ensemble_model_n,
@@ -967,6 +969,7 @@ class LlamaCustomAttention(LlamaAttention):
             ensemble_method_final = self.ensemble_method_final,
             ensemble_method_final_inter_thresh = self.ensemble_method_final_inter_thresh,
             ensemble_method_final_bdd_mask_k = self.ensemble_method_final_bdd_mask_k,
+            ensemble_method_final_timedim= self.ensemble_method_final_timedim,
             ensemble_per_layer_n = self.ensemble_per_layer_n,
             ensemble_per_attn_iter_n = self.ensemble_per_attn_iter_n,
             ensemble_model_n = self.ensemble_model_n,

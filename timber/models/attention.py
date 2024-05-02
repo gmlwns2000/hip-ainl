@@ -36,9 +36,10 @@ def custom_attention(
         ensemble = False,
         ensemble_model_setting = "random_pruning",
         ensemble_method = "final_attn",
-        ensemble_method_final = "intersection",
+        ensemble_method_final = "query",
         ensemble_method_final_inter_thresh = None,
         ensemble_method_final_bdd_mask_k = 0,
+        ensemble_method_final_timedim = None,
         ensemble_per_layer_n = 1,
         ensemble_per_attn_iter_n = 5,
         ensemble_model_n = 5,
@@ -96,6 +97,7 @@ def custom_attention(
     #     'ensemble_method_final': ensemble_method_final,
     #     'ensemble_method_final_inter_thresh': ensemble_method_final_inter_thresh,
     #     'ensemble_method_final_bdd_mask_k': ensemble_method_final_bdd_mask_k,
+    #     'ensemble_method_final_timedim': ensemble_method_final_timedim,
     #     'ensemble_per_layer_n': ensemble_per_layer_n,
     #     'ensemble_per_attn_iter_n': ensemble_per_attn_iter_n,
     #     'ensemble_model_n': ensemble_model_n,
@@ -243,7 +245,7 @@ def custom_attention(
 
         q_timber = q[:, :LAST_DENSE_QUERIES, :]
         try:
-            attn_output_timber, (indices, ks, attn_probs, sparsity) = timber_attention(
+            attn_output_timber, (indices, ks, attn_probs, sparsity, ensemble_cnt_filtered_or_none) = timber_attention(
                 q_timber,
                 k[:, :LAST_DENSE_QUERIES, :],
                 v[:, :LAST_DENSE_QUERIES, :],
@@ -268,6 +270,7 @@ def custom_attention(
                 ensemble_method_final = ensemble_method_final,
                 ensemble_method_final_inter_thresh = ensemble_method_final_inter_thresh,
                 ensemble_method_final_bdd_mask_k = ensemble_method_final_bdd_mask_k,
+                ensemble_method_final_timedim = ensemble_method_final_timedim,
                 ensemble_per_layer_n = ensemble_per_layer_n,
                 ensemble_per_attn_iter_n = ensemble_per_attn_iter_n,
                 ensemble_model_n = ensemble_model_n,
@@ -345,6 +348,7 @@ def custom_attention(
                     'k': key_states,
                     'v': value_states,
                     'indices' : indices,
+                    'ensemble_cnt_filtered': ensemble_cnt_filtered_or_none,
                     'mask_k': tree_k,
                     'ks' : ks,
                     'attn' : attn_probs,
@@ -358,6 +362,7 @@ def custom_attention(
                     'ensemble_method_final' : ensemble_method_final,
                     'ensemble_method_final_inter_thresh' : ensemble_method_final_inter_thresh,
                     'ensemble_method_final_bdd_mask_k' : ensemble_method_final_bdd_mask_k,
+                    'ensemble_method_final_timedim' : ensemble_method_final_timedim,
                     'ensemble_per_layer_n' : ensemble_per_layer_n,
                     'ensemble_per_attn_iter_n' : ensemble_per_attn_iter_n,
                     'ensemble_model_n' : ensemble_model_n,
@@ -366,7 +371,7 @@ def custom_attention(
                     'ensemble_randomness' : ensemble_randomness,
                     'layer_id' : layer_id,
                     'stride' : tree_stride
-                }, f'./cache/llama/ensemble/qkvout_s{tree_stride}_k{tree_k}_ensbn{ensemble_model_n}_{ensemble_method_final}_mft{ensemble_method_final_inter_thresh}_bmk{ensemble_method_final_bdd_mask_k}_lt{ensemble_layer_till}_l{layer_id}.pth')
+                }, f'./cache/llama/ensemble/qkvout_s{tree_stride}_k{tree_k}_ensbn{ensemble_model_n}_{ensemble_method_final}_mft{ensemble_method_final_inter_thresh}_bmk{ensemble_method_final_bdd_mask_k}_lt{ensemble_layer_till}_ftd{ensemble_method_final_timedim}_l{layer_id}.pth')
             else:
                 # breakpoint()
                 os.makedirs('./cache/llama/default', exist_ok=True)
