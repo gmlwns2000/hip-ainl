@@ -29,7 +29,7 @@ for ((thresh=1; thresh<6; thresh++)); do
       --ensemble \
       --ensemble-model-setting random_pruning \
       --ensemble-method final_attn \
-      --ensemble-method-final intersection \
+      --ensemble-method-final query \
       --ensemble-method-final-inter-thresh "${thresh}" \
       --ensemble-method-final-bdd-mask-k "${bdd}" \
       --dense_layers 0 \

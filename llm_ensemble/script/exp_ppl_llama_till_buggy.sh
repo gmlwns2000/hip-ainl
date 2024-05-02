@@ -50,7 +50,7 @@ for ((thresh = 5; thresh <= 20; thresh += 5)); do
         --ensemble \
         --ensemble-model-setting random_pruning \
         --ensemble-method final_attn \
-        --ensemble-method-final intersection \
+        --ensemble-method-final query \
         --ensemble-method-final-inter-thresh "${thresh}" \
         --ensemble-method-final-bdd-mask-k "${bdd}" \
         --ensemble-layer-till "${layer_till[lti]}" \
