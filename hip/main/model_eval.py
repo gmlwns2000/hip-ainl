@@ -111,6 +111,7 @@ def load_model(args):
         'llama32k': 'togethercomputer/LLaMA-2-7B-32K',
         'llama32k_instruct': 'togethercomputer/Llama-2-7B-32K-Instruct',
         'llama13b': 'meta-llama/Llama-2-13b-hf',
+        'llama13b-chat' : 'meta-llama/Llama-2-13b-chat-hf',
         'llama13b_32k': 'Yukang/Llama-2-13b-longlora-32k-ft',
         'llama13b_32k_instruct': 'Yukang/Llama-2-13b-chat-longlora-32k-sft',
         'qwen14b': 'Qwen/Qwen1.5-14B-Chat',
@@ -166,6 +167,26 @@ def load_model(args):
             m.tree_block_size_k = args.block_size_k
             m.tree_using_context_avg = True
             m.tree_dense_queries = args.dense_queries
+            # m.tree_stride = args.stride
+
+            m.sampling_method = args.sampling_method
+
+            ### ensemble # NOTE check: right place? -  working though
+            m.ensemble = args.ensemble
+            m.ensemble_model_setting = args.ensemble_model_setting
+            m.ensemble_method = args.ensemble_method
+            m.ensemble_method_final = args.ensemble_method_final
+            m.ensemble_method_final_inter_thresh = args.ensemble_method_final_inter_thresh
+            m.ensemble_method_final_bdd_mask_k = args.ensemble_method_final_bdd_mask_k
+            m.ensemble_method_final_timedim = args.ensemble_method_final_timedim
+
+            m.ensemble_per_layer_n = args.ensemble_per_layer_n
+            m.ensemble_per_attn_iter_n = args.ensemble_per_attn_iter_n
+            m.ensemble_model_n = args.ensemble_model_n
+            m.ensemble_particular_layer = args.ensemble_particular_layer
+            m.ensemble_layer_till = args.ensemble_layer_till
+            m.ensemble_randomness = args.ensemble_randomness
+
             m.tree_dense_layers = list(range(args.dense_layers))
             m.tree_rope_method = args.rope_method
             m.tree_enable_sparq = not args.disable_sparq
@@ -239,7 +260,7 @@ def main():
     model, tokenizer, device = load_model(args)
 
     if args.job == 'ppl':
-        job_ppl(args, model, tokenizer, device)
+        job_ppl(args, model, tokenizer, device, args.visualize)
     elif args.job == 'stream':
         job_stream(args, model, tokenizer, device)
     elif args.job == 'mmlu':
@@ -254,6 +275,6 @@ def main():
         job_stream_demo(args, model, tokenizer, device)
     else:
         raise Exception()
-
+    
 if __name__ == '__main__':
     main()

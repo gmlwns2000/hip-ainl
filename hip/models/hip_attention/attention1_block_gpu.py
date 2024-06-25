@@ -138,6 +138,10 @@ def hip_attention_mask(
     
     SAMPLING_METHOD: str = 'first',
 
+    ENSEMBLE_PER_ATTN_ITER_N : int = 5,
+    MODEL_I : int = 0,
+    ENSEMBLE_RANDOMNESS : float = 0.5,
+    
     USING_SLIDING_WINDOW=True,
     SLIDING_WINDOW_SIZE=128,
     
@@ -246,7 +250,7 @@ def hip_attention_mask(
         )
         
         B_SRC = triton.cdiv(T_SRC, BLOCK_SIZE_K)
-        B_DST = triton.cdiv(T_DST, BLOCK_SIZE_Q)
+        B_DST = triton.cdiv(T_DST, BLOCK_SIZE_Q) # CHECK upper bound?
         
         sparq_indices = None
         sparq_indices_strides = (1, 1, 1)
@@ -356,6 +360,10 @@ def hip_attention_mask(
             USING_SLIDING_WINDOW,
             SLIDING_WINDOW_SIZE,
             
+            ENSEMBLE_PER_ATTN_ITER_N,
+            MODEL_I,
+            ENSEMBLE_RANDOMNESS,
+
             DEBUG,
         )
         if DEBUG:
@@ -1154,7 +1162,22 @@ def hip_attention(
     enable_sparq: bool = True,
     
     sampling_method: str = 'random',
-    
+
+    ensemble : bool = False,
+    ensemble_model_setting : str = "random_pruning",
+    ensemble_method :str = "final_attn",
+    ensemble_method_final : str = "query",
+    ensemble_method_final_inter_thresh : int = None,
+    ensemble_method_final_bdd_mask_k : int = 0,
+    ensemble_method_final_timedim : int = None,
+    ensemble_per_layer_n : int = 1,
+    ensemble_per_attn_iter_n : int = 5,
+    ensemble_model_n : int = 5,
+    ensemble_particular_layer : int = 0,
+    ensemble_layer_till : int = 6,
+    ensemble_randomness : float = 0.5,
+
+    layer_id : int = 0,    
     using_sliding_window: bool = True,
     sliding_window_size: int = 128,
     
@@ -1172,6 +1195,66 @@ def hip_attention(
     precomputed_indices: Tensor = None,
     precomputed_ks: Tensor = None,
 ):
+    # os.makedirs('./cache/stride_debug/', exist_ok=True)
+    # torch.save({
+    #     'q': q, 
+    #     'k': k, 
+    #     'v': v,
+    #     'attention_mask': attention_mask, 
+    #     'w_start': w_start,
+    #     'n_patches': n_patches,
+
+    #     # Attention method
+    #     'mask_k': mask_k,  # 'none', 'reformer', 'performer', 'hip'
+    #     'scale_up': scale_up, 
+    #     'is_causal': is_causal,
+
+    #     # hip parameters
+    #     'block_size_q': block_size_q, 
+    #     'block_size_k': block_size_k, 
+    #     'reduce_method': reduce_method,
+    #     'reduce_stride': reduce_stride, 
+    #     'chunking': chunking,
+    #     'chunk_size': chunk_size,
+    #     'is_flash': is_flash,
+
+    #     # Latency optimization tweaks
+    #     'enable_sparq': enable_sparq, 
+    #     'sampling_method': sampling_method, 
+
+    #     'ensemble': ensemble,
+    #     'ensemble_model_setting': ensemble_model_setting,
+    #     'ensemble_method': ensemble_method,
+    #     'ensemble_method_final': ensemble_method_final,
+    #     'ensemble_method_final_inter_thresh': ensemble_method_final_inter_thresh,
+    #     'ensemble_method_final_bdd_mask_k': ensemble_method_final_bdd_mask_k,
+    #     'ensemble_method_final_timedim': ensemble_method_final_timedim,
+    #     'ensemble_per_layer_n': ensemble_per_layer_n,
+    #     'ensemble_per_attn_iter_n': ensemble_per_attn_iter_n,
+    #     'ensemble_model_n': ensemble_model_n,
+    #     'ensemble_particular_layer': ensemble_particular_layer,
+    #     'ensemble_layer_till': ensemble_layer_till,
+    #     'ensemble_randomness': ensemble_randomness,
+
+    #     'layer_id': layer_id,
+    #     'using_sliding_window': using_sliding_window,
+    #     'sliding_window_size': sliding_window_size,
+        
+    #     'dense_queries_exp': dense_queries_exp,
+        
+    #     'rope_method': rope_method,
+    #     'rope_cos': rope_cos,
+    #     'rope_sin': rope_sin,
+    #     'position_ids': position_ids,
+        
+    #     'self_extend_scale': self_extend_scale,
+    #     'self_extend_window': self_extend_window,
+        
+    #     'using_precomputed_mask': using_precomputed_mask,
+    #     'precomputed_indices': precomputed_indices,
+    #     'precomputed_ks': precomputed_ks,
+    # }, f'./cache/stride_debug/s16384.pth')
+    # input('>>> ')
     assert sampling_method in ['random', 'first']
     
     if q.requires_grad:
@@ -1275,10 +1358,10 @@ def hip_attention(
         
     CHUNKING = chunking
     CHUNK_SIZE = chunk_size
-    if q.shape[1] > CHUNK_SIZE and CHUNKING:
-        N, T_DST, HID = q.shape
+    
+    if q.shape[1] > CHUNK_SIZE and CHUNKING: # CHECK WHY
+        N, T_DST, HID = q.shape # q.view(N*H, T_DST, HID)[idx:idx+window, :seq_len]
         N, T_SRC, HID = k.shape
-        
         contexts = []
         
         for ichunk in range(triton.cdiv(T_DST, CHUNK_SIZE)):
@@ -1314,6 +1397,7 @@ def hip_attention(
                 enable_sparq=enable_sparq,
                 
                 sampling_method=sampling_method,
+                ensemble_per_attn_iter_n=ensemble_per_attn_iter_n,
                 
                 using_sliding_window=using_sliding_window,
                 sliding_window_size=sliding_window_size,
@@ -1374,13 +1458,15 @@ def hip_attention(
     with timer('hip_attention'):
         if not using_precomputed_mask:
             with timer('attention_matrix'):
-                # if prompt (exceed single tensor-core block), 
-                # do not use topk strding. this will cause more resource
-                estimated_ksrc_stride = min(32, max(1, round(mask_k / (block_size_k * 16))))
-                if q.shape[1] > 32:
-                    estimated_ksrc_stride = 1
-                
-                indices, ks = hip_attention_mask(
+                if not ensemble:
+                    real_ensemble = False
+                    # if prompt (exceed single tensor-core block), 
+                    # do not use topk strding. this will cause more resource
+                    estimated_ksrc_stride = min(32, max(1, round(mask_k / (block_size_k * 16))))
+                    if q.shape[1] > 32:
+                        estimated_ksrc_stride = 1
+                    
+                    indices, ks = hip_attention_mask( # indices, ks, probs_or_context, scores = attention_matrix(
                     queries=q,
                     keys=k,
                     values=v,
@@ -1401,7 +1487,6 @@ def hip_attention(
                     IS_FLASH=is_flash,
                     SPARQ=enable_sparq,
                     SAMPLING_METHOD=sampling_method,
-                    
                     USING_SLIDING_WINDOW=using_sliding_window,
                     SLIDING_WINDOW_SIZE=sliding_window_size,
                     
@@ -1415,7 +1500,238 @@ def hip_attention(
                     
                     GRID_SRC_STRIDE=estimated_ksrc_stride,
                     GRID_K_STRIDE=estimated_ksrc_stride,
+
+                    ENSEMBLE_PER_ATTN_ITER_N=ensemble_per_attn_iter_n,
+                    # ENSEMBLE_RANDOMNESS = ensemble_randomness
                 )
+                # if os.environ.get('CHECKOUT_ENSEMBLE', '0') == '1':
+                #     os.makedirs(f'./cache/ensemble/llama13b_32k/models/default', exist_ok=True)
+                #     torch.save({
+                #         'indices': indices,
+                #         'ks' : ks,
+                #         'q_hip': q,
+                #         'k': k,
+                #         'v': v,
+                #         'mask_k':mask_k,
+                #         'block_size_q':block_size_q,
+                #         'block_size_k':block_size_k,
+                        
+                #         'probs_or_context' : probs_or_context,
+                #         'scores': scores,
+                #         'layer_id' : layer_id,
+                #     }, f'./cache/ensemble/llama13b_32k/models/default/l_{layer_id}_{sampling_method}.pth')
+                #     print(">>> STORED.")
+                #     # input('stored. press enter to continue >>> ')
+                else:
+                    real_ensemble = True
+                    ### ENSEMBLE: MODIFY indices
+                    # print("######")
+                    # print("ensemble : ", ensemble)
+                    # print('layer_id : ', layer_id)
+                    # print("ensemble_model_setting : ", ensemble_model_setting)
+                    # print("ensemble_method : ", ensemble_method)
+                    # print("ensemble_method_final : ", ensemble_method_final)
+                    # print("ensemble_method_final_inter_thresh : ", ensemble_method_final_inter_thresh)
+                    # print("ensemble_method_final_bdd_mask_k : ", ensemble_method_final_bdd_mask_k)
+                    # print("ensemble_method_final_timedim : ", ensemble_method_final_timedim)
+                    # print('ensemble_per_layer_n : ', ensemble_per_layer_n)
+                    # print('ensemble_model_n : ', ensemble_model_n)
+                    # print('ensemble_particular_layer : ', ensemble_particular_layer)
+                    # print('ensemble_layer_till : ', ensemble_layer_till)
+                        
+                    assert ensemble_model_setting in ['random_pruning', 'model_zoo', 'transformer_suggest']
+                    assert ensemble_method in ['final_attn', ] # TODO 'per_attn_iteration'
+                    if ensemble_model_setting == "random_pruning":
+                        if ensemble_method == 'final_attn':
+                            assert ensemble_method_final in ['query',]
+                            if (ensemble_layer_till != None and layer_id < ensemble_layer_till) or (ensemble_layer_till == None and (layer_id) == ensemble_particular_layer) or (ensemble_layer_till == None and ensemble_particular_layer == None and (layer_id+1) % ensemble_per_layer_n == 0):
+                                real_ensemble = True
+                                ensemble_attn_mask_per_layer = torch.empty((N, T_DST//block_size_q, mask_k//block_size_k, 0), device=q.device, dtype=torch.int64)
+                                for i in range(ensemble_model_n):
+                                    indices, ks = hip_attention_mask( # indices, ks, probs_or_context, scores
+                                        queries=q,
+                                        keys=k,
+                                        values=v,
+                                        attention_mask=attention_mask,
+                                        kv_repeat_interleave=KV_REPEAT_INTERLEAVE,
+                                        
+                                        w_start=w_start,
+                                        n_patches=n_patches,
+                                        mask_k=mask_k,
+                                        scale_up=scale_up,
+                                        is_causal=is_causal,
+                                        
+                                        BLOCK_SIZE_Q=block_size_q,
+                                        BLOCK_SIZE_K=block_size_k,
+                                        REDUCE_METHOD=reduce_method,
+                                        REDUCE_STRIDE=reduce_stride,
+                                        
+                                        IS_FLASH=is_flash,
+                                        SPARQ=enable_sparq,
+                                        SAMPLING_METHOD=sampling_method,
+                                        
+                                        USING_SLIDING_WINDOW=using_sliding_window,
+                                        SLIDING_WINDOW_SIZE=sliding_window_size,
+                                        
+                                        ROPE_METHOD=rope_method,
+                                        ROPE_COS=rope_cos,
+                                        ROPE_SIN=rope_sin,
+                                        POSITION_IDS=position_ids,
+                                        
+                                        SELF_EXTEND_SCALE=self_extend_scale,
+                                        SELF_EXTEND_WINDOW=self_extend_window,
+
+                                        ENSEMBLE_PER_ATTN_ITER_N=ensemble_per_attn_iter_n,
+                                        MODEL_I = i,
+                                        ENSEMBLE_RANDOMNESS = ensemble_randomness
+                                    )
+                                    N_H, TDST_BQ, MASK_K_BK = indices.shape
+                                    N_H, TDST_BQ = ks.shape
+                                    assert ensemble_attn_mask_per_layer.shape[:-1] == indices.shape
+                                    # os.makedirs('./cache/stride_debug/', exist_ok=True)
+                                    # torch.save({
+                                    #     # ks : torch.Tensor,
+                                    # 'indices' : indices,
+                                    # 'ks' : ks
+                                    # }, f'./cache/stride_debug/hip_attention{i}_s16384.pth')
+                                    # input('hip >>> ')
+                                    # print("* ENSEMBLE: INPUT 9999999 IN INDICES WHERE OUT OF RANGE KS") # NOTE
+                                    range_tensor = torch.arange(MASK_K_BK, device=indices.device)[None, None, :]
+                                    mask = range_tensor >= ks.unsqueeze(-1)
+                                    assert 9999999 > ks.max().item()
+                                    # indices[mask] = 9999999
+                                    indices.masked_fill_(mask, 9999999)
+                                    ensemble_attn_mask_per_layer = torch.cat((ensemble_attn_mask_per_layer, indices.unsqueeze(-1)), dim=-1)
+                                    
+                                    if os.environ.get('CHECKOUT_ENSEMBLE', '0') == '1':
+                                        os.makedirs(f'./cache/ensemble/llama13b_32k/models/{ensemble_model_setting}_{ensemble_method}_{ensemble_method_final}', exist_ok=True)
+                                        torch.save({
+                                            'indices': indices,
+                                            'ks' : ks,
+                                            'q_hip': q,
+                                            'k': k,
+                                            'v': v,
+                                            'mask_k':mask_k,
+                                            'block_size_q':block_size_q,
+                                            'block_size_k':block_size_k,
+                                            'ensemble': ensemble,
+                                            'ensemble_model_setting' : ensemble_model_setting,
+                                            'ensemble_method' : ensemble_method,
+                                            'ensemble_method_final' : ensemble_method_final,
+                                            'ensemble_per_layer_n' : ensemble_per_layer_n,
+                                            'ensemble_per_attn_iter_n' : ensemble_per_attn_iter_n,
+                                            'ensemble_model_n' : ensemble_model_n,
+                                            'ensemble_particular_layer' : ensemble_particular_layer,
+                                            'ensemble_randomness' : ensemble_randomness,
+                                            'layer_id' : layer_id,
+                                            'model_i': i,
+                                        }, f'./cache/ensemble/llama13b_32k/models/{ensemble_model_setting}_{ensemble_method}_{ensemble_method_final}/l_{layer_id}_m_{ensemble_model_n}_{i}_pl_{ensemble_per_layer_n}_pat{ensemble_per_attn_iter_n}_ln{ensemble_particular_layer}_r{ensemble_randomness}.pth')
+                                        print(">>> STORED.")
+                                        # input('stored. press enter to continue >>> ')
+
+                                from llm_ensemble.method.random_pruning import ensemble_random_pruning
+                                indices, ks, origin_sparsity, sparsity_per_layer, sparsity_ratio, ensemble_cnt_filtered = ensemble_random_pruning(
+                                    # ks,
+                                    q,
+                                    k,
+                                    v,
+                                    mask_k,
+                                    block_size_q,
+                                    block_size_k,
+
+                                    ensemble,
+                                    ensemble_model_setting,
+                                    ensemble_method, 
+                                    ensemble_method_final,
+                                    ensemble_method_final_inter_thresh,
+                                    ensemble_method_final_bdd_mask_k,
+                                    ensemble_method_final_timedim,
+                                    ensemble_per_layer_n,
+                                    ensemble_per_attn_iter_n,
+                                    ensemble_model_n,
+                                    ensemble_particular_layer,
+                                    ensemble_attn_mask_per_layer, 
+                                    ensemble_randomness,
+
+                                    layer_id,
+                                )
+                                indices = indices.to(q.device)
+                                ks = ks.to(q.device)
+
+                                # NOTE indices: garbage filled with 9999999
+                                # if os.environ.get('CHECKOUT_ENSEMBLE', '0') == '1':
+                                #     os.makedirs(f'./cache/ensemble/llama13b_32k/method/{ensemble_model_setting}_{ensemble_method}_{ensemble_method_final}', exist_ok=True)
+                                #     torch.save({
+                                #         'ks' : ks,
+                                #         'q_hip': q_hip,
+                                #         'k': k,
+                                #         'v': v,
+                                #         'mask_k':mask_k,
+                                #         'block_size_q':block_size_q,
+                                #         'block_size_k':block_size_k,
+                                #         'ensemble': ensemble,
+                                #         'ensemble_model_setting' : ensemble_model_setting,
+                                #         'ensemble_method' : ensemble_method,
+                                #         'ensemble_method_final' : ensemble_method_final,
+                                #         'ensemble_method_final_inter_thresh' : ensemble_method_final_inter_thresh,
+                                #         'ensemble_method_final_bdd_mask_k' : ensemble_method_final_bdd_mask_k,
+                                #         'ensemble_method_final_timedim' : ensemble_method_final_timedim,
+                                #         'ensemble_per_layer_n' : ensemble_per_layer_n,
+                                #         'ensemble_per_attn_iter_n' : ensemble_per_attn_iter_n,
+                                #         'ensemble_model_n' : ensemble_model_n,
+                                #         'ensemble_particular_layer' : ensemble_particular_layer,
+                                #         'ensemble_layer_till' : ensemble_layer_till
+                                #         'layer_id' : layer_id,
+
+                                #         'ensemble_attn_mask_per_layer': ensemble_attn_mask_per_layer,
+                                #         'per_query_token_cnt_diclist': per_query_token_cnt_diclist,
+                                #         'ensembled_indices' : indices,
+                                #         'origin_sparsity' : origin_sparsity,
+                                #         'sparsity_per_layer' : sparsity_per_layer,
+                                #         'sparse_ratio' : sparsity_ratio,
+
+                                #     }, f'./cache/ensemble/llama13b_32k/method/{ensemble_model_setting}_{ensemble_method}_{ensemble_method_final}/l_{layer_id}_m_{ensemble_model_n}_pl_{ensemble_per_layer_n}_pat{ensemble_per_attn_iter_n}_ln{ensemble_particular_layer}.pth')
+                                #     print(">>> STORED.")
+                            else:
+                                real_ensemble = False
+                                # print(f"@ l_{layer_id} NOT USING ENSEMBLE")
+                                indices, ks = hip_attention_mask( # indices, ks, probs_or_context, scores
+                                queries=q,
+                                keys=k,
+                                values=v,
+                                attention_mask=attention_mask,
+                                kv_repeat_interleave=KV_REPEAT_INTERLEAVE,
+                                
+                                w_start=w_start,
+                                n_patches=n_patches,
+                                mask_k=mask_k,
+                                scale_up=scale_up,
+                                is_causal=is_causal,
+                                
+                                BLOCK_SIZE_Q=block_size_q,
+                                BLOCK_SIZE_K=block_size_k,
+                                REDUCE_METHOD=reduce_method,
+                                REDUCE_STRIDE=reduce_stride,
+                                
+                                IS_FLASH=is_flash,
+                                SPARQ=enable_sparq,
+                                SAMPLING_METHOD=sampling_method,
+
+                                USING_SLIDING_WINDOW=using_sliding_window,
+                                SLIDING_WINDOW_SIZE=sliding_window_size,
+                                
+                                ROPE_METHOD=rope_method,
+                                ROPE_COS=rope_cos,
+                                ROPE_SIN=rope_sin,
+                                POSITION_IDS=position_ids,
+                                
+                                SELF_EXTEND_SCALE=self_extend_scale,
+                                SELF_EXTEND_WINDOW=self_extend_window,
+
+                                ENSEMBLE_PER_ATTN_ITER_N=ensemble_per_attn_iter_n,
+                            )
+                    # print('real_ensemble : ', real_ensemble)
+                    ### END OF ENSEMBLE
         else:
             assert precomputed_ks is not None
             assert precomputed_indices is not None
@@ -1502,7 +1818,7 @@ def hip_attention(
                     SELF_EXTEND_WINDOW=self_extend_window,
                 )
     
-    return context, (indices, ks, probs)
+    return context, (indices, ks, probs, sparsity_ratio if real_ensemble else None, ensemble_cnt_filtered if real_ensemble else None)
 
 import torch.nn.functional as F
 
@@ -1673,6 +1989,10 @@ def main_latency_benchmark():
                         block_size_k=args.block_size_k,
                         scale_up=args.scale_up,
                         is_causal=is_causal,
+
+                        sampling_method = sampling_method, ###CHECK
+                        ensemble_per_attn_iter_n = ensemble_per_attn_iter_n,
+                        model_i = model_i
                     )
                 else:
                     indices, ks = state
@@ -1691,6 +2011,10 @@ def main_latency_benchmark():
                         using_precomputed_mask=True,
                         precomputed_indices=indices,
                         precomputed_ks=ks,
+
+                        sampling_method = sampling_method, ###CHECK
+                        ensemble_per_attn_iter_n = ensemble_per_attn_iter_n,
+                        model_i = model_i
                     )
                 if mask is None:
                     return None, None

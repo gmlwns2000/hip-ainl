@@ -43,7 +43,82 @@ def custom_attention(
     
     # Hyper attention state
     hyper_attention=None,
+        ensemble = False,
+        ensemble_model_setting = "random_pruning",
+        ensemble_method = "final_attn",
+        ensemble_method_final = "query",
+        ensemble_method_final_inter_thresh = None,
+        ensemble_method_final_bdd_mask_k = 0,
+        ensemble_method_final_timedim = None,
+        ensemble_per_layer_n = 1,
+        ensemble_per_attn_iter_n = 5,
+        ensemble_model_n = 5,
+        ensemble_particular_layer = None,
+        ensemble_layer_till = 6,
+        ensemble_randomness = 0.5,
+
+        layer_id = 0,
+
 ):
+    # os.makedirs('./cache/stride_debug/', exist_ok=True)
+    # torch.save({
+    #     'query_states': query_states, 
+    #     'key_states': key_states, 
+    #     'value_states': value_states,
+    #     'attention_mask': attention_mask, 
+    #     'causal_mask': causal_mask,
+    #     'attention_dropout': attention_dropout,
+
+    #     # Attention method
+    #     'attention_method': attention_method,  # 'none', 'reformer', 'performer', 'hip'
+    #     'tree_reformer': tree_reformer, 
+    #     'tree_performer': tree_performer,
+
+    #     # hip parameters
+    #     'tree_k': tree_k, 
+    #     'tree_block_size_q': tree_block_size_q, 
+    #     'tree_block_size_k': tree_block_size_k,
+    #     'tree_dense_queries': tree_dense_queries, 
+    #     'tree_last_dense_queries': tree_last_dense_queries,
+    #     'tree_sampling_method': tree_sampling_method,
+    #     'tree_stride': tree_stride,
+
+    #     # Latency optimization tweaks
+    #     'tree_enable_flash': tree_enable_flash, 
+    #     'tree_enable_sparq': tree_enable_sparq, 
+    #     'tree_use_sliding_window': tree_use_sliding_window,
+
+    #     # Context averaging parameters
+    #     'tree_using_context_avg': tree_using_context_avg, 
+    #     'tree_avgpool_scaler': tree_avgpool_scaler, 
+    #     'last_cumsum': last_cumsum, 
+    #     'hidden_states': hidden_states,
+
+    #     # RoPE parameters
+    #     'tree_rope_method': tree_rope_method, 
+    #     'rope_cos': rope_cos, 'rope_sin': rope_sin, 'position_ids': position_ids,
+
+    #     # Attention sparsity loss
+    #     'output_attn_sparsity_loss': output_attn_sparsity_loss, 'tree_lp_norm_coeff': tree_lp_norm_coeff,
+
+    #     'ensemble': ensemble,
+    #     'ensemble_model_setting': ensemble_model_setting,
+    #     'ensemble_method': ensemble_method,
+    #     'ensemble_method_final': ensemble_method_final,
+    #     'ensemble_method_final_inter_thresh': ensemble_method_final_inter_thresh,
+    #     'ensemble_method_final_bdd_mask_k': ensemble_method_final_bdd_mask_k,
+    #     'ensemble_method_final_timedim': ensemble_method_final_timedim,
+    #     'ensemble_per_layer_n': ensemble_per_layer_n,
+    #     'ensemble_per_attn_iter_n': ensemble_per_attn_iter_n,
+    #     'ensemble_model_n': ensemble_model_n,
+    #     'ensemble_particular_layer': ensemble_particular_layer,
+    #     'ensemble_layer_till': ensemble_layer_till,
+    #     'ensemble_randomness': ensemble_randomness,
+
+    #     'layer_id': layer_id,
+    # }, f'./cache/stride_debug/s{tree_stride}.pth')
+    # input('>>> ')
+    
     """
     @param query_states: (N, H, TDST, HID)
     @param key_states: (N, H, TSRC, HID)
@@ -75,7 +150,7 @@ def custom_attention(
     @param tree_lp_norm_coeff: Lp norm coefficient for attention sparsity regularization
     @return: Attention output, last cumsum, attention sparsity loss
     """
-    attn_sparsity_loss = None
+    sparsity = attn_sparsity_loss = None
 
     if attention_method == 'none':
         # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
@@ -104,15 +179,16 @@ def custom_attention(
                 is_causal=attention_mask is None and query_states.shape[-2] > 1,
             )
 
-        if os.environ.get('CHECKOUT_STATES', '0') == '1':
+        if os.environ.get('CHECKOUT_STATES', '0') == '1' and (layer_id == 0 or layer_id == 31) :
             os.makedirs('./cache/llama/', exist_ok=True)
             torch.save({
                 'q': query_states,
                 'k': key_states,
                 'v': value_states,
+                'attn' : causal_mask if causal_mask is not None else attention_mask,
                 'out': attn_output,
-            }, './cache/llama/qkvout.pth')
-            input('stored. press enter to continue >>> ')
+            }, f'./cache/llama/qkvout_l{layer_id}.pth')
+            # input('stored. press enter to continue >>> ')
 
     elif attention_method == 'reformer':
         q = query_states  # / (query_states.shape[-1] ** 0.5)
@@ -179,7 +255,7 @@ def custom_attention(
 
         q_hip = q[:, :LAST_DENSE_QUERIES, :]
         try:
-            attn_output_hip, _ = hip_attention(
+            attn_output_hip, (indices, ks, attn_probs, sparsity, ensemble_cnt_filtered_or_none) = hip_attention(
                 q_hip,
                 k[:, :LAST_DENSE_QUERIES, :],
                 v[:, :LAST_DENSE_QUERIES, :],
@@ -187,6 +263,7 @@ def custom_attention(
                 block_size_q=tree_block_size_q,
                 block_size_k=tree_block_size_k,
                 dense_queries_exp=tree_dense_queries,
+
                 rope_method=tree_rope_method,
                 rope_cos=rope_cos.squeeze(0) if rope_cos is not None else None,
                 rope_sin=rope_sin.squeeze(0) if rope_sin is not None else None,
@@ -195,6 +272,23 @@ def custom_attention(
                 is_flash=tree_enable_flash,
                 using_sliding_window=tree_use_sliding_window,
                 sampling_method=tree_sampling_method,
+
+                # Ensemble
+                ensemble = ensemble,
+                ensemble_model_setting = ensemble_model_setting,
+                ensemble_method = ensemble_method,
+                ensemble_method_final = ensemble_method_final,
+                ensemble_method_final_inter_thresh = ensemble_method_final_inter_thresh,
+                ensemble_method_final_bdd_mask_k = ensemble_method_final_bdd_mask_k,
+                ensemble_method_final_timedim = ensemble_method_final_timedim,
+                ensemble_per_layer_n = ensemble_per_layer_n,
+                ensemble_per_attn_iter_n = ensemble_per_attn_iter_n,
+                ensemble_model_n = ensemble_model_n,
+                ensemble_particular_layer = ensemble_particular_layer,
+                ensemble_layer_till = ensemble_layer_till,
+                ensemble_randomness = ensemble_randomness,
+
+                layer_id = layer_id,
             )
             # from hip.models.hip_attention.attention2_draft import hip_attention as hip_attention_draft
             # attn_output_hip, _ = hip_attention_draft(
@@ -271,6 +365,59 @@ def custom_attention(
             attn_output = attn_outputs[0]
 
         attn_output = attn_output.view(N, H, TDST, HID)  # .to(hidden_states.dtype)
+        
+        if os.environ.get('CHECKOUT_STATES', '0') == '1' and (layer_id == 0 or layer_id == 31):
+            if ensemble:
+                os.makedirs('./cache/llama/ensemble', exist_ok=True)
+                torch.save({
+                    'q': query_states,
+                    'k': key_states,
+                    'v': value_states,
+                    'indices' : indices,
+                    'ensemble_cnt_filtered': ensemble_cnt_filtered_or_none,
+                    'mask_k': tree_k,
+                    'ks' : ks,
+                    'attn' : attn_probs,
+                    'out': attn_output,
+                    'dense_queries' : tree_dense_queries,
+                    'bq' : tree_block_size_q,
+                    'bk' : tree_block_size_k,
+                    'ensemble' : ensemble,
+                    'ensemble_model_setting' : ensemble_model_setting,
+                    'ensemble_method' : ensemble_method,
+                    'ensemble_method_final' : ensemble_method_final,
+                    'ensemble_method_final_inter_thresh' : ensemble_method_final_inter_thresh,
+                    'ensemble_method_final_bdd_mask_k' : ensemble_method_final_bdd_mask_k,
+                    'ensemble_method_final_timedim' : ensemble_method_final_timedim,
+                    'ensemble_per_layer_n' : ensemble_per_layer_n,
+                    'ensemble_per_attn_iter_n' : ensemble_per_attn_iter_n,
+                    'ensemble_model_n' : ensemble_model_n,
+                    'ensemble_particular_layer' : ensemble_particular_layer,
+                    'ensemble_layer_till' : ensemble_layer_till,
+                    'ensemble_randomness' : ensemble_randomness,
+                    'layer_id' : layer_id,
+                    'stride' : tree_stride
+                }, f'./cache/llama/ensemble/qkvout_s{tree_stride}_k{tree_k}_ensbn{ensemble_model_n}_{ensemble_method_final}_mft{ensemble_method_final_inter_thresh}_bmk{ensemble_method_final_bdd_mask_k}_lt{ensemble_layer_till}_ftd{ensemble_method_final_timedim}_l{layer_id}.pth')
+            else:
+                # breakpoint()
+                os.makedirs('./cache/llama/default', exist_ok=True)
+                torch.save({
+                    'q': query_states,
+                    'k': key_states,
+                    'v': value_states,
+                    'indices' : indices,
+                    'mask_k': tree_k,
+                    'ks' : ks,
+                    'attn' : attn_probs,
+                    'out': attn_output,
+                    'dense_queries' : tree_dense_queries,
+                    'bq' : tree_block_size_q,
+                    'bk' : tree_block_size_k,
+                    'ensemble' : ensemble,
+                    'layer_id' : layer_id,
+                }, f'./cache/llama/default/qkvout_s{tree_stride}_k{tree_k}_l{layer_id}.pth')
+
+            # input('stored. press enter to continue >>> ')
 
     elif attention_method == 'streaming_llm':
         from hip.models.sink_attention.sink_attention import sink_attention
@@ -317,4 +464,4 @@ def custom_attention(
     else:
         raise Exception(attention_method)
 
-    return attn_output, last_cumsum, attn_sparsity_loss
+    return attn_output, last_cumsum, attn_sparsity_loss, sparsity

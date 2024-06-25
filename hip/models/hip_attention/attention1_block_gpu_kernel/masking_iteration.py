@@ -124,6 +124,9 @@ def _masking_iteration_topk(
     stride_keys_vllm_head_size_x, 
     stride_keys_vllm_block_size, 
     stride_keys_vllm_x, 
+
+    MODEL_I,
+    ENSEMBLE_RANDOMNESS,
     
     # rope support
     ROPE_METHOD,
@@ -240,8 +243,8 @@ def _masking_iteration_topk(
     if SAMPLING_METHOD == 'random':
         # if ((idx_iteration > 0) and (idx_iteration < (N_ITERATION - 1))):
         if (idx_iteration > 0) and (idx_iteration == (N_ITERATION // 2)):
-            idx_tsrc_block += tl.random.rand(idx_bdst, idx_tsrc_block) * ((0.5 / (idx_iteration + 1)) / (tl.cdiv(w_new, BLOCK_SIZE_K) + 1.0))
-    idx_tsrc_block = (idx_tsrc_block * t_src.to(tl.float64)).to(tl.int64)
+            idx_tsrc_block += tl.random.rand(idx_bdst+MODEL_I, idx_tsrc_block) * ((ENSEMBLE_RANDOMNESS / (idx_iteration + 1)) / (tl.cdiv(w_new, BLOCK_SIZE_K) + 1.0))
+    idx_tsrc_block = (idx_tsrc_block * t_src.to(tl.float32)).to(tl.int64)
     idx_tsrc_block = tl.maximum(0, tl.minimum(t_src - 1, idx_tsrc_block))
     idx_tsrc_block = (idx_tsrc_block // BLOCK_SIZE_K) * BLOCK_SIZE_K
     
@@ -792,6 +795,9 @@ def _masking_iteration_compute(
     GRID_K_STRIDE: tl.constexpr,
     USING_SLIDING_WINDOW: tl.constexpr,
     SLIDING_WINDOW_SIZE: tl.constexpr,
+    ENSEMBLE_PER_ATTN_ITER_N: tl.constexpr,
+    MODEL_I: tl.constexpr,
+    ENSEMBLE_RANDOMNESS : tl.constexpr,
 ):
     idx_n = tl.program_id(2).to(tl.int64)
     
@@ -814,7 +820,18 @@ def _masking_iteration_compute(
     else:
         context_length = None
     
-    w_old = tl.load(
+    w_old = tl.load( 
+        # tsrcs_offset = max(BLOCK_SIZE_Q, BLOCK_SIZE_K) - 1
+        # tsrcs = torch.arange(
+        #     tsrcs_offset+T_SRC-T_DST+1, tsrcs_offset+T_SRC+1, BLOCK_SIZE_Q, 
+        #     dtype=torch.int64,
+        #     device=device,
+        # )\
+        #     .view(1, -1)\
+        #     .expand(N, -1)\
+        #     .contiguous() # size (N, T_DST(Q)//BLOCK_SIZE_Q)
+        # tsrcs.clamp_max_(T_SRC)
+        # ws = torch.clamp(tsrcs, 0, w_curr)
         WS + \
             idx_n * stride_ws_n + \
             idx_bdst * stride_ws_bdst,
@@ -828,13 +845,27 @@ def _masking_iteration_compute(
     if CONTEXT_LENGTH is not None:
         t_src = tl.minimum(context_length, t_src)
     
-    k_old = tl.load(
+    k_old = tl.load( # ks = torch.ceil(ws / BLOCK_SIZE_K).to(torch.int64)
         KS + \
             idx_n * stride_ks_n +\
             idx_bdst * stride_ks_bdst,
     ).to(tl.int64)
-    
+    # print("=======")
+    # print("idx_n : ", idx_n)
+    # print("idx_bdst : ", idx_bdst)
+    # print("idx_kstride : ", idx_kstride)
+    # print("grid_kstride : ", grid_kstride)
+
+    # print("w_old : ", w_old)
+    # print("WS : ", WS)
+    # print("t_src : ", t_src)
+    # print("TSRCS : ", TSRCS)
+    # print("k_old : ", k_old)
+    # print("KS : ", KS)
+
+    # breakpoint()
     for idx_iteration in range(N_ITERATION):
+        # if N_ITERATION % ENSEMBLE_PER_ATTN_ITER_N ==0: TODO : do this once needed
         tl.debug_barrier()
         # tl.device_print("dd", idx_bdst)
         
@@ -905,7 +936,12 @@ def _masking_iteration_compute(
             True
         )
         # tl.debug_barrier()
-        loc_vec = tl.load(
+        loc_vec = tl.load( 
+            # mask_k_block = triton.cdiv(mask_k, BLOCK_SIZE_K)
+            # w_curr = round(w_start / scale_up)
+            # ws = torch.clamp(tsrcs, 0, w_curr)
+            # ks = torch.ceil(ws / BLOCK_SIZE_K).to(torch.int64)
+            # MASK : torch.arange(mask_k_block, device=device, dtype=torch.float32).view(1, 1, mask_k_block) / ks.unsqueeze(-1)
             MASK +\
                 idx_n * stride_mask_n +\
                 idx_bdst * stride_mask_bdst +\
@@ -1068,6 +1104,10 @@ def _masking_iteration_compute(
                     stride_keys_vllm_head_size_x, 
                     stride_keys_vllm_block_size, 
                     stride_keys_vllm_x, 
+
+                    # ensemble
+                    MODEL_I,
+                    ENSEMBLE_RANDOMNESS,
                     
                     ROPE_METHOD,
                     ROPE_COS, stride_rope_cos_idx, stride_rope_cos_hid,
@@ -1162,6 +1202,10 @@ def _masking_iteration_compute(
                     stride_keys_vllm_head_size_x, 
                     stride_keys_vllm_block_size, 
                     stride_keys_vllm_x, 
+
+                    # ensemble
+                    MODEL_I,
+                    ENSEMBLE_RANDOMNESS,
                     
                     ROPE_METHOD,
                     ROPE_COS, stride_rope_cos_idx, stride_rope_cos_hid,
@@ -1287,6 +1331,9 @@ def masking_iteration(
     GRID_K_STRIDE: int,
     USING_SLIDING_WINDOW: bool,
     SLIDING_WINDOW_SIZE: int,
+    ENSEMBLE_PER_ATTN_ITER_N: int,
+    MODEL_I: int = 0,
+    ENSEMBLE_RANDOMNESS : float = 0.5,
     DEBUG: bool = False,
 ):
     if DEBUG:
@@ -1559,6 +1606,9 @@ def masking_iteration(
         GRID_K_STRIDE,
         USING_SLIDING_WINDOW,
         SLIDING_WINDOW_SIZE,
+        ENSEMBLE_PER_ATTN_ITER_N,
+        MODEL_I,
+        ENSEMBLE_RANDOMNESS,
         
         # num_warps=max(2, (min(8, max(BLOCK_TMASK_K//32, 1)) if SPARQ else 4) // GRID_KSTRIDE),
         # num_warps=1,
