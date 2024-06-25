@@ -1629,7 +1629,7 @@ def hip_attention(
                                         print(">>> STORED.")
                                         # input('stored. press enter to continue >>> ')
 
-                                from llm_ensemble.method.random_pruning import ensemble_random_pruning
+                                from hip_ensemble.method.random_pruning import ensemble_random_pruning
                                 indices, ks, origin_sparsity, sparsity_per_layer, sparsity_ratio, ensemble_cnt_filtered = ensemble_random_pruning(
                                     # ks,
                                     q,
