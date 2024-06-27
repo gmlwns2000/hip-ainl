@@ -36,9 +36,9 @@
 # # ensemble loop : TODO change thresh hardcoded as 5
 # # for ((thresh=5; thresh>0; thresh--)); do
 
-stride=(12288 16384) # 4096 8192 
+stride=(4096) # 4096 8192 12288 16384 
 t=(1)
-r=(0.5 2.5 10.0 12.5 2.5 0.5 15.0)
+r=(5.0 0.5 2.5 10.0 12.5 2.5 15.0)
 
 for ((si=0; si<${#stride[@]}; si++)); do
     # for ((ti=0; ti<${#t[@]}; ti+=1)); do

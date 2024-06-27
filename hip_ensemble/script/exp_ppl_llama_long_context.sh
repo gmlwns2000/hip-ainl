@@ -25,7 +25,7 @@ dl=(5 10)
 
 for ((si=0; si<${#stride[@]}; si++)); do
   for ((di=0; di<${#dl[@]}; di++)); do
-  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True CUDA_VISIBLE_DEVICES=0 \
+  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True CUDA_VISIBLE_DEVICES=1 \
   python -m hip.main.model_eval \
     --model llama32k \
     --stride "${stride[si]}" \

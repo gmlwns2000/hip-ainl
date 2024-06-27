@@ -43,21 +43,24 @@ def custom_attention(
     
     # Hyper attention state
     hyper_attention=None,
-        ensemble = False,
-        ensemble_model_setting = "random_pruning",
-        ensemble_method = "final_attn",
-        ensemble_method_final = "query",
-        ensemble_method_final_inter_thresh = None,
-        ensemble_method_final_bdd_mask_k = 0,
-        ensemble_method_final_timedim = None,
-        ensemble_per_layer_n = 1,
-        ensemble_per_attn_iter_n = 5,
-        ensemble_model_n = 5,
-        ensemble_particular_layer = None,
-        ensemble_layer_till = 6,
-        ensemble_randomness = 0.5,
 
-        layer_id = 0,
+    # Ensemble
+    ensemble = False,
+    ensemble_model_setting = "random_pruning",
+    ensemble_method = "final_attn",
+    ensemble_method_final = "query",
+    ensemble_method_final_inter_thresh = None,
+    ensemble_method_final_bdd_mask_k = 0,
+    ensemble_method_final_timedim = None,
+    ensemble_per_layer_n = 1,
+    ensemble_per_attn_iter_n = 5,
+    ensemble_model_n = 5,
+    ensemble_particular_layer = None,
+    ensemble_layer_till = 6,
+    ensemble_randomness = 0.5,
+    tree_stride = -1,
+
+    layer_id = 0,
 
 ):
     # os.makedirs('./cache/stride_debug/', exist_ok=True)

@@ -169,7 +169,7 @@ def load_model(args):
             m.tree_dense_queries = args.dense_queries
             # m.tree_stride = args.stride
 
-            m.sampling_method = args.sampling_method
+            # m.sampling_method = args.sampling_method
 
             ### ensemble # NOTE check: right place? -  working though
             m.ensemble = args.ensemble
