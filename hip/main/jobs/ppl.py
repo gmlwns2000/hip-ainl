@@ -26,7 +26,7 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, visuali
     if not args.ensemble:
         outfile = f'./cache/llama_eval/{args.name}/ppl_{args.method}_{args.model}_s{args.stride}_dl{args.dense_layers}_k{args.k}_bq{args.block_size_q}_bk{args.block_size_k}_ckpt{args.checkpoint is not None}.json'
     else:
-        outfile = f'./cache/llama_eval/{args.name}/ppl_{args.method}_{args.model}_s{args.stride}_dl{args.dense_layers}_k{args.k}_bq{args.block_size_q}_bk{args.block_size_k}_ckpt{args.checkpoint is not None}_ensbn{args.ensemble_model_n}_{args.ensemble_method_final}_mft{args.ensemble_method_final_inter_thresh}_bmk{args.ensemble_method_final_bdd_mask_k}_lt{args.ensemble_layer_till}_r{args.ensemble_randomness}_ftd{args.ensemble_method_final_timedim}.json'
+        outfile = f'./cache/llama_eval/{args.name}/ppl_{args.method}_{args.model}_s{args.stride}_dl{args.dense_layers}_k{args.k}_bq{args.block_size_q}_bk{args.block_size_k}_ckpt{args.checkpoint is not None}_ensbn{args.ensemble_model_n}_{args.ensemble_method_final}_mft{args.ensemble_method_final_inter_thresh}_bmk{args.ensemble_method_final_bdd_mask_k}_lt{args.ensemble_layer_till}_r{args.ensemble_randomness}_twd{args.ensemble_timedim_wd}.json'
 
     pathlib.Path(outfile).parent.mkdir(parents=True, exist_ok=True)
     print("Will write to", outfile)

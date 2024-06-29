@@ -1169,7 +1169,7 @@ def hip_attention(
     ensemble_method_final : str = "query",
     ensemble_method_final_inter_thresh : int = None,
     ensemble_method_final_bdd_mask_k : int = 0,
-    ensemble_method_final_timedim : int = None,
+    ensemble_timedim_wd : int = None,
     ensemble_per_layer_n : int = 1,
     ensemble_per_attn_iter_n : int = 5,
     ensemble_model_n : int = 5,
@@ -1228,7 +1228,7 @@ def hip_attention(
     #     'ensemble_method_final': ensemble_method_final,
     #     'ensemble_method_final_inter_thresh': ensemble_method_final_inter_thresh,
     #     'ensemble_method_final_bdd_mask_k': ensemble_method_final_bdd_mask_k,
-    #     'ensemble_method_final_timedim': ensemble_method_final_timedim,
+    #     'ensemble_timedim_wd': ensemble_timedim_wd,
     #     'ensemble_per_layer_n': ensemble_per_layer_n,
     #     'ensemble_per_attn_iter_n': ensemble_per_attn_iter_n,
     #     'ensemble_model_n': ensemble_model_n,
@@ -1458,14 +1458,14 @@ def hip_attention(
     with timer('hip_attention'):
         if not using_precomputed_mask:
             with timer('attention_matrix'):
+                # if prompt (exceed single tensor-core block), 
+                # do not use topk strding. this will cause more resource
+                estimated_ksrc_stride = min(32, max(1, round(mask_k / (block_size_k * 16))))
+                if q.shape[1] > 32:
+                    estimated_ksrc_stride = 1
+
                 if not ensemble:
                     real_ensemble = False
-                    # if prompt (exceed single tensor-core block), 
-                    # do not use topk strding. this will cause more resource
-                    estimated_ksrc_stride = min(32, max(1, round(mask_k / (block_size_k * 16))))
-                    if q.shape[1] > 32:
-                        estimated_ksrc_stride = 1
-                    
                     indices, ks = hip_attention_mask( # indices, ks, probs_or_context, scores = attention_matrix(
                     queries=q,
                     keys=k,
@@ -1524,29 +1524,17 @@ def hip_attention(
                 #     # input('stored. press enter to continue >>> ')
                 else:
                     real_ensemble = True
-                    ### ENSEMBLE: MODIFY indices
-                    # print("######")
-                    # print("ensemble : ", ensemble)
-                    # print('layer_id : ', layer_id)
-                    # print("ensemble_model_setting : ", ensemble_model_setting)
-                    # print("ensemble_method : ", ensemble_method)
-                    # print("ensemble_method_final : ", ensemble_method_final)
-                    # print("ensemble_method_final_inter_thresh : ", ensemble_method_final_inter_thresh)
-                    # print("ensemble_method_final_bdd_mask_k : ", ensemble_method_final_bdd_mask_k)
-                    # print("ensemble_method_final_timedim : ", ensemble_method_final_timedim)
-                    # print('ensemble_per_layer_n : ', ensemble_per_layer_n)
-                    # print('ensemble_model_n : ', ensemble_model_n)
-                    # print('ensemble_particular_layer : ', ensemble_particular_layer)
-                    # print('ensemble_layer_till : ', ensemble_layer_till)
                         
-                    assert ensemble_model_setting in ['random_pruning', 'model_zoo', 'transformer_suggest']
+                    assert ensemble_model_setting in ['random_pruning', 'attn_generation'] # 'model_zoo', 'transformer_suggest'
                     assert ensemble_method in ['final_attn', ] # TODO 'per_attn_iteration'
-                    if ensemble_model_setting == "random_pruning":
-                        if ensemble_method == 'final_attn':
-                            assert ensemble_method_final in ['query',]
-                            if (ensemble_layer_till != None and layer_id < ensemble_layer_till) or (ensemble_layer_till == None and (layer_id) == ensemble_particular_layer) or (ensemble_layer_till == None and ensemble_particular_layer == None and (layer_id+1) % ensemble_per_layer_n == 0):
-                                with timer('ensemble.ensemble_on'):
-                                    real_ensemble = True
+                    
+                    if (ensemble_layer_till != None and layer_id < ensemble_layer_till) or (ensemble_layer_till == None and (layer_id) == ensemble_particular_layer) or (ensemble_layer_till == None and ensemble_particular_layer == None and (layer_id+1) % ensemble_per_layer_n == 0):
+                        with timer('ensemble.ensemble_on'):
+                            real_ensemble = True
+
+                            if ensemble_model_setting == "random_pruning":
+                                if ensemble_method == 'final_attn':
+                                    assert ensemble_method_final in ['query', 'timedim']
                                     ensemble_attn_mask_per_layer = torch.empty((N, T_DST//block_size_q, mask_k//block_size_k, 0), device=q.device, dtype=torch.int64)
                                     with timer('ensemble.make_samples'):
                                         for i in range(ensemble_model_n):
@@ -1583,6 +1571,9 @@ def hip_attention(
                                                     
                                                     SELF_EXTEND_SCALE=self_extend_scale,
                                                     SELF_EXTEND_WINDOW=self_extend_window,
+
+                                                    GRID_SRC_STRIDE=estimated_ksrc_stride,
+                                                    GRID_K_STRIDE=estimated_ksrc_stride,
 
                                                     ENSEMBLE_PER_ATTN_ITER_N=ensemble_per_attn_iter_n,
                                                     MODEL_I = i,
@@ -1649,7 +1640,7 @@ def hip_attention(
                                             ensemble_method_final,
                                             ensemble_method_final_inter_thresh,
                                             ensemble_method_final_bdd_mask_k,
-                                            ensemble_method_final_timedim,
+                                            ensemble_timedim_wd,
                                             ensemble_per_layer_n,
                                             ensemble_per_attn_iter_n,
                                             ensemble_model_n,
@@ -1679,7 +1670,7 @@ def hip_attention(
                                         #         'ensemble_method_final' : ensemble_method_final,
                                         #         'ensemble_method_final_inter_thresh' : ensemble_method_final_inter_thresh,
                                         #         'ensemble_method_final_bdd_mask_k' : ensemble_method_final_bdd_mask_k,
-                                        #         'ensemble_method_final_timedim' : ensemble_method_final_timedim,
+                                        #         'ensemble_timedim_wd' : ensemble_timedim_wd,
                                         #         'ensemble_per_layer_n' : ensemble_per_layer_n,
                                         #         'ensemble_per_attn_iter_n' : ensemble_per_attn_iter_n,
                                         #         'ensemble_model_n' : ensemble_model_n,
@@ -1696,11 +1687,13 @@ def hip_attention(
 
                                         #     }, f'./cache/ensemble/llama13b_32k/method/{ensemble_model_setting}_{ensemble_method}_{ensemble_method_final}/l_{layer_id}_m_{ensemble_model_n}_pl_{ensemble_per_layer_n}_pat{ensemble_per_attn_iter_n}_ln{ensemble_particular_layer}.pth')
                                         #     print(">>> STORED.")
-                            else:
-                                with timer('ensemble.ensemble_off'):
-                                    real_ensemble = False
-                                    # print(f"@ l_{layer_id} NOT USING ENSEMBLE")
-                                    indices, ks = hip_attention_mask( # indices, ks, probs_or_context, scores
+                            elif ensemble_model_setting == "attn_generation":
+                                assert ensemble_method in ["vae", "gan", "diffusion"]
+
+                                ensemble_attn_mask_per_layer = torch.empty((N, T_DST//block_size_q, mask_k//block_size_k, 0), device=q.device, dtype=torch.int64)
+
+                                # use one hip attn result
+                                indices, ks = hip_attention_mask( # indices, ks, probs_or_context, scores
                                     queries=q,
                                     keys=k,
                                     values=v,
@@ -1721,7 +1714,6 @@ def hip_attention(
                                     IS_FLASH=is_flash,
                                     SPARQ=enable_sparq,
                                     SAMPLING_METHOD=sampling_method,
-
                                     USING_SLIDING_WINDOW=using_sliding_window,
                                     SLIDING_WINDOW_SIZE=sliding_window_size,
                                     
@@ -1732,11 +1724,85 @@ def hip_attention(
                                     
                                     SELF_EXTEND_SCALE=self_extend_scale,
                                     SELF_EXTEND_WINDOW=self_extend_window,
+                                    
+                                    GRID_SRC_STRIDE=estimated_ksrc_stride,
+                                    GRID_K_STRIDE=estimated_ksrc_stride,
 
                                     ENSEMBLE_PER_ATTN_ITER_N=ensemble_per_attn_iter_n,
                                 )
-                    # print('real_ensemble : ', real_ensemble)
-                    ### END OF ENSEMBLE
+
+                                if ensemble_method == "vae":
+                                    assert ensemble_method_final in ['fcl', 'cnn', ]
+
+                                    # indices, ks -> attention 결과랑 비교
+                                    N_H, TDST_BQ, MASK_K_BK = indices.shape
+                                    N_H, TDST_BQ = ks.shape
+                                    assert ensemble_attn_mask_per_layer.shape[:-1] == indices.shape
+                                    # os.makedirs('./cache/stride_debug/', exist_ok=True)
+                                    # torch.save({
+                                    #     # ks : torch.Tensor,
+                                    # 'indices' : indices,
+                                    # 'ks' : ks
+                                    # }, f'./cache/stride_debug/hip_attention{i}_s16384.pth')
+                                    # input('hip >>> ')
+                                    # print("* ENSEMBLE: INPUT 9999999 IN INDICES WHERE OUT OF RANGE KS") # NOTE
+                                    range_tensor = torch.arange(MASK_K_BK, device=indices.device)[None, None, :]
+                                    mask = range_tensor >= ks.unsqueeze(-1)
+                                    assert 9999999 > ks.max().item()
+                                    # indices[mask] = 9999999
+                                    indices.masked_fill_(mask, 9999999)
+                                    ensemble_attn_mask_per_layer = torch.cat((ensemble_attn_mask_per_layer, indices.unsqueeze(-1)), dim=-1)
+
+
+                                elif ensemble_method == "gan":
+                                    assert ensemble_method_final in []
+                                elif ensemble_method == "diffusion":
+                                    assert ensemble_method_final in []
+
+
+                    else:
+                        with timer('ensemble.ensemble_off'):
+                            real_ensemble = False
+                            # print(f"@ l_{layer_id} NOT USING ENSEMBLE")
+                            indices, ks = hip_attention_mask( # indices, ks, probs_or_context, scores
+                            queries=q,
+                            keys=k,
+                            values=v,
+                            attention_mask=attention_mask,
+                            kv_repeat_interleave=KV_REPEAT_INTERLEAVE,
+                            
+                            w_start=w_start,
+                            n_patches=n_patches,
+                            mask_k=mask_k,
+                            scale_up=scale_up,
+                            is_causal=is_causal,
+                            
+                            BLOCK_SIZE_Q=block_size_q,
+                            BLOCK_SIZE_K=block_size_k,
+                            REDUCE_METHOD=reduce_method,
+                            REDUCE_STRIDE=reduce_stride,
+                            
+                            IS_FLASH=is_flash,
+                            SPARQ=enable_sparq,
+                            SAMPLING_METHOD=sampling_method,
+
+                            USING_SLIDING_WINDOW=using_sliding_window,
+                            SLIDING_WINDOW_SIZE=sliding_window_size,
+                            
+                            ROPE_METHOD=rope_method,
+                            ROPE_COS=rope_cos,
+                            ROPE_SIN=rope_sin,
+                            POSITION_IDS=position_ids,
+                            
+                            SELF_EXTEND_SCALE=self_extend_scale,
+                            SELF_EXTEND_WINDOW=self_extend_window,
+
+                            GRID_SRC_STRIDE=estimated_ksrc_stride,
+                            GRID_K_STRIDE=estimated_ksrc_stride,
+
+                            ENSEMBLE_PER_ATTN_ITER_N=ensemble_per_attn_iter_n,
+                        )
+                    
         else:
             assert precomputed_ks is not None
             assert precomputed_indices is not None

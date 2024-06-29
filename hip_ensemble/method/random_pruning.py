@@ -17,7 +17,7 @@ def ensemble_random_pruning(
     ensemble_method_final : str,
     ensemble_method_final_inter_thresh : int,
     ensemble_method_final_bdd_mask_k : int,
-    ensemble_method_final_timedim : int,
+    ensemble_timedim_wd : int,
     ensemble_per_layer_n : int,
     ensemble_per_attn_iter_n : int,
     ensemble_model_n : int,
@@ -27,35 +27,7 @@ def ensemble_random_pruning(
 
     layer_id : int,
     ):
-    # os.makedirs('./cache/stride_debug/', exist_ok=True)
-    # torch.save({
-    #     # ks : torch.Tensor,
-    # 'q_hip': q_hip,
-    # 'k': k,
-    # 'v' : v,
-    # 'mask_k' : mask_k,
-    # 'block_size_q' : block_size_q,
-    # 'block_size_k' : block_size_k,
-
-    # 'ensemble' : ensemble,
-    # 'ensemble_model_setting' : ensemble_model_setting,
-    # 'ensemble_method' : ensemble_method, 
-    # 'ensemble_method_final' : ensemble_method_final,
-    # 'ensemble_method_final_inter_thresh' : ensemble_method_final_inter_thresh,
-    # 'ensemble_method_final_bdd_mask_k' : ensemble_method_final_bdd_mask_k,
-    # 'ensemble_method_final_timedim' : ensemble_method_final_timedim,
-    # 'ensemble_method_final_timedim' : ensemble_method_final_timedim,
-    # 'ensemble_per_layer_n' : ensemble_per_layer_n,
-    # 'ensemble_per_attn_iter_n' : ensemble_per_attn_iter_n,
-    # 'ensemble_model_n' : ensemble_model_n,
-    # 'ensemble_particular_layer' : ensemble_particular_layer,
-    # 'ensemble_attn_mask_per_layer' : ensemble_attn_mask_per_layer, 
-    # 'ensemble_randomness' : ensemble_randomness,
-
-    # 'layer_id' : layer_id,
-    # }, f'./cache/stride_debug/random_pruning_s16384.pth')
-    # input('rand >>> ')
-
+    
     N_H, TDST, HID = q_hip.shape
     _, TSRC, _ = k.shape
     _N_H, TDST_BQ, MASK_K_BK, MODEL_N = ensemble_attn_mask_per_layer.shape
@@ -63,9 +35,70 @@ def ensemble_random_pruning(
     assert TDST_BQ == TDST//block_size_q
     # indices : [40, 128, 256] = [N*H, TDST//BLOCK_SIZE_Q, mask_k//BLOCK_SIZE_K]
     assert ensemble_method in ['final_attn']
-    assert ensemble_method_final in ['query',]
+    assert ensemble_method_final in ['query', 'timedim']
 
     origin_sparsity = (torch.sum(ensemble_attn_mask_per_layer < TSRC)//ensemble_model_n).item()
+
+    from numba import njit, prange
+    import numpy as np
+
+    @njit(parallel=True)
+    def numba_unique(arr):
+        max_unique_vals = arr.size  # Maximum possible unique values
+        unique_vals = np.empty(max_unique_vals, dtype=arr.dtype)
+        counts = np.zeros(max_unique_vals, dtype=np.int64)
+        num_unique = 0
+
+        for x in arr:
+            found = False
+            for i in range(num_unique):
+                if unique_vals[i] == x:
+                    counts[i] += 1
+                    found = True
+                    break
+            if not found:
+                unique_vals[num_unique] = x
+                counts[num_unique] = 1
+                num_unique += 1
+        
+        return unique_vals[:num_unique], counts[:num_unique]
+
+    @njit
+    def unique_chunck(n_h, t, ensemble_attn_mask_per_layer, ensemble_timedim_wd, ensemble_method_final_inter_thresh):
+        # t - ensemble_timedim_wd + 1 ~ t unique value is put into i-th position
+        start_idx = max(0, t - ensemble_timedim_wd + 1)
+        flattened_values = ensemble_attn_mask_per_layer[n_h, start_idx:t+1, :].flatten()  # Flatten the 2D array slice
+        unique_values, unique_cnt = numba_unique(flattened_values) # , return_counts=True
+        # unique_values, unique_cnt = np.unique(ensemble_attn_mask_per_layer[n_h, start_idx:t, :], return_counts=True)
+        unique_cnt = np.where(unique_values < 999999, unique_cnt, -999999)
+        sorted_indices = np.argsort(-unique_cnt) # better to implement?
+        # sorted_indices = np.argsort(unique_cnt)[::-1]
+        sorted_unique_values = unique_values[sorted_indices]
+        sorted_cnt = unique_cnt[sorted_indices]
+
+        # sorted_unique_values = unique_values
+        # sorted_cnt = unique_cnt
+
+        assert ensemble_method_final_inter_thresh != None
+        mask = sorted_cnt >= ensemble_method_final_inter_thresh
+
+        ensemble_filtered = np.where(mask, sorted_unique_values, 9999999)
+        ensemble_cnt_filtered = np.where(mask, sorted_cnt, 9999999)
+
+        return ensemble_filtered, ensemble_cnt_filtered
+        
+    @njit(parallel = True)
+    def ensemble_timedim(_N_H, TDST_BQ, ensemble_attn_mask_per_layer, ensemble_result, ensemble_cnt_result, ensemble_timedim_wd, ensemble_method_final_inter_thresh):       
+        for n_h in prange(_N_H):
+            for t in prange(TDST_BQ):
+                ensemble_filtered, ensemble_cnt_filtered = unique_chunck(n_h, t, ensemble_attn_mask_per_layer, ensemble_timedim_wd, ensemble_method_final_inter_thresh)
+                # assert len(ensemble_filtered) <= ensemble_result.shape[-1]
+                # assert len(ensemble_filtered) <= ensemble_cnt_result.shape[-1]
+                ensemble_result[n_h, t, :len(ensemble_filtered)] = ensemble_filtered
+                ensemble_cnt_result[n_h, t, :len(ensemble_cnt_filtered)] = ensemble_cnt_filtered
+        
+        return ensemble_result, ensemble_cnt_result
+
     if ensemble_method == "final_attn":
         '''
         [40, 128, 256] * 5
@@ -95,7 +128,7 @@ def ensemble_random_pruning(
         if os.environ.get('ENSEMBLE_AGREE_DICLIST', '0') == '1':
             per_query_token_cnt_diclist = []
         
-        if ensemble_method_final == 'intersection' or ensemble_method_final == "query":
+        if ensemble_method_final == "query":
             # ensemble_attn_mask_per_layer [40, 128, 256, 5] to [N*H * TDST//BLOCK_SIZE_Q, mask_k//BLOCK_SIZE_K * ensemble_model_n]
             ensemble_attn_mask_per_layer = ensemble_attn_mask_per_layer.view(_N_H * TDST_BQ, MASK_K_BK * MODEL_N)
             # ensemble_attn_mask_per_layer : [N*H * TDST//BLOCK_SIZE_Q, mask_k//BLOCK_SIZE_K * ensemble_model_n]
@@ -104,7 +137,7 @@ def ensemble_random_pruning(
             
             # cnt_x = (unique_x[None, None, :] == ensemble_attn_mask_per_layer[:, :, None]).long().sum(1)
             N, K = ensemble_attn_mask_per_layer.shape
-
+            
             cnt_xs = []
             chunk_n = 64
             for icn in range(int(math.ceil(N / chunk_n))):
@@ -164,41 +197,67 @@ def ensemble_random_pruning(
 
                 ensemble_filtered = torch.where(mask, ensemble_sorted, torch.tensor(9999999, device=mask.device))
                 ensemble_cnt_filtered = torch.where(mask, ensemble_cnt_sorted, torch.tensor(9999999, device=mask.device))
-                
-            ## mask_i : where to discard leftovers 
-            filtered_mask = ensemble_filtered == 9999999
-            # Determine which columns have all rows as -1
-            columns_with_all_negative_one = torch.all(filtered_mask, dim=0)
-
-            # Get the first index where all rows have -1
-            nonzero_indices = torch.nonzero(columns_with_all_negative_one, as_tuple=True)
-
-            # If there are any such columns, find the first one
-            if len(nonzero_indices[0]) > 0:
-                mask_k_i = nonzero_indices[0][0].item()
-                k_final = min(mask_k_i, ensemble_indices_k_size)
-            else:
-                mask_k_i = -1  # If no such index is found
-                k_final = ensemble_indices_k_size # CHECK - is it min(ensemble_indices_k_size, ensemble_filtered.shape[1])
-
-            ensemble_filtered = ensemble_filtered[:, :k_final] # TODO is this meaningful??
-            ensemble_cnt_filtered = ensemble_cnt_filtered[:, :k_final]
-            ensemble_filtered = ensemble_filtered.view(_N_H, TDST_BQ, -1)
-            ensemble_cnt_filtered = ensemble_cnt_filtered.view(_N_H, TDST_BQ, -1)
-        elif ensemble_method_final == "time_dim":
-            assert ensemble_method_final_timedim != None
-
         
+        # elif ensemble_method_final == "timedim":
+        #     _N_H, TDST_BQ, MASK_K_BK, MODEL_N = ensemble_attn_mask_per_layer.shape
+        #     ensemble_attn_mask_per_layer = ensemble_attn_mask_per_layer.view(_N_H, TDST_BQ, MASK_K_BK * MODEL_N)
+
+        #     ensemble_result = torch.full((_N_H, TDST_BQ, MASK_K_BK * MODEL_N), 9999999)
+        #     ensemble_cnt_result = torch.full((_N_H, TDST_BQ, MASK_K_BK * MODEL_N), 9999999)
+
+
+
+
+        elif ensemble_method_final == "timedim":
+            _N_H, TDST_BQ, MASK_K_BK, MODEL_N = ensemble_attn_mask_per_layer.shape
+            ensemble_attn_mask_per_layer = ensemble_attn_mask_per_layer.view(_N_H, TDST_BQ, MASK_K_BK * MODEL_N)
+            ensemble_attn_mask_per_layer = ensemble_attn_mask_per_layer.cpu().numpy()
+
+            ensemble_result = np.full((_N_H, TDST_BQ, MASK_K_BK * MODEL_N * ensemble_timedim_wd), 9999999) # , dtype=np.int64
+            ensemble_cnt_result = np.full((_N_H, TDST_BQ, MASK_K_BK * MODEL_N * ensemble_timedim_wd), 9999999) # , dtype=np.int64
+
+            # print(ensemble_attn_mask_per_layer.shape) # (N_H, TDST_BQ, MASK_K_BK * MODEL_N)
+            # print(ensemble_result.shape)
+            # print(ensemble_cnt_result.shape)
+            # ensemble_filtered, ensemble_cnt_filtered = ensemble_timedim(ensemble_result, ensemble_cnt_result)
+            ensemble_filtered, ensemble_cnt_filtered = ensemble_timedim(_N_H, TDST_BQ, ensemble_attn_mask_per_layer, ensemble_result, ensemble_cnt_result, ensemble_timedim_wd, ensemble_method_final_inter_thresh)
+            ensemble_filtered = torch.from_numpy(ensemble_result).to(q_hip.device).view(_N_H * TDST_BQ, -1)
+            ensemble_cnt_filtered = torch.from_numpy(ensemble_cnt_result).to(q_hip.device).view(_N_H * TDST_BQ, -1)
+
         elif ensemble_method_final == "head":
             pass
         elif ensemble_method_final == "batch":
             pass
+        
+        ## mask_i : where to discard leftovers 
+        filtered_mask = ensemble_filtered == 9999999
+        # Determine which columns have all rows as -1
+        columns_with_all_negative_one = torch.all(filtered_mask, dim=0)
 
+        # Get the first index where all rows have -1
+        nonzero_indices = torch.nonzero(columns_with_all_negative_one, as_tuple=True)
+
+        # If there are any such columns, find the first one
+        if len(nonzero_indices[0]) > 0:
+            mask_k_i = nonzero_indices[0][0].item()
+            k_final = min(mask_k_i, ensemble_indices_k_size)
+        else:
+            mask_k_i = -1  # If no such index is found
+            k_final = ensemble_indices_k_size # CHECK - is it min(ensemble_indices_k_size, ensemble_filtered.shape[1])
+        
+        # breakpoint()
+
+        ensemble_filtered = ensemble_filtered[:, :k_final] # TODO is this meaningful??
+        ensemble_cnt_filtered = ensemble_cnt_filtered[:, :k_final]
+        ensemble_filtered = ensemble_filtered.view(_N_H, TDST_BQ, -1)
+        ensemble_cnt_filtered = ensemble_cnt_filtered.view(_N_H, TDST_BQ, -1)
 
         k_mask = ensemble_filtered < 9999999
         ks = k_mask.sum(dim=-1).view(_N_H, TDST_BQ)
         sparsity_per_layer = torch.sum(ensemble_filtered<9999999).item()
         sparsity_ratio = (sparsity_per_layer/origin_sparsity)
+
+        # breakpoint()
 
         # NOTE per_query_token_cnt_diclist is just for analysis
         if os.environ.get('ENSEMBLE_AGREE_DICLIST', '0') == '1':
@@ -246,6 +305,8 @@ def ensemble_random_pruning(
         # assert torch.all(ensembled_indices[:, k_size_max:] == 9999999)
         # ensembled_indices = ensembled_indices[:, :k_size_max] # TODO : Is undoing better for padding's perspective?
         # ensembled_indices = ensembled_indices.view(_N_H, TDST_BQ, -1)
+        
+
 
     # k_mask = ensembled_indices != 9999999
     # ks = k_mask.sum(dim=2)

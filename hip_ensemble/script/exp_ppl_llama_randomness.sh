@@ -38,14 +38,14 @@
 
 stride=(4096) # 4096 8192 12288 16384 
 t=(1)
-r=(5.0 0.5 2.5 10.0 12.5 2.5 15.0)
+r=(5.0 ) # 0.5 2.5 10.0 12.5 2.5 15.0
 
 for ((si=0; si<${#stride[@]}; si++)); do
     # for ((ti=0; ti<${#t[@]}; ti+=1)); do
     # for ((layer_till=5; layer_till<26; layer_till+=5)); do
     for ((bdd=0; bdd<1; bdd++)); do
         for ((ri=0; ri<${#r[@]}; ri++)); do
-        PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True CUDA_VISIBLE_DEVICES=0 \
+        PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True CUDA_VISIBLE_DEVICES=1 \
         python -m hip.main.model_eval \
         --model llama32k \
         --stride "${stride[si]}" \
@@ -58,7 +58,7 @@ for ((si=0; si<${#stride[@]}; si++)); do
         --ensemble \
         --ensemble-model-setting random_pruning \
         --ensemble-method final_attn \
-        --ensemble-method-final query \
+        --ensemble-method-final timedim \
         --ensemble-method-final-inter-thresh 1 \
         --ensemble-method-final-bdd-mask-k "${bdd}" \
         --ensemble-layer-till 32 \

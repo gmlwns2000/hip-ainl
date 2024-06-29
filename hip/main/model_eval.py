@@ -178,7 +178,7 @@ def load_model(args):
             m.ensemble_method_final = args.ensemble_method_final
             m.ensemble_method_final_inter_thresh = args.ensemble_method_final_inter_thresh
             m.ensemble_method_final_bdd_mask_k = args.ensemble_method_final_bdd_mask_k
-            m.ensemble_method_final_timedim = args.ensemble_method_final_timedim
+            m.ensemble_timedim_wd = args.ensemble_timedim_wd
 
             m.ensemble_per_layer_n = args.ensemble_per_layer_n
             m.ensemble_per_attn_iter_n = args.ensemble_per_attn_iter_n
