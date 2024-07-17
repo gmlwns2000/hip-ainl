@@ -73,7 +73,15 @@ def _calc_prob_return_context_acc_compute(
     stride_position_ids_tdst,
     
     SELF_EXTEND_SCALE,
-    SELF_EXTEND_WINDOW
+    SELF_EXTEND_WINDOW,
+    
+    RETURN_SCORES,
+    OUT_SCORES, 
+    stride_out_scores_n, 
+    stride_out_scores_tdst, 
+    stride_out_scores_k,
+    idx_out_k,
+    mask_out_k,
 ):
     # keys := [BLOCK_HID: hid, BLOCK_BK * BLOCK_SIZE_K: tsrc]
     # queries := [BLOCK_SIZE_Q: tdst, BLOCK_HID: hid]
@@ -252,6 +260,16 @@ def _calc_prob_return_context_acc_compute(
             (idx_tsrc[None, :] >= context_length)
         ) * (-1.0e+6)
     
+    if RETURN_SCORES:
+        tl.store(
+            OUT_SCORES +\
+                idx_n * stride_out_scores_n +\
+                idx_tdst[:, None] * stride_out_scores_tdst +\
+                idx_out_k[None, :] * stride_out_scores_k,
+            value=qk,
+            mask=mask_out_k[None, :] & mask_tdst[:, None],
+        )
+    
     # [BLOCK_SIZE_Q: tdst, 1: tsrc]
     m_ij = tl.maximum(m_i, tl.max(qk, axis=1)[:, None])
     qk = qk - m_ij
@@ -333,12 +351,12 @@ def _calc_prob_return_context_acc_compute(
 
 @triton.autotune(
     configs=[
-        triton.Config(kwargs={}, num_warps=16),
-        triton.Config(kwargs={}, num_warps=8),
+        triton.Config(kwargs={}, num_warps=16, num_stages=1),
+        triton.Config(kwargs={}, num_warps=8, num_stages=1),
         # BUG: CUDA misaligned memory address.
         # triton.Config(kwargs={}, num_warps=4),
-        triton.Config(kwargs={}, num_warps=2),
-        triton.Config(kwargs={}, num_warps=1),
+        triton.Config(kwargs={}, num_warps=2, num_stages=1),
+        triton.Config(kwargs={}, num_warps=1, num_stages=1),
     ],
     key=['BLOCK_HID', 'BLOCK_BK'],
     warmup=3,
@@ -415,6 +433,10 @@ def _calc_prob_return_context_compute(
     BLOCK_BK: tl.constexpr,
     NUM_SINK: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
+    
+    #score output
+    RETURN_SCORES: tl.constexpr,
+    OUT_SCORES, stride_out_scores_n, stride_out_scores_tdst, stride_out_scores_k,
 ):
     pid = tl.program_id(0).to(tl.int64)
     pid_n = pid // BDST
@@ -506,6 +528,9 @@ def _calc_prob_return_context_compute(
                 value = 1,
             )
             
+            idx_out_k = idx_sliding
+            mask_out_k = mask_sliding
+            
             acc, l_i, m_i = _calc_prob_return_context_acc_compute(
                 K, stride_k_n, stride_k_tsrc, stride_k_hid,
                 V, stride_v_n, stride_v_tsrc, stride_v_hid, 
@@ -568,7 +593,17 @@ def _calc_prob_return_context_compute(
                 
                 SELF_EXTEND_SCALE,
                 SELF_EXTEND_WINDOW,
+                
+                RETURN_SCORES,
+                OUT_SCORES,
+                stride_out_scores_n,
+                stride_out_scores_tdst,
+                stride_out_scores_k,
+                idx_out_k, 
+                mask_out_k,
             )
+    else:
+        SLIDING_SINK_SIZE = 0
     
     # perform main flash attention
     for idx_bbk in range(tl.cdiv(ks, BLOCK_BK)):
@@ -582,8 +617,9 @@ def _calc_prob_return_context_compute(
                 idx_bdst * stride_indices_bdst +\
                 idx_bk * stride_indices_bk,
             mask = mask_bk,
-            other = TSRC,
+            # other = TSRC,
         ).to(tl.int64)
+        idx_tsrc_block_start = tl.where(mask_bk, idx_tsrc_block_start, TSRC)
         
         # [BLOCK_BK, BLOCK_SIZE_K]
         idx_tsrc = tl.arange(0, BLOCK_SIZE_K)[None, :].to(tl.int64) + idx_tsrc_block_start[:, None]
@@ -596,6 +632,9 @@ def _calc_prob_return_context_compute(
         # [BLOCK_BK * BLOCK_SIZE_K; multiple of 16]
         idx_tsrc = tl.reshape(idx_tsrc, (BLOCK_BK * BLOCK_SIZE_K,))
         mask_tsrc = tl.reshape(mask_tsrc, (BLOCK_BK * BLOCK_SIZE_K,))
+        
+        idx_out_k = tl.arange(0, BLOCK_BK * BLOCK_SIZE_K) + BLOCK_BK * BLOCK_SIZE_K * idx_bbk + SLIDING_SINK_SIZE
+        mask_out_k = mask_tsrc
         
         if USING_SLIDING_WINDOW:
             # submit mask
@@ -670,6 +709,14 @@ def _calc_prob_return_context_compute(
             stride_position_ids_tdst,
             SELF_EXTEND_SCALE,
             SELF_EXTEND_WINDOW,
+            
+            RETURN_SCORES,
+            OUT_SCORES,
+            stride_out_scores_n,
+            stride_out_scores_tdst,
+            stride_out_scores_k,
+            idx_out_k,
+            mask_out_k,
         )
     
     # perform longformer flash attention
@@ -689,6 +736,12 @@ def _calc_prob_return_context_compute(
             ).to(tl.int1))
             if CONTEXT_LENGTH is not None:
                 mask_tsrc = mask_tsrc & (idx_tsrc < context_length)
+            
+            idx_out_k = tl.arange(0, BLOCK_BK * BLOCK_SIZE_K)\
+                + SLIDING_SINK_SIZE \
+                + BK * BLOCK_SIZE_K \
+                + idx_slide_block * BLOCK_BK * BLOCK_SIZE_K
+            mask_out_k = mask_tsrc
             
             acc, l_i, m_i = _calc_prob_return_context_acc_compute(
                 K, stride_k_n, stride_k_tsrc, stride_k_hid,
@@ -752,6 +805,14 @@ def _calc_prob_return_context_compute(
                 
                 SELF_EXTEND_SCALE,
                 SELF_EXTEND_WINDOW,
+                
+                RETURN_SCORES,
+                OUT_SCORES,
+                stride_out_scores_n,
+                stride_out_scores_tdst,
+                stride_out_scores_k,
+                idx_out_k,
+                mask_out_k,
             )
     
     # epilogue
@@ -812,6 +873,8 @@ def calc_prob_return_context(
     POSITION_IDS: Optional[Tensor] = None,
     SELF_EXTEND_SCALE: int = 1,
     SELF_EXTEND_WINDOW: int = 1,
+    RETURN_SCORES: bool = False,
+    NUM_SINK: Optional[int] = None,
 ):
     """
     implement flash attention 1, not 2.
@@ -825,7 +888,7 @@ def calc_prob_return_context(
     BSRC = triton.cdiv(TSRC, BLOCK_SIZE_K)
     BDST = triton.cdiv(TDST, BLOCK_SIZE_Q)
     _, _, BK = indices.shape
-    assert ks.shape == (N, BDST)
+    assert ks.shape == (N, BDST), f'{ks.shape}'
     
     # BLOCK_BK = max(1, 256 // BLOCK_SIZE_K)
     # BLOCK_BK = max(1, triton.next_power_of_2(BK) // 2)
@@ -953,7 +1016,31 @@ def calc_prob_return_context(
         position_ids_stride = (0, 0)
     
     # NOTE: to match 32x32 tensor-core
-    NUM_SINK = triton.cdiv(32, BLOCK_SIZE_K)
+    NUM_SINK = triton.cdiv(32, BLOCK_SIZE_K) if NUM_SINK is None else NUM_SINK
+    assert isinstance(NUM_SINK, int)
+    
+    if RETURN_SCORES:
+        if USING_SLIDING_WINDOW:
+            output_scores = torch.full(
+                (
+                    N, TDST, 
+                    indices.shape[-1] * BLOCK_SIZE_K + NUM_SINK * BLOCK_SIZE_K + SLIDING_WINDOW_SIZE
+                ),
+                fill_value=-32000.0,
+                dtype=queries.dtype,
+                device=queries.device,
+            )
+        else:    
+            output_scores = torch.full(
+                (N, TDST, indices.shape[-1] * BLOCK_SIZE_K),
+                fill_value=-32000.0,
+                dtype=queries.dtype,
+                device=queries.device,
+            )
+        output_scores_stride = output_scores.stride()
+    else:
+        output_scores = None
+        output_scores_stride = (0, 0, 0)
     
     # grid = (N, BDST, )
     grid = (N * BDST, )
@@ -1038,9 +1125,14 @@ def calc_prob_return_context(
         NUM_SINK,
         IS_CAUSAL,
         
+        RETURN_SCORES,
+        output_scores, *output_scores_stride
+        
         # num_warps=8,
         # num_stages=2,
     )
     torch.cuda.set_device(orig_device)
     
+    if RETURN_SCORES:
+        return context, output_scores
     return context
