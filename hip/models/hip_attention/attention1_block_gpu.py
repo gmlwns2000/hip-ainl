@@ -1533,6 +1533,10 @@ def hip_attention(
                     enable_sparq=enable_sparq,
                     sampling_method=sampling_method,
                     
+                    # ensemble
+                    ENSEMBLE_PER_ATTN_ITER_N=ensemble_per_attn_iter_n,
+                    # ENSEMBLE_RANDOMNESS = ensemble_randomness,
+
                     using_sliding_window=using_sliding_window,
                     sliding_window_size=sliding_window_size,
                     
@@ -1549,9 +1553,6 @@ def hip_attention(
                     
                     maximum_ks=maximum_ks,
                     maximum_ks_config=maximum_ks_config,
-
-                    ENSEMBLE_PER_ATTN_ITER_N=ensemble_per_attn_iter_n,
-                    # ENSEMBLE_RANDOMNESS = ensemble_randomness
                 )
                 # if os.environ.get('CHECKOUT_ENSEMBLE', '0') == '1':
                 #     os.makedirs(f'./cache/ensemble/llama13b_32k/models/default', exist_ok=True)
@@ -1601,32 +1602,35 @@ def hip_attention(
                                                     scale_up=scale_up,
                                                     is_causal=is_causal,
                                                     
-                                                    BLOCK_SIZE_Q=block_size_q,
-                                                    BLOCK_SIZE_K=block_size_k,
-                                                    REDUCE_METHOD=reduce_method,
-                                                    REDUCE_STRIDE=reduce_stride,
+                                                    block_size_q=block_size_q,
+                                                    block_size_k=block_size_k,
+                                                    reduce_method=reduce_method,
+                                                    reduce_stride=reduce_stride,
                                                     
-                                                    IS_FLASH=is_flash,
-                                                    SPARQ=enable_sparq,
-                                                    SAMPLING_METHOD=sampling_method,
+                                                    is_flash=is_flash,
+                                                    enable_sparq=enable_sparq,
+                                                    sampling_method=sampling_method,
                                                     
-                                                    USING_SLIDING_WINDOW=using_sliding_window,
-                                                    SLIDING_WINDOW_SIZE=sliding_window_size,
+                                                    using_sliding_window=using_sliding_window,
+                                                    sliding_window_size=sliding_window_size,
                                                     
-                                                    ROPE_METHOD=rope_method,
-                                                    ROPE_COS=rope_cos,
-                                                    ROPE_SIN=rope_sin,
-                                                    POSITION_IDS=position_ids,
+                                                    rope_method=rope_method,
+                                                    rope_cos=rope_cos,
+                                                    rope_sin=rope_sin,
+                                                    position_ids=position_ids,
                                                     
-                                                    SELF_EXTEND_SCALE=self_extend_scale,
-                                                    SELF_EXTEND_WINDOW=self_extend_window,
-
-                                                    GRID_SRC_STRIDE=estimated_ksrc_stride,
-                                                    GRID_K_STRIDE=estimated_ksrc_stride,
+                                                    self_extend_scale=self_extend_scale,
+                                                    self_extend_window=self_extend_window,
+                                                    
+                                                    grid_src_stride=estimated_ksrc_stride,
+                                                    grid_k_stride=estimated_ksrc_stride,
 
                                                     ENSEMBLE_PER_ATTN_ITER_N=ensemble_per_attn_iter_n,
                                                     MODEL_I = i,
-                                                    ENSEMBLE_RANDOMNESS = ensemble_randomness
+                                                    ENSEMBLE_RANDOMNESS = ensemble_randomness,
+
+                                                    maximum_ks=maximum_ks,
+                                                    maximum_ks_config=maximum_ks_config,
                                                 )
                                                 N_H, TDST_BQ, MASK_K_BK = indices.shape
                                                 N_H, TDST_BQ = ks.shape
@@ -1755,29 +1759,35 @@ def hip_attention(
                                     scale_up=scale_up,
                                     is_causal=is_causal,
                                     
-                                    BLOCK_SIZE_Q=block_size_q,
-                                    BLOCK_SIZE_K=block_size_k,
-                                    REDUCE_METHOD=reduce_method,
-                                    REDUCE_STRIDE=reduce_stride,
+                                    block_size_q=block_size_q,
+                                    block_size_k=block_size_k,
+                                    reduce_method=reduce_method,
+                                    reduce_stride=reduce_stride,
                                     
-                                    IS_FLASH=is_flash,
-                                    SPARQ=enable_sparq,
-                                    SAMPLING_METHOD=sampling_method,
-                                    USING_SLIDING_WINDOW=using_sliding_window,
-                                    SLIDING_WINDOW_SIZE=sliding_window_size,
+                                    is_flash=is_flash,
+                                    enable_sparq=enable_sparq,
+                                    sampling_method=sampling_method,
                                     
-                                    ROPE_METHOD=rope_method,
-                                    ROPE_COS=rope_cos,
-                                    ROPE_SIN=rope_sin,
-                                    POSITION_IDS=position_ids,
+                                    using_sliding_window=using_sliding_window,
+                                    sliding_window_size=sliding_window_size,
                                     
-                                    SELF_EXTEND_SCALE=self_extend_scale,
-                                    SELF_EXTEND_WINDOW=self_extend_window,
+                                    rope_method=rope_method,
+                                    rope_cos=rope_cos,
+                                    rope_sin=rope_sin,
+                                    position_ids=position_ids,
                                     
-                                    GRID_SRC_STRIDE=estimated_ksrc_stride,
-                                    GRID_K_STRIDE=estimated_ksrc_stride,
+                                    self_extend_scale=self_extend_scale,
+                                    self_extend_window=self_extend_window,
+                                    
+                                    grid_src_stride=estimated_ksrc_stride,
+                                    grid_k_stride=estimated_ksrc_stride,
 
                                     ENSEMBLE_PER_ATTN_ITER_N=ensemble_per_attn_iter_n,
+                                    MODEL_I = i,
+                                    ENSEMBLE_RANDOMNESS = ensemble_randomness,
+
+                                    maximum_ks=maximum_ks,
+                                    maximum_ks_config=maximum_ks_config,
                                 )
 
                                 if ensemble_method == "vae":
@@ -1826,30 +1836,35 @@ def hip_attention(
                             scale_up=scale_up,
                             is_causal=is_causal,
                             
-                            BLOCK_SIZE_Q=block_size_q,
-                            BLOCK_SIZE_K=block_size_k,
-                            REDUCE_METHOD=reduce_method,
-                            REDUCE_STRIDE=reduce_stride,
+                            block_size_q=block_size_q,
+                            block_size_k=block_size_k,
+                            reduce_method=reduce_method,
+                            reduce_stride=reduce_stride,
                             
-                            IS_FLASH=is_flash,
-                            SPARQ=enable_sparq,
-                            SAMPLING_METHOD=sampling_method,
-
-                            USING_SLIDING_WINDOW=using_sliding_window,
-                            SLIDING_WINDOW_SIZE=sliding_window_size,
+                            is_flash=is_flash,
+                            enable_sparq=enable_sparq,
+                            sampling_method=sampling_method,
                             
-                            ROPE_METHOD=rope_method,
-                            ROPE_COS=rope_cos,
-                            ROPE_SIN=rope_sin,
-                            POSITION_IDS=position_ids,
+                            using_sliding_window=using_sliding_window,
+                            sliding_window_size=sliding_window_size,
                             
-                            SELF_EXTEND_SCALE=self_extend_scale,
-                            SELF_EXTEND_WINDOW=self_extend_window,
-
-                            GRID_SRC_STRIDE=estimated_ksrc_stride,
-                            GRID_K_STRIDE=estimated_ksrc_stride,
+                            rope_method=rope_method,
+                            rope_cos=rope_cos,
+                            rope_sin=rope_sin,
+                            position_ids=position_ids,
+                            
+                            self_extend_scale=self_extend_scale,
+                            self_extend_window=self_extend_window,
+                            
+                            grid_src_stride=estimated_ksrc_stride,
+                            grid_k_stride=estimated_ksrc_stride,
 
                             ENSEMBLE_PER_ATTN_ITER_N=ensemble_per_attn_iter_n,
+                            MODEL_I = i,
+                            ENSEMBLE_RANDOMNESS = ensemble_randomness,
+
+                            maximum_ks=maximum_ks,
+                            maximum_ks_config=maximum_ks_config,
                         )
                     
         else:
