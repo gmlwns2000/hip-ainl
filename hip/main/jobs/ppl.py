@@ -1,3 +1,4 @@
+import math
 import os
 import pathlib
 import time
@@ -21,7 +22,7 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, visuali
         from vllm import LLM, SamplingParams
     except ModuleNotFoundError:
         LLM = torch.Tensor
-        warnings.warn('oops')
+        warnings.warn('vllm is not installed, this may cause error when you gave vLLM LLM')
     
     if not args.ensemble:
         outfile = f'./cache/llama_eval/{args.name}/ppl_{args.method}_{args.model}_s{args.stride}_dl{args.dense_layers}_k{args.k}_bq{args.block_size_q}_bk{args.block_size_k}_ckpt{args.checkpoint is not None}.json'
@@ -49,11 +50,11 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, visuali
 
     nlls = []
     prev_end_loc = 0
-
     viz_i = 0
     sparse_sum = 0
     sparse_cnt = 0
-    with tqdm(range(0, seq_len, stride)[:args.count]) as pbar: # [:1]
+    t = time.time()
+    with tqdm(range(0, seq_len, stride)[:args.count], dynamic_ncols=True) as pbar:
         for begin_loc in pbar:
             if visualize and viz_i == 0:
                 print("STORE FOR VISUALIZATION")
@@ -82,11 +83,21 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, visuali
                     outputs = model.generate(prompt, sampling_params)
 
                 else:
-                    outputs = model(
-                        input_ids,
-                        labels=target_ids,
-                    )
-                    neg_log_likelihood = outputs.loss
+                    sample_counts = int(os.getenv('_SAMPLE_COUNT', '1'))
+                    samples = []
+                    with tqdm(range(sample_counts), dynamic_ncols=True, position=1, disable=sample_counts <= 1) as pbar_sample:
+                        for _ in pbar_sample:
+                            outputs = model(
+                                input_ids,
+                                labels=target_ids,
+                            )
+                            samples.append(outputs.loss)
+                            pbar_sample.set_description(
+                                f'ppl: {torch.exp(torch.stack(nlls + [outputs.loss.cpu()]).mean()).item():.6f}'
+                            )
+                    if len(samples) > 1:
+                        print([f'{x.item():.5f}' for x in samples])
+                    neg_log_likelihood = min(samples)
 
             nlls.append(neg_log_likelihood.cpu())
 
@@ -102,8 +113,10 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, visuali
                     sparse_sum += 1
                 sparse_cnt += 1
 
+            tqdm.write(f'step {len(nlls)} PPL: {ppl:.6f}, {time.time() - t:.4f} sec')
+            t = time.time()
             pbar.set_description(f"ppl: {ppl:.3f} sparse: {sparse_sum/(sparse_cnt+1e-8):.2f}")
-
+            
             if end_loc == seq_len:
                 break
     ppl = torch.exp(torch.stack(nlls).mean()).item()

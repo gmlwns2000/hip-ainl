@@ -20,7 +20,7 @@ import json
 import math
 import os
 import warnings
-from typing import Literal, Optional, Tuple, Union
+from typing import List, Literal, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -30,6 +30,7 @@ import triton.language as tl
 from torch import Tensor
 from torch.autograd import Function
 from transformers.utils import logging
+import matplotlib.pyplot as plt
 
 # assert (triton.__version__ in ['2.3.0', '2.2.0', '2.1.0']) or ('nightly' in triton.__version__), triton.__version__
 # assert hasattr(tl, 'sort'), f'check triton version {triton.__version__}'
@@ -119,69 +120,76 @@ def hip_attention_mask(
     scale_up: int,
     is_causal: bool,
     
-    BLOCK_SIZE_Q: int = 16,
-    BLOCK_SIZE_K: int = 1,
-    REDUCE_METHOD: Literal['first', 'max', 'sum'] = 'max',
-    REDUCE_STRIDE: int = 1,
+    block_size_q: int = 16,
+    block_size_k: int = 1,
+    reduce_method: Literal['first', 'max', 'sum'] = 'max',
+    reduce_stride: int = 1,
     
-    SPARQ: bool = True,
-    SPARQ_START_TSRC: int = 2048,
-    SPARQ_START_BK: int = 128,
-    SPARQ_HID: int = 32,
-    SPARQ_REDUCE_METHOD: Literal['sum', 'max'] = 'sum',
+    enable_sparq: bool = True,
+    sparq_start_tsrc: int = 2048,
+    sparq_start_bk: int = 128,
+    sparq_hid: int = 32,
+    sparq_reduce_method: Literal['sum', 'max'] = 'sum',
     
-    IS_FLASH: bool = True,
+    is_flash: bool = True,
     
     # NOTE: this improve latency quite well, but hurt accuracy
-    ESTIMATOR_LOWER_RESOLUTION: int = 2,
-    ESTIMATOR_LOWER_RESOLUTION_STOP_N_BLOCKS: int = 64,
+    estimator_lower_resolution: int = 2,
+    estimator_lower_resolution_stop_n_blocks: int = 64,
     
-    SAMPLING_METHOD: str = 'first',
+    sampling_method: str = 'first',
 
     ENSEMBLE_PER_ATTN_ITER_N : int = 5,
     MODEL_I : int = 0,
     ENSEMBLE_RANDOMNESS : float = 0.5,
     
-    USING_SLIDING_WINDOW=True,
-    SLIDING_WINDOW_SIZE=128,
+    using_sliding_window=True,
+    sliding_window_size=128,
     
-    ROPE_METHOD='none',
-    ROPE_COS=None,
-    ROPE_SIN=None,
-    POSITION_IDS=None,
+    rope_method='none',
+    rope_cos=None,
+    rope_sin=None,
+    position_ids=None,
     
-    SELF_EXTEND_SCALE=None,
-    SELF_EXTEND_WINDOW=None,
+    self_extend_scale=None,
+    self_extend_window=None,
     
-    GRID_SRC_STRIDE=1,
-    GRID_K_STRIDE=1,
+    grid_src_stride=1,
+    grid_k_stride=1,
+    
+    maximum_ks=None,
+    maximum_ks_config=None,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
     global DEBUG
     
     if DEBUG:
-        print('hip_attention_mask', queries.shape, keys.shape, w_start, n_patches, mask_k, scale_up, BLOCK_SIZE_Q, BLOCK_SIZE_K)
+        print('hip_attention_mask', queries.shape, keys.shape, w_start, n_patches, mask_k, scale_up, block_size_q, block_size_k)
         os.makedirs('saves/models/hip_attention/', exist_ok=True)
     
     N, T_DST, HID = queries.shape
     _, T_SRC, _ = keys.shape
     assert T_DST <= T_SRC, f"{queries.shape}, {keys.shape}"
     
-    if triton.cdiv(mask_k, BLOCK_SIZE_K) <= ESTIMATOR_LOWER_RESOLUTION_STOP_N_BLOCKS:
-        ESTIMATOR_LOWER_RESOLUTION = 1
+    if triton.cdiv(mask_k, block_size_k) <= estimator_lower_resolution_stop_n_blocks:
+        estimator_lower_resolution = 1
     
-    if ESTIMATOR_LOWER_RESOLUTION > 1:
-        mask_k = mask_k // ESTIMATOR_LOWER_RESOLUTION
-        w_start = w_start // ESTIMATOR_LOWER_RESOLUTION
-        n_patches = n_patches // ESTIMATOR_LOWER_RESOLUTION
+    if estimator_lower_resolution > 1:
+        mask_k = mask_k // estimator_lower_resolution
+        w_start = w_start // estimator_lower_resolution
+        n_patches = n_patches // estimator_lower_resolution
+        if maximum_ks is not None:
+            maximum_ks = maximum_ks // estimator_lower_resolution
+            assert maximum_ks_config is not None
+            maximum_ks_config = list([x // estimator_lower_resolution for x in maximum_ks_config])
     
-    if SPARQ and ((mask_k // BLOCK_SIZE_K) < SPARQ_START_BK):
-        SPARQ = False
-    if SPARQ and (T_SRC < SPARQ_START_TSRC):
-        SPARQ = False
-    if ROPE_METHOD in ['self_extend']:
+    if enable_sparq and ((mask_k // block_size_k) < sparq_start_bk):
+        enable_sparq = False
+    if enable_sparq and (T_SRC < sparq_start_tsrc):
+        enable_sparq = False
+    if rope_method in ['self_extend']:
         # assert (mask_k // BLOCK_SIZE_K) <= 128, "oh this is bug,,, i need help"
         # SPARQ_HID = 16
-        SPARQ = False
+        enable_sparq = False
     
     # if SPARQ:
     #     warnings.warn('sparq is enabled')
@@ -190,10 +198,10 @@ def hip_attention_mask(
     device = queries.device
     # assert queries.device == keys.device
     
-    assert isinstance(BLOCK_SIZE_Q, int)
-    assert isinstance(BLOCK_SIZE_K, int)
-    BLOCK_SIZE_Q = int(BLOCK_SIZE_Q)
-    BLOCK_SIZE_K = int(BLOCK_SIZE_K)
+    assert isinstance(block_size_q, int)
+    assert isinstance(block_size_k, int)
+    block_size_q = int(block_size_q)
+    block_size_k = int(block_size_k)
     
     if attention_mask is not None:
         assert attention_mask.shape == (N, T_SRC)
@@ -205,9 +213,9 @@ def hip_attention_mask(
     
     with timer('matrix.setup'):
         # vectors
-        tsrcs_offset = max(BLOCK_SIZE_Q, BLOCK_SIZE_K) - 1
+        tsrcs_offset = max(block_size_q, block_size_k) - 1
         tsrcs = torch.arange(
-            tsrcs_offset+T_SRC-T_DST+1, tsrcs_offset+T_SRC+1, BLOCK_SIZE_Q, 
+            tsrcs_offset+T_SRC-T_DST+1, tsrcs_offset+T_SRC+1, block_size_q, 
             dtype=torch.int64,
             device=device,
         )\
@@ -226,66 +234,66 @@ def hip_attention_mask(
         
         # matrices
         # NOTE: float16 -> int64 seems not possible
-        bws = torch.ceil(ws / BLOCK_SIZE_K)
-        ks = torch.ceil(bws / GRID_SRC_STRIDE).to(torch.int64)
-        mask_k_block = triton.cdiv(triton.cdiv(mask_k, BLOCK_SIZE_K), GRID_K_STRIDE)
+        bws = torch.ceil(ws / block_size_k)
+        ks = torch.ceil(bws / grid_src_stride).to(torch.int64)
+        mask_k_block = triton.cdiv(triton.cdiv(mask_k, block_size_k), grid_k_stride)
         mask = torch.arange(
             mask_k_block, device=device, dtype=torch.float32
         )\
             .view(1, 1, 1, mask_k_block)\
-            .expand(1, 1, GRID_SRC_STRIDE, mask_k_block) \
+            .expand(1, 1, grid_src_stride, mask_k_block) \
                 / ks.unsqueeze(-1).unsqueeze(-1)
         mask = mask + (
-            torch.arange(GRID_SRC_STRIDE, device=device, dtype=torch.float32).view(1, 1, GRID_SRC_STRIDE, 1)
+            torch.arange(grid_src_stride, device=device, dtype=torch.float32).view(1, 1, grid_src_stride, 1)
         ) * (1 / bws.unsqueeze(-1).unsqueeze(-1))
         tmask = torch.zeros(
             (
                 mask.shape[0], 
                 mask.shape[1], 
-                GRID_SRC_STRIDE,
+                grid_src_stride,
                 mask_k_block * math.ceil(scale_up)
             ), 
             dtype=torch.float32, 
             device=device
         )
         
-        B_SRC = triton.cdiv(T_SRC, BLOCK_SIZE_K)
-        B_DST = triton.cdiv(T_DST, BLOCK_SIZE_Q) # CHECK upper bound?
+        B_SRC = triton.cdiv(T_SRC, block_size_k)
+        B_DST = triton.cdiv(T_DST, block_size_q)
         
         sparq_indices = None
         sparq_indices_strides = (1, 1, 1)
-        if SPARQ:
+        if enable_sparq:
             with timer('matrix.setup.sparq'):
                 q_scale = 1 / math.sqrt(HID)
                 queries_scores = queries
-                if ROPE_METHOD in ['self_extend']:
+                if rope_method in ['self_extend']:
                     queries_scores, _ = apply_rotary_pos_emb(
                         queries / q_scale, 
                         None, 
-                        ROPE_COS, 
-                        ROPE_SIN, 
-                        POSITION_IDS
+                        rope_cos, 
+                        rope_sin, 
+                        position_ids
                     )
                     queries_scores *= q_scale
                 queries_scores = queries_scores.abs()
-                if T_DST > 1 and (B_DST * BLOCK_SIZE_Q) != T_DST:
+                if T_DST > 1 and (B_DST * block_size_q) != T_DST:
                     queries_scores = F.pad(
                         queries_scores.unsqueeze(0), 
-                        (0, 0, 0, B_DST * BLOCK_SIZE_Q - T_DST), 
+                        (0, 0, 0, B_DST * block_size_q - T_DST), 
                         value=0
                     ).squeeze(0)
                 # print(queries_scores.shape, B_DST, BLOCK_SIZE_Q, T_DST, T_DST > 1 and (B_DST * BLOCK_SIZE_Q) != T_DST)
                 # TODO: padding
                 queries_scores = queries_scores.view(N, B_DST, -1, HID)
-                if SPARQ_REDUCE_METHOD == 'sum':
+                if sparq_reduce_method == 'sum':
                     queries_scores = queries_scores.sum(-2)
-                elif SPARQ_REDUCE_METHOD == 'max':
+                elif sparq_reduce_method == 'max':
                     queries_scores = queries_scores.max(-2)[0]
                 else:
                     raise Exception()
                 _, sparq_indices = torch.topk(
                     queries_scores, 
-                    k=SPARQ_HID, 
+                    k=sparq_hid, 
                     dim=-1, 
                     sorted=True
                 )
@@ -319,20 +327,24 @@ def hip_attention_mask(
             
             # operator variables
             scale_up, 
-            triton.cdiv(n_patches, BLOCK_SIZE_K), 
-            triton.cdiv(mask_k, BLOCK_SIZE_K), 
+            triton.cdiv(n_patches, block_size_k), 
+            triton.cdiv(mask_k, block_size_k), 
             is_causal,
             
             # iteration controls
             i_iteration, n_iteration,
             
             # rope config
-            ROPE_METHOD,
-            ROPE_COS,
-            ROPE_SIN,
-            POSITION_IDS,
-            SELF_EXTEND_SCALE,
-            SELF_EXTEND_WINDOW,
+            rope_method,
+            rope_cos,
+            rope_sin,
+            position_ids,
+            self_extend_scale,
+            self_extend_window,
+            
+            # dynamic k per query
+            maximum_ks,
+            maximum_ks_config,
             
             # input constant
             kv_repeat_interleave,
@@ -342,23 +354,23 @@ def hip_attention_mask(
             B_DST,
             B_SRC,
             HID,
-            SPARQ, 
-            SPARQ_HID, 
-            max(0, triton.cdiv(n_completed, BLOCK_SIZE_Q) - (triton.cdiv(T_SRC, BLOCK_SIZE_Q) - triton.cdiv(T_DST, BLOCK_SIZE_Q))),
+            enable_sparq, 
+            sparq_hid, 
+            max(0, triton.cdiv(n_completed, block_size_q) - (triton.cdiv(T_SRC, block_size_q) - triton.cdiv(T_DST, block_size_q))),
             
             # kernel constant
-            BLOCK_SIZE_Q,
-            BLOCK_SIZE_K,
-            REDUCE_METHOD,
-            REDUCE_STRIDE,
+            block_size_q,
+            block_size_k,
+            reduce_method,
+            reduce_stride,
             
-            SAMPLING_METHOD,
+            sampling_method,
             
-            GRID_SRC_STRIDE,
-            GRID_K_STRIDE,
+            grid_src_stride,
+            grid_k_stride,
             
-            USING_SLIDING_WINDOW,
-            SLIDING_WINDOW_SIZE,
+            using_sliding_window,
+            sliding_window_size,
             
             ENSEMBLE_PER_ATTN_ITER_N,
             MODEL_I,
@@ -367,26 +379,26 @@ def hip_attention_mask(
             DEBUG,
         )
         if DEBUG:
-            debug_print(w_curr, mask, ws, ks, N, T_DST, T_SRC, BLOCK_SIZE_Q, BLOCK_SIZE_K)
+            debug_print(w_curr, mask, ws, ks, N, T_DST, T_SRC, block_size_q, block_size_k)
     
     with timer('matrix.cleanup'):
-        if ESTIMATOR_LOWER_RESOLUTION > 1:
-            mask = torch.repeat_interleave(mask, ESTIMATOR_LOWER_RESOLUTION, dim=-1)
-            ks = ks * ESTIMATOR_LOWER_RESOLUTION
-            mask_k = mask_k * ESTIMATOR_LOWER_RESOLUTION
-        indices = safe_indices(mask, ws, BLOCK_SIZE_K)
+        if estimator_lower_resolution > 1:
+            mask = torch.repeat_interleave(mask, estimator_lower_resolution, dim=-1)
+            ks = ks * estimator_lower_resolution
+            mask_k = mask_k * estimator_lower_resolution
+        indices = safe_indices(mask, ws, block_size_k)
     
     # # NOTE: are you sure this function is the only thing can differentiate?
-    with timer("score" if not IS_FLASH else "flash_atten"):
-        if not USING_SLIDING_WINDOW:
+    with timer("score" if not is_flash else "flash_atten"):
+        if not using_sliding_window:
             warnings.warn('you are not using sliding window, WARN: this may degrade performance')
-        if not IS_FLASH:
-            assert ROPE_METHOD in ['none']
-            assert not USING_SLIDING_WINDOW
-            assert not SPARQ
+        if not is_flash:
+            assert rope_method in ['none']
+            assert not using_sliding_window
+            assert not enable_sparq
             warnings.warn('you are not using flash attention, WARN: this may degrade performance & latency')
         else:
-            assert ROPE_METHOD in ['self_extend', 'none']
+            assert rope_method in ['self_extend', 'none']
     
     return indices, ks
 
@@ -982,7 +994,7 @@ def sparse_attention(
     return context
 
 import numba
-@numba.njit
+@numba.njit(parallel=True)
 def to_dense(
     indices: np.ndarray, 
     ks: np.ndarray, 
@@ -992,13 +1004,13 @@ def to_dense(
     # print(indices.shape, ks.shape, value.shape, T_DST, T_SRC)
     out = np.zeros((N, T_DST, T_SRC), dtype=np.float32)
     for idx_n in numba.prange(N):
-        for idx_bdst in range(indices.shape[1]):
+        for idx_bdst in numba.prange(indices.shape[1]):
             for idx_k in range(indices.shape[2]):
                 if idx_k < ks[idx_n, idx_bdst]:
                     idx_tsrc = indices[idx_n, idx_bdst, idx_k]
                     if value is not None:
                         dst = out[
-                            idx_n, 
+                            idx_n,
                             idx_bdst * BLOCK_SIZE_Q: (idx_bdst + 1) * BLOCK_SIZE_Q, 
                             idx_tsrc: idx_tsrc + BLOCK_SIZE_K
                         ]
@@ -1138,8 +1150,8 @@ def hip_attention(
     q: Tensor, 
     k: Tensor, 
     v: Tensor,
-    # optional mask
-    attention_mask: Tensor = None,
+    # optional attention mask
+    attention_mask: Optional[Tensor] = None,
     
     # NOTE: do not touch w_start, n_patches, scale_up unless you really understand what are they.
     # NOTE: heuristics: w_start == mask_k * scale_up
@@ -1150,17 +1162,24 @@ def hip_attention(
     scale_up: float = 2,
     is_causal: bool = True,
     
+    # block approximation hyperparameter
     block_size_q: int = 32,
     block_size_k: int = 2,
     reduce_method: str = 'max',
     reduce_stride: int = 2,
     
+    # chunk the hip_attention computation, to prevent allocate large temp buffers
     chunking: bool = False,
     chunk_size: int = 2048,
-
+    
+    # using flash attention for sparse attention
     is_flash: bool = True,
+    force_return_scores: bool = False,
+    
+    # control SparQ attention for score approximation in masking
     enable_sparq: bool = True,
     
+    # representative token sampling method
     sampling_method: str = 'random',
 
     ensemble : bool = False,
@@ -1178,22 +1197,35 @@ def hip_attention(
     ensemble_randomness : float = 0.5,
 
     layer_id : int = 0,    
+    
+    # sliding window
     using_sliding_window: bool = True,
     sliding_window_size: int = 128,
     
+    # control query length for dense attention
     dense_queries_exp: Optional[int] = None,
     
+    # rope (experimental)
     rope_method: Literal['none', 'self_extend'] = 'none',
     rope_cos: Optional[Tensor] = None,
     rope_sin: Optional[Tensor] = None,
     position_ids: Optional[Tensor] = None,
     
+    # self-extend (experimental)
     self_extend_scale: int = 8,
     self_extend_window: int = 1024,
     
+    # cached masking
     using_precomputed_mask: bool = False,
-    precomputed_indices: Tensor = None,
-    precomputed_ks: Tensor = None,
+    precomputed_indices: Optional[Tensor] = None,
+    precomputed_ks: Optional[Tensor] = None,
+    
+    # dynamic k per query support
+    maximum_ks: Optional[Tensor] = None,
+    maximum_ks_config: Optional[List[int]] = None,
+    
+    # number of sink tokens, default to size of tensor core
+    num_sink: Optional[int] = None,
 ):
     # os.makedirs('./cache/stride_debug/', exist_ok=True)
     # torch.save({
@@ -1328,6 +1360,7 @@ def hip_attention(
                     chunk_size=chunk_size,
                     
                     is_flash=is_flash,
+                    force_return_scores=force_return_scores,
                     
                     enable_sparq=enable_sparq,
                     sampling_method=sampling_method,
@@ -1348,6 +1381,11 @@ def hip_attention(
                     using_precomputed_mask=using_precomputed_mask,
                     precomputed_ks=precomputed_ks,
                     precomputed_indices=precomputed_indices,
+                    
+                    maximum_ks=maximum_ks,
+                    maximum_ks_config=maximum_ks_config,
+                    
+                    num_sink=num_sink,
                 )
                 contexts.append(sparse_context)
             
@@ -1394,6 +1432,8 @@ def hip_attention(
                 reduce_stride=reduce_stride,
                 
                 is_flash=is_flash,
+                force_return_scores=force_return_scores,
+                
                 enable_sparq=enable_sparq,
                 
                 sampling_method=sampling_method,
@@ -1415,6 +1455,11 @@ def hip_attention(
                 using_precomputed_mask=using_precomputed_mask,
                 precomputed_ks=precomputed_ks,
                 precomputed_indices=precomputed_indices,
+                
+                maximum_ks=maximum_ks,
+                maximum_ks_config=maximum_ks_config,
+                
+                num_sink=num_sink,
             )
             contexts.append(context)
             
@@ -1479,27 +1524,31 @@ def hip_attention(
                     scale_up=scale_up,
                     is_causal=is_causal,
                     
-                    BLOCK_SIZE_Q=block_size_q,
-                    BLOCK_SIZE_K=block_size_k,
-                    REDUCE_METHOD=reduce_method,
-                    REDUCE_STRIDE=reduce_stride,
+                    block_size_q=block_size_q,
+                    block_size_k=block_size_k,
+                    reduce_method=reduce_method,
+                    reduce_stride=reduce_stride,
                     
-                    IS_FLASH=is_flash,
-                    SPARQ=enable_sparq,
-                    SAMPLING_METHOD=sampling_method,
-                    USING_SLIDING_WINDOW=using_sliding_window,
-                    SLIDING_WINDOW_SIZE=sliding_window_size,
+                    is_flash=is_flash,
+                    enable_sparq=enable_sparq,
+                    sampling_method=sampling_method,
                     
-                    ROPE_METHOD=rope_method,
-                    ROPE_COS=rope_cos,
-                    ROPE_SIN=rope_sin,
-                    POSITION_IDS=position_ids,
+                    using_sliding_window=using_sliding_window,
+                    sliding_window_size=sliding_window_size,
                     
-                    SELF_EXTEND_SCALE=self_extend_scale,
-                    SELF_EXTEND_WINDOW=self_extend_window,
+                    rope_method=rope_method,
+                    rope_cos=rope_cos,
+                    rope_sin=rope_sin,
+                    position_ids=position_ids,
                     
-                    GRID_SRC_STRIDE=estimated_ksrc_stride,
-                    GRID_K_STRIDE=estimated_ksrc_stride,
+                    self_extend_scale=self_extend_scale,
+                    self_extend_window=self_extend_window,
+                    
+                    grid_src_stride=estimated_ksrc_stride,
+                    grid_k_stride=estimated_ksrc_stride,
+                    
+                    maximum_ks=maximum_ks,
+                    maximum_ks_config=maximum_ks_config,
 
                     ENSEMBLE_PER_ATTN_ITER_N=ensemble_per_attn_iter_n,
                     # ENSEMBLE_RANDOMNESS = ensemble_randomness
@@ -1827,38 +1876,38 @@ def hip_attention(
                 )
                 assert probs.dtype == q.dtype, f"{probs.dtype} == {q.dtype}"
                 
-                if DEBUG:
-                    x = to_dense(
-                        indices.cpu().numpy(),
-                        ks.cpu().numpy(),
-                        probs.detach().cpu().to(torch.float32).numpy(),
-                        N, 
-                        T_DST, 
-                        T_SRC, 
-                        block_size_q, 
-                        block_size_k,
-                    )[0]
-                    x = skimage.measure.block_reduce(x, (1, 1), np.max) ** 0.1
-                    if x.shape[0] == 1:
-                        x = x.repeat(32, 0)
-                    plt.imshow(x)
-                    path = 'saves/models/hip_attention/block_est.png'
-                    print('saved', path)
-                    plt.savefig(path, dpi=200, bbox_inches='tight')
-                    
-                    if isinstance(k, Tensor):
-                        x = (q[0] @ k[0].transpose(-1, -2)).detach().to(torch.float32).cpu().numpy()
-                        if is_causal:
-                            x = x + (1 - np.tri(*x.shape, T_SRC-T_DST)) * (-10000)
-                        x = np.exp(x - x.max(-1, keepdims=True))
-                        x = x / x.sum(-1, keepdims=True)
-                        x = skimage.measure.block_reduce(x, (1, 1), np.max) ** 0.1
-                        plt.imshow(x)
-                        path = 'saves/models/hip_attention/block_truth.png'
-                        print('saved', path)
-                        plt.savefig(path, dpi=200, bbox_inches='tight')
-                        # print(ks)
-                        # input('>>>')
+                # if DEBUG:
+                #     x = to_dense(
+                #         indices.cpu().numpy(),
+                #         ks.cpu().numpy(),
+                #         probs.detach().cpu().to(torch.float32).numpy(),
+                #         N, 
+                #         T_DST, 
+                #         T_SRC, 
+                #         block_size_q, 
+                #         block_size_k,
+                #     )[0]
+                #     x = skimage.measure.block_reduce(x, (1, 1), np.max) ** 0.1
+                #     if x.shape[0] == 1:
+                #         x = x.repeat(32, 0)
+                #     plt.imshow(x)
+                #     path = 'saves/models/hip_attention/block_est.png'
+                #     print('saved', path)
+                #     plt.savefig(path, dpi=200, bbox_inches='tight')
+                #
+                #     if isinstance(k, Tensor):
+                #         x = (q[0] @ k[0].transpose(-1, -2)).detach().to(torch.float32).cpu().numpy()
+                #         if is_causal:
+                #             x = x + (1 - np.tri(*x.shape, T_SRC-T_DST)) * (-10000)
+                #         x = np.exp(x - x.max(-1, keepdims=True))
+                #         x = x / x.sum(-1, keepdims=True)
+                #         x = skimage.measure.block_reduce(x, (1, 1), np.max) ** 0.1
+                #         plt.imshow(x)
+                #         path = 'saves/models/hip_attention/block_truth.png'
+                #         print('saved', path)
+                #         plt.savefig(path, dpi=200, bbox_inches='tight')
+                #         # print(ks)
+                #         # input('>>>')
                 
                 context = sparse_attention(
                     v,
@@ -1870,11 +1919,14 @@ def hip_attention(
                     BLOCK_SIZE_K=block_size_k,
                 )
             else:
-                scores = probs = None
-                context = calc_prob_return_context(
-                    queries=q, keys=k, values=v, 
+                probs = None
+                t = calc_prob_return_context(
+                    queries=q, 
+                    keys=k, 
+                    values=v, 
                     attention_mask=attention_mask,
-                    indices=indices, ks=ks,
+                    indices=indices, 
+                    ks=ks,
                     KV_REPEAT_INTERLEAVE=KV_REPEAT_INTERLEAVE,
                     BLOCK_SIZE_Q=block_size_q, 
                     BLOCK_SIZE_K=block_size_k,
@@ -1887,7 +1939,13 @@ def hip_attention(
                     POSITION_IDS=position_ids,
                     SELF_EXTEND_SCALE=self_extend_scale,
                     SELF_EXTEND_WINDOW=self_extend_window,
+                    RETURN_SCORES=force_return_scores,
+                    NUM_SINK=num_sink,
                 )
+                if force_return_scores:
+                    context, probs = t
+                else:
+                    context = t
     
     return context, (indices, ks, probs, sparsity_ratio if real_ensemble else None, ensemble_cnt_filtered if real_ensemble else None)
 
@@ -2173,29 +2231,60 @@ def main_debug():
     v = v.repeat(1, reps, 1)
     out = out.repeat(1, reps, 1)
     
-    # q = q[:, k.shape[1]//2:, :]
-    # out = out[:, k.shape[1]//2:, :]
+    q = q[:, -k.shape[1]//4:, :]
+    out = out[:, -k.shape[1]//4:, :]
     
     print('q', q.shape)
     print('k', k.shape)
     print('v', v.shape)
     print('out', out.shape)
     
+    mask_k = 512
+    block_size_q = 32
+    block_size_k = 2
+    
+    maximum_ks = torch.where(
+        torch.rand((q.shape[0], q.shape[1] // block_size_q), device=q.device) < 0.5,
+        mask_k,
+        mask_k // 4,
+    ).to(torch.int32)
+    # maximum_ks = None
+    
     context, (
         atten_indices, 
         atten_ks, 
-        atten_probs
+        atten_scores
     ) = hip_attention(
         q,
         k,
         v,
-        mask_k=512,
-        block_size_q=32,
-        block_size_k=2,
+        mask_k=mask_k,
+        block_size_q=block_size_q,
+        block_size_k=block_size_k,
         dense_queries_exp=0,
         is_flash=True,
-        using_sliding_window=False,
+        using_sliding_window=True,
+        maximum_ks=maximum_ks,
+        maximum_ks_config=[128, 512],
+        force_return_scores=True,
     )
+    
+    print(maximum_ks[0])
+    print(atten_indices[0])
+    print(atten_ks[0])
+    
+    atten_probs = atten_scores.softmax(-1)
+    plt.figure(figsize=(4, 5.5))
+    plt.imshow(atten_probs[0].cpu().numpy() ** 0.2)
+    plt.axvline(32, color='red')
+    plt.axvline(32 + 512, color='red')
+    for idx_tdst in range(0, atten_probs.shape[1], block_size_q):
+        plt.axhline(idx_tdst, color='magenta', linestyle=':')
+    plt.colorbar()
+    path = 'saves/models/hip_attention/atten_probs.png'
+    plt.savefig(path, dpi=200)
+    print('saved', path)
+    print(atten_probs.shape)
     
     print(atten_ks, atten_ks.min(), atten_ks.max())
     
@@ -2238,11 +2327,111 @@ def main_debug_mask():
     
     print(f'err = {stderr:.6f} ({stderr/stdcontext:.4f} sigma), out_std = {stdcontext:.6f}')
 
+def main_debug_max_ks():
+    import nvtx
+    global DEBUG
+    DEBUG = False
+    
+    block = 1024
+    # block = 256
+    q, k, v, out = load_checkouts(
+        dtype=torch.float32, 
+        seq_len=block * 32, 
+        idx=6, 
+        window=1
+    )
+    
+    reps = 1
+    q = q.repeat(1, reps, 1)
+    k = k.repeat(1, reps, 1)
+    v = v.repeat(1, reps, 1)
+    out = out.repeat(1, reps, 1)
+    
+    # q = q[:, -k.shape[1]//4:, :]
+    # out = out[:, -k.shape[1]//4:, :]
+    
+    print('q', q.shape)
+    print('k', k.shape)
+    print('v', v.shape)
+    print('out', out.shape)
+    
+    low_k = 128
+    mask_k = 2048
+    # low_k = 512
+    # mask_k = 512
+    block_size_q = 32
+    block_size_k = 2
+    
+    def sample(ratio: float, n: int = 100):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        
+        maximum_ks = torch.where(
+            torch.rand((q.shape[0], q.shape[1] // block_size_q), device=q.device) < ratio,
+            mask_k,
+            low_k
+        ).to(torch.int32)
+        
+        def fn():
+            hip_attention(
+                q,
+                k,
+                v,
+                mask_k=mask_k,
+                block_size_q=block_size_q,
+                block_size_k=block_size_k,
+                dense_queries_exp=0,
+                is_flash=True,
+                using_sliding_window=True,
+                maximum_ks=maximum_ks,
+                maximum_ks_config=[low_k, mask_k],
+                force_return_scores=False,
+            )
+        
+        start.record()
+        graph = None
+        for i in range(n):
+            if graph is None:
+                s = torch.cuda.Stream()
+                s.wait_stream(torch.cuda.current_stream())
+                for i in range(3):
+                    fn()
+                torch.cuda.current_stream().wait_stream(s)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    fn()
+            
+            start.record()
+            graph.replay()
+            end.record()
+            
+            if i > 3:
+                torch.cuda.synchronize()
+                elapsed = start.elapsed_time(end)
+                samples.append(elapsed)
+        
+        return sum(samples) / len(samples)
+
+    for ratio in range(0, 10):
+        ratio = ratio / 20
+        samples = []
+        with nvtx.annotate(f'ratio={ratio}'):
+            for i in range(10):
+                t = sample(ratio)
+                if i > 3:
+                    samples.append(t)
+        
+        if len(samples) > 0:
+            latency = sum(samples) / len(samples)
+            print(ratio, ratio * mask_k + (1-ratio) * low_k, latency)
+
 if __name__ == '__main__':
     import sys
     if sys.argv[-1] == 'debug':
         main_debug()
     elif sys.argv[-1] == 'debug_mask':
         main_debug_mask()
+    elif sys.argv[-1] == 'debug_max_ks':
+        main_debug_max_ks()
     else:
         main_latency_benchmark()

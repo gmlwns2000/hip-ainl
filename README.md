@@ -2,6 +2,8 @@
 ![demo gif](docs/demo.gif)
 > [**Link to Demo Video**](docs/demo.mp4)
 
+> [**Link to Preprint**](https://arxiv.org/abs/2406.09827)
+
 # Usage
 
 After installation, you can access to `hip` package from any project. `hip` is code name of HiP attention.
@@ -93,18 +95,8 @@ output, _ = paged_hip_attention(
 ## How to clone the repository
 
 ```bash
-git clone <this-repo-url> hip-attention
+git clone git@github.com:DeepAuto-AI/hip-attention.git
 cd hip-attention
-git submodule update --init --remote --recursive  # pull submodules
-```
-
-## How to build Docker
-
-Run commands below:
-
-```bash
-cd third_party/vllm-hip
-docker build . --build-context hip=../.. --target vllm-openai --tag vllm/vllm-openai
 ```
 
 ## Running Docker
@@ -112,49 +104,66 @@ docker build . --build-context hip=../.. --target vllm-openai --tag vllm/vllm-op
 After building the container, run commands below (change `--gpus` and `--tensor-parallel-size` according to your environment):
 
 ```bash
-docker run --runtime nvidia --rm -it --gpus 0,1,2,3 --ipc=host \
+docker run --runtime nvidia --rm -it --ipc=host \
+    --gpus '"device=0"' \
+    -p 8001:8001 \
     -v ~/.cache/huggingface/:/root/.cache/huggingface \
     -e 'ATTENTION_BACKEND=hip' \
     -e 'HIP_K=512' \
     -e 'HIP_REFRESH_INTERVAL=8' \
     -e 'HIP_DENSE_LAYERS=4' \
-    vllm/vllm-openai \
-        --model togethercomputer/LLaMA-2-7B-32K \
-        --tensor-parallel-size 4 \
+    deepauto/vllm-hip-openai:latest \
+        --port 8001 \
+        --model Qwen/Qwen2-1.5B-Instruct \
+        --tensor-parallel-size 1 \
         --kv-cache-dtype fp8_e5m2 \
         --dtype half \
-        --gpu-memory-utilization 0.85
+        --gpu-memory-utilization 0.50
+```
+
+## How to build Docker
+
+Run commands below:
+
+```bash
+cd ../
+git clone git@github.com:DeepAuto-AI/vllm.git
+cd vllm
+docker build . --build-context hip=../hip-attention --target vllm-openai --tag deepauto/vllm-hip-openai
 ```
 
 ## Setup without docker
+
 ```bash
 conda create --name llm python=3.11
 conda activate llm
-conda install nvidia/label/cuda-12.4.0::cuda-toolkit
-conda install -c conda-forge cupy cuda-version=12.4
+
 cd hip-attention
-pip install -e .
-pip install numba packaging
-cd third_party/vllm-hip
-pip install -r requirements-build.txt
-pip install -r requirements.txt -r requirements-dev.txt
-pip install -e . --no-build-isolation --verbose
+pip install -e "."
+# Optional for development
+pip install -e ".[dev]"
+
+# Optional, depends on your CUDA environment
+export CUDACXX=/usr/local/cuda/bin/nvcc
+# Dependencies that requires --no-build-isolation
+pip install -e ".[no_build_iso]" --no-build-isolation --verbose
+# vLLM with OpenAI API support for serving
+pip install -e ".[vllm,openai]" --no-build-isolation --verbose
 ```
 
 ## Running without docker
 ```bash
+CUDA_VISIBLE_DEVICES=0 \
 VLLM_ATTENTION_BACKEND=HIP_ATTN \
 HIP_K=512 \
 HIP_REFRESH_INTERVAL=8 \
 HIP_DENSE_LAYERS=4 \
-CUDA_VISIBLE_DEVICES=0,1 \
 python3 -m vllm.entrypoints.openai.api_server \
---model togethercomputer/LLaMA-2-7B-32K \
---download-dir "/tmp/$(whoami)" \
---tensor-parallel-size 2 \
---kv-cache-dtype fp8_e5m2 \
---dtype half \
---gpu-memory-utilization 0.85
+    --model Qwen/Qwen2-1.5B-Instruct \
+    --tensor-parallel-size 1 \
+    --kv-cache-dtype fp8_e5m2 \
+    --dtype half \
+    --gpu-memory-utilization 0.50
 ```
 
 ## vllm + Qwen's Dynamic-NTK
