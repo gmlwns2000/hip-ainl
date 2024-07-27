@@ -115,6 +115,7 @@ def load_model(args):
         'llama13b-chat' : 'meta-llama/Llama-2-13b-chat-hf',
         'llama13b_32k': 'Yukang/Llama-2-13b-longlora-32k-ft',
         'llama13b_32k_instruct': 'Yukang/Llama-2-13b-chat-longlora-32k-sft',
+        'llama3_8b_1m': 'gradientai/Llama-3-8B-Instruct-Gradient-1048k',
         'qwen14b': 'Qwen/Qwen1.5-14B-Chat',
         'qwen7b': 'Qwen/Qwen1.5-7B-Chat',
         'qwen1.5b': 'Qwen/Qwen1.5-1.8B-Chat',
@@ -152,7 +153,10 @@ def load_model(args):
         device_map={'': device},
         quantization_config=transformers.BitsAndBytesConfig(
             load_in_4bit=True,
-            llm_int8_skip_modules=['tree_avgpool_scaler'],
+            llm_int8_skip_modules=[
+                'tree_avgpool_scaler',
+                'lm_head',
+            ],
             bnb_4bit_compute_dtype=infer_dtype,
             bnb_4bit_use_double_quant=True,
             bnb_4bit_quant_type="nf4",
