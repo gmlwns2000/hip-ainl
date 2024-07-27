@@ -67,6 +67,7 @@ def eval_args(
     parser.add_argument('--ensemble-method-final', type=str, default='query')
     parser.add_argument('--ensemble-method-final-inter-thresh', type=int, default=None) # union
     parser.add_argument('--ensemble-method-final-bdd-mask-k', type=int, default=0)
+    parser.add_argument('--ensemble-timedim-wd', type=int, default=3)
 
     parser.add_argument('--ensemble-per-layer-n', type=int, default=1)
     parser.add_argument('--ensemble-per-attn-iter-n', type=int, default=5)
@@ -74,8 +75,12 @@ def eval_args(
     parser.add_argument('--ensemble-particular-layer', type=int, default=None)
     parser.add_argument('--ensemble-layer-till', type=int, default=None)
     parser.add_argument('--ensemble-randomness', type=float, default=5.0)
-    parser.add_argument('--ensemble-timedim-wd', type=int, default=3)
-
+    parser.add_argument('--ensemble-iter-start-step', type=int, default=1)
+    parser.add_argument('--ensemble-iter-n-mode', type=str, default="linear")
+    parser.add_argument('--ensemble-iter-n-start', type=int, default=0)
+    parser.add_argument('--ensemble-iter-n-factor', type=int, default=2)
+    parser.add_argument('--ensemble-iter-n-jump', type=int, default=1)
+    parser.add_argument('--ensemble-iter-n-till', type=int, default=None)
 
     parser.add_argument('--visualize', action='store_true')
 

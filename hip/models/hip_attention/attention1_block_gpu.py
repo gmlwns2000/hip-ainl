@@ -139,9 +139,16 @@ def hip_attention_mask(
     
     sampling_method: str = 'first',
 
+    ENSEMBLE : bool = False,
     ENSEMBLE_PER_ATTN_ITER_N : int = 5,
     MODEL_I : int = 0,
-    ENSEMBLE_RANDOMNESS : float = 0.5,
+    ENSEMBLE_RANDOMNESS : float = 5.0,
+    ENSEMBLE_ITER_START_STEP : int = 1,
+    ENSEMBLE_ITER_N_MODE : str = "linear",
+    ENSEMBLE_ITER_N_START : int = 0,
+    ENSEMBLE_ITER_N_FACTOR : int = 2,
+    ENSEMBLE_ITER_N_JUMP : int = 1,
+    ENSEMBLE_ITER_N_TILL : int = None,
     
     using_sliding_window=True,
     sliding_window_size=128,
@@ -214,7 +221,7 @@ def hip_attention_mask(
     with timer('matrix.setup'):
         # vectors
         tsrcs_offset = max(block_size_q, block_size_k) - 1
-        tsrcs = torch.arange(
+        tsrcs = torch.arange( # 
             tsrcs_offset+T_SRC-T_DST+1, tsrcs_offset+T_SRC+1, block_size_q, 
             dtype=torch.int64,
             device=device,
@@ -243,9 +250,29 @@ def hip_attention_mask(
             .view(1, 1, 1, mask_k_block)\
             .expand(1, 1, grid_src_stride, mask_k_block) \
                 / ks.unsqueeze(-1).unsqueeze(-1)
+
+        """
+        tsrc : [32, 1024]
+            [   32,    64,    96,  ..., 32704, 32736, 32768] each line
+        ws : [32, 1024]
+            [ 32,  64,  96,  ..., 256, 256, 256]
+        bws : [32, 1024]
+            [ 16.,  32.,  48.,  ..., 128., 128., 128.]
+        ks : [32, 1024] = [N_H, T]
+            [ 16,  32,  48,  ..., 128, 128, 128]
+
+        mask_k : 256
+        block_size_k : 2
+        mask_k_block : 128
+
+        mask : [32, 1024, 1, 128] = [N_H, T, grid_src_stride, MASK_K_B]
+        grid_src_stride : 1 # NOTE What is this
+        """
+
         mask = mask + (
             torch.arange(grid_src_stride, device=device, dtype=torch.float32).view(1, 1, grid_src_stride, 1)
         ) * (1 / bws.unsqueeze(-1).unsqueeze(-1))
+
         tmask = torch.zeros(
             (
                 mask.shape[0], 
@@ -257,9 +284,16 @@ def hip_attention_mask(
             device=device
         )
         
-        B_SRC = triton.cdiv(T_SRC, block_size_k)
-        B_DST = triton.cdiv(T_DST, block_size_q)
+        B_SRC = triton.cdiv(T_SRC, block_size_k) # block_size_k = 2
+        B_DST = triton.cdiv(T_DST, block_size_q) # block_size_q =32
         
+        """
+        mask : [32, 1024, 1, 128] = [N_H, T, grid_src_stride, MASK_K_B]
+
+        tmask : [32, 1024, 1, 256] = [N_H, T, grid_src_stride, MASK_K_B * scale_up]
+        scale_up : 2, tmask filled with 0
+        """
+
         sparq_indices = None
         sparq_indices_strides = (1, 1, 1)
         if enable_sparq:
@@ -372,9 +406,16 @@ def hip_attention_mask(
             using_sliding_window,
             sliding_window_size,
             
+            ENSEMBLE,
             ENSEMBLE_PER_ATTN_ITER_N,
             MODEL_I,
             ENSEMBLE_RANDOMNESS,
+            ENSEMBLE_ITER_START_STEP,
+            ENSEMBLE_ITER_N_MODE,
+            ENSEMBLE_ITER_N_START,
+            ENSEMBLE_ITER_N_FACTOR,
+            ENSEMBLE_ITER_N_JUMP,
+            ENSEMBLE_ITER_N_TILL,
 
             DEBUG,
         )
@@ -1195,6 +1236,12 @@ def hip_attention(
     ensemble_particular_layer : int = 0,
     ensemble_layer_till : int = 6,
     ensemble_randomness : float = 0.5,
+    ensemble_iter_start_step : int = 1,
+    ensemble_iter_n_mode : str = "linear",
+    ensemble_iter_n_start : int = 0,
+    ensemble_iter_n_factor : int = 2,
+    ensemble_iter_n_jump : int = 1,
+    ensemble_iter_n_till : int = None,
 
     layer_id : int = 0,    
     
@@ -1740,6 +1787,59 @@ def hip_attention(
 
                                         #     }, f'./cache/ensemble/llama13b_32k/method/{ensemble_model_setting}_{ensemble_method}_{ensemble_method_final}/l_{layer_id}_m_{ensemble_model_n}_pl_{ensemble_per_layer_n}_pat{ensemble_per_attn_iter_n}_ln{ensemble_particular_layer}.pth')
                                         #     print(">>> STORED.")
+                            elif "random_per_iter" in ensemble_model_setting:
+                                assert ensemble_model_setting in ["random_per_iter_const", "random_per_iter_inc_mul", "random_per_iter_inc_add", "random_per_iter_dec"]
+                                indices, ks = hip_attention_mask( # indices, ks, probs_or_context, scores
+                                    queries=q,
+                                    keys=k,
+                                    values=v,
+                                    attention_mask=attention_mask,
+                                    kv_repeat_interleave=KV_REPEAT_INTERLEAVE,
+                                    
+                                    w_start=w_start,
+                                    n_patches=n_patches,
+                                    mask_k=mask_k,
+                                    scale_up=scale_up,
+                                    is_causal=is_causal,
+                                    
+                                    block_size_q=block_size_q,
+                                    block_size_k=block_size_k,
+                                    reduce_method=reduce_method,
+                                    reduce_stride=reduce_stride,
+                                    
+                                    is_flash=is_flash,
+                                    enable_sparq=enable_sparq,
+                                    sampling_method=sampling_method,
+                                    
+                                    using_sliding_window=using_sliding_window,
+                                    sliding_window_size=sliding_window_size,
+                                    
+                                    rope_method=rope_method,
+                                    rope_cos=rope_cos,
+                                    rope_sin=rope_sin,
+                                    position_ids=position_ids,
+                                    
+                                    self_extend_scale=self_extend_scale,
+                                    self_extend_window=self_extend_window,
+                                    
+                                    grid_src_stride=estimated_ksrc_stride,
+                                    grid_k_stride=estimated_ksrc_stride,
+
+                                    ENSEMBLE=ensemble,
+                                    ENSEMBLE_PER_ATTN_ITER_N=ensemble_per_attn_iter_n,
+                                    MODEL_I = i,
+                                    ENSEMBLE_RANDOMNESS = ensemble_randomness,
+                                    ENSEMBLE_ITER_START_STEP = ensemble_iter_start_step,
+                                    ENSEMBLE_ITER_N_MODE=ensemble_iter_n_mode,
+                                    ENSEMBLE_ITER_N_START=ensemble_iter_n_start,
+                                    ENSEMBLE_ITER_N_FACTOR=ensemble_iter_n_factor,
+                                    ENSEMBLE_ITER_N_JUMP=ensemble_iter_n_jump,
+                                    ENSEMBLE_ITER_N_TILL=ensemble_iter_n_till,
+
+                                    maximum_ks=maximum_ks,
+                                    maximum_ks_config=maximum_ks_config,
+                                )
+                            
                             elif ensemble_model_setting == "attn_generation":
                                 assert ensemble_method in ["vae", "gan", "diffusion"]
 
