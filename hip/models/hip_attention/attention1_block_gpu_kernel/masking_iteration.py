@@ -1464,7 +1464,7 @@ def _masking_iteration_compute(
             )
             
             ### ENSEMBLE or NOT
-            if ENSEMBLE == True and "random_per_iter" in SAMPLING_METHOD:
+            if ENSEMBLE == True and (SAMPLING_METHOD == "random_per_iter_const" or SAMPLING_METHOD == "random_per_iter_inc" or SAMPLING_METHOD == "random_per_dec"):
                 assert ENSEMBLE_ITER_N_MODE in ["exponent", "linear", "linear_exponent" ,"constant"]
                 assert ENSEMBLE_ITER_N_JUMP <= N_ITERATION
 
@@ -1657,7 +1657,6 @@ def _masking_iteration_compute(
 
                     # block constant
                     SCALE_UP, # add for ensemble
-                    TMASK_K,
                     IS_CAUSAL,
                     
                     USING_SCORE_CACHE,
@@ -1781,7 +1780,6 @@ def _masking_iteration_compute(
 
                     # block constant
                     SCALE_UP, # add for ensemble
-                    TMASK_K,
                     IS_CAUSAL,
                     
                     USING_SCORE_CACHE,
@@ -2300,7 +2298,7 @@ def masking_iteration(
             ws_out, *ws_out.stride(), # (32, 1024) = (N_H, T)
             ks_out, *ks_out.stride(), # (32, 1024, 1) = (N_H, T, grid_src_stride)
             t_srcs, *t_srcs.stride(), # (32, 1024) = (N_H, T)
-            scores, *(scores.stride() if scores is not None else (0, 0, 0)), # None
+            scores, *(scores.stride() if scores is not None else (0, 0, 0, 0)), # None
             
             # operation variables
             float(scale_up), 

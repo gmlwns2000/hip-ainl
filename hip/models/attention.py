@@ -61,7 +61,14 @@ def custom_attention(
     ensemble_model_n = 5,
     ensemble_particular_layer = None,
     ensemble_layer_till = 6,
-    ensemble_randomness = 0.5,
+    ensemble_randomness = 5.0,
+    ensemble_iter_start_step = 1,
+    ensemble_iter_n_mode = "linear",
+    ensemble_iter_n_start = 0,
+    ensemble_iter_n_factor = 2,
+    ensemble_iter_n_jump = 1,
+    ensemble_iter_n_till = None,
+
     tree_stride = -1,
 
     layer_id = 0,
@@ -324,6 +331,12 @@ def custom_attention(
                     ensemble_particular_layer = ensemble_particular_layer,
                     ensemble_layer_till = ensemble_layer_till,
                     ensemble_randomness = ensemble_randomness,
+                    ensemble_iter_start_step = ensemble_iter_start_step,
+                    ensemble_iter_n_mode = ensemble_iter_n_mode,
+                    ensemble_iter_n_start = ensemble_iter_n_start,
+                    ensemble_iter_n_factor = ensemble_iter_n_factor,
+                    ensemble_iter_n_jump = ensemble_iter_n_jump,
+                    ensemble_iter_n_till = ensemble_iter_n_till,
 
                     layer_id = layer_id,
                 )
@@ -425,6 +438,12 @@ def custom_attention(
                     ensemble_particular_layer = ensemble_particular_layer,
                     ensemble_layer_till = ensemble_layer_till,
                     ensemble_randomness = ensemble_randomness,
+                    ensemble_iter_start_step = ensemble_iter_start_step,
+                    ensemble_iter_n_mode = ensemble_iter_n_mode,
+                    ensemble_iter_n_start = ensemble_iter_n_start,
+                    ensemble_iter_n_factor = ensemble_iter_n_factor,
+                    ensemble_iter_n_jump = ensemble_iter_n_jump,
+                    ensemble_iter_n_till = ensemble_iter_n_till,
 
                     layer_id = layer_id,
                 )

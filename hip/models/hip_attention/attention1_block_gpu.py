@@ -1334,7 +1334,8 @@ def hip_attention(
     #     'precomputed_ks': precomputed_ks,
     # }, f'./cache/stride_debug/s16384.pth')
     # input('>>> ')
-    assert sampling_method in ['random', 'first']
+    assert sampling_method in ['random', \
+                               'random_per_iter_const', "random_per_iter_inc", "random_per_iter_dec"]
     
     if q.requires_grad:
         logger.warning_once('q requires grad, turning off flash')

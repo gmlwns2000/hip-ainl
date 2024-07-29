@@ -759,8 +759,14 @@ class LlamaCustomAttention(LlamaAttention):
         self.ensemble_model_n = 5
         self.ensemble_particular_layer = None
         self.ensemble_layer_till = 6
-        self.ensemble_randomneses = 0.5
         self.sparsity_per_layer = None
+        self.ensemble_randomneses = 5.0
+        self.ensemble_iter_start_step = 1
+        self.ensemble_iter_n_mode = "linear"
+        self.ensemble_iter_n_start = 0
+        self.ensemble_iter_n_factor = 2
+        self.ensemble_iter_n_jump = 1
+        self.ensemble_iter_n_till = None
 
         self.tree_reformer = self.tree_performer = None
 
@@ -992,6 +998,12 @@ class LlamaCustomAttention(LlamaAttention):
             ensemble_particular_layer = self.ensemble_particular_layer,
             ensemble_layer_till = self.ensemble_layer_till,
             ensemble_randomness= self.ensemble_randomness,
+            ensemble_iter_start_step = self.ensemble_iter_start_step,
+            ensemble_iter_n_mode = self.ensemble_iter_n_mode,
+            ensemble_iter_n_start = self.ensemble_iter_n_start,
+            ensemble_iter_n_factor = self.ensemble_iter_n_factor,
+            ensemble_iter_n_jump = self.ensemble_iter_n_jump,
+            ensemble_iter_n_till = self.ensemble_iter_n_till,
 
             layer_id = self.layer_idx,
 
