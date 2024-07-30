@@ -2158,6 +2158,29 @@ def masking_iteration_draft(
     max_group_size_seed: Optional[float] = None,
     
     indices_tdst: Optional[Tensor] = None,
+
+    # Ensemble
+    ensemble : bool = False,
+    ensemble_model_setting : str = "random_pruning",
+    ensemble_method :str = "final_attn",
+    ensemble_method_final : str = "query",
+    ensemble_method_final_inter_thresh : int = None,
+    ensemble_method_final_bdd_mask_k : int = 0,
+    ensemble_timedim_wd : int = None,
+    ensemble_per_layer_n : int = 1,
+    ensemble_per_attn_iter_n : int = 5,
+    ensemble_model_n : int = 5,
+    ensemble_particular_layer : int = 0,
+    ensemble_layer_till : int = 6,
+    ensemble_randomness : float = 0.5,
+    ensemble_iter_start_step : int = 1,
+    ensemble_iter_n_mode : str = "linear",
+    ensemble_iter_n_start : int = 0,
+    ensemble_iter_n_factor : int = 2,
+    ensemble_iter_n_jump : int = 1,
+    ensemble_iter_n_till : int = None,
+
+    layer_id : int = 0,
 ):
     assert q.device == k.device
     assert isinstance(q, Tensor)
@@ -3269,6 +3292,29 @@ def masking_step_loop(
     low_res_oversample_block_stride_k,
     
     output_key_access_log,
+
+    # Ensemble
+    ensemble : bool = False,
+    ensemble_model_setting : str = "random_pruning",
+    ensemble_method :str = "final_attn",
+    ensemble_method_final : str = "query",
+    ensemble_method_final_inter_thresh : int = None,
+    ensemble_method_final_bdd_mask_k : int = 0,
+    ensemble_timedim_wd : int = None,
+    ensemble_per_layer_n : int = 1,
+    ensemble_per_attn_iter_n : int = 5,
+    ensemble_model_n : int = 5,
+    ensemble_particular_layer : int = 0,
+    ensemble_layer_till : int = 6,
+    ensemble_randomness : float = 0.5,
+    ensemble_iter_start_step : int = 1,
+    ensemble_iter_n_mode : str = "linear",
+    ensemble_iter_n_start : int = 0,
+    ensemble_iter_n_factor : int = 2,
+    ensemble_iter_n_jump : int = 1,
+    ensemble_iter_n_till : int = None,
+
+    layer_id : int = 0,
 ):
     BSZ, TDST, HEAD, HID = q.shape
     _, TSRC, _, _ = k.shape
@@ -3287,12 +3333,12 @@ def masking_step_loop(
     key_access_log_blocks = []
     key_access_count_blocks = []
     indices_seed = ks_seed = None
-    for i_chunk_tdst in range(0, chunk_size, block_size_q * step_size):
-        idx_tdst = torch.arange(
+    for i_chunk_tdst in range(0, chunk_size, block_size_q * step_size): # start stop step
+        idx_tdst = torch.arange( # start end step
             i_chunk_tdst, 
             i_chunk_tdst + block_size_q * step_size, 
             device=q.device
-        )[None, :] + torch.arange(
+        )[None, :] + torch.arange( # start end step
             0,
             TDST,
             chunk_size,
@@ -3333,6 +3379,29 @@ def masking_step_loop(
                             scores_seed=scores_seed,
                             indices_tdst=idx_tdst,
                             output_key_access_log=output_key_access_log,
+
+                            # Ensemble
+                            ensemble = ensemble,
+                            ensemble_model_setting = ensemble_model_setting,
+                            ensemble_method = ensemble_method,
+                            ensemble_method_final = ensemble_method_final,
+                            ensemble_method_final_inter_thresh = ensemble_method_final_inter_thresh,
+                            ensemble_method_final_bdd_mask_k = ensemble_method_final_bdd_mask_k,
+                            ensemble_timedim_wd = ensemble_timedim_wd,
+                            ensemble_per_layer_n = ensemble_per_layer_n,
+                            ensemble_per_attn_iter_n = ensemble_per_attn_iter_n,
+                            ensemble_model_n = ensemble_model_n,
+                            ensemble_particular_layer = ensemble_particular_layer,
+                            ensemble_layer_till = ensemble_layer_till,
+                            ensemble_randomness = ensemble_randomness,
+                            ensemble_iter_start_step = ensemble_iter_start_step,
+                            ensemble_iter_n_mode = ensemble_iter_n_mode,
+                            ensemble_iter_n_start = ensemble_iter_n_start,
+                            ensemble_iter_n_factor = ensemble_iter_n_factor,
+                            ensemble_iter_n_jump = ensemble_iter_n_jump,
+                            ensemble_iter_n_till = ensemble_iter_n_till,
+
+                            layer_id = layer_id,
                         )
                         
                         indices_seed = indices
@@ -3419,6 +3488,29 @@ def masking_step_loop(
                                 ks_seed=ks_seed,
                                 scores_seed=scores_seed,
                                 indices_tdst=idx_tdst,
+
+                                # Ensemble
+                                ensemble = ensemble,
+                                ensemble_model_setting = ensemble_model_setting,
+                                ensemble_method = ensemble_method,
+                                ensemble_method_final = ensemble_method_final,
+                                ensemble_method_final_inter_thresh = ensemble_method_final_inter_thresh,
+                                ensemble_method_final_bdd_mask_k = ensemble_method_final_bdd_mask_k,
+                                ensemble_timedim_wd = ensemble_timedim_wd,
+                                ensemble_per_layer_n = ensemble_per_layer_n,
+                                ensemble_per_attn_iter_n = ensemble_per_attn_iter_n,
+                                ensemble_model_n = ensemble_model_n,
+                                ensemble_particular_layer = ensemble_particular_layer,
+                                ensemble_layer_till = ensemble_layer_till,
+                                ensemble_randomness = ensemble_randomness,
+                                ensemble_iter_start_step = ensemble_iter_start_step,
+                                ensemble_iter_n_mode = ensemble_iter_n_mode,
+                                ensemble_iter_n_start = ensemble_iter_n_start,
+                                ensemble_iter_n_factor = ensemble_iter_n_factor,
+                                ensemble_iter_n_jump = ensemble_iter_n_jump,
+                                ensemble_iter_n_till = ensemble_iter_n_till,
+
+                                layer_id = layer_id,
                             )
                             
                             indices_seed = indices
@@ -3548,6 +3640,29 @@ def masking_step_loop(
                                     group_size_seed=group_sizes,
                                     max_group_size_seed=low_res_oversample_rate,
                                     indices_tdst=idx_tdst,
+
+                                    # Ensemble
+                                    ensemble = ensemble,
+                                    ensemble_model_setting = ensemble_model_setting,
+                                    ensemble_method = ensemble_method,
+                                    ensemble_method_final = ensemble_method_final,
+                                    ensemble_method_final_inter_thresh = ensemble_method_final_inter_thresh,
+                                    ensemble_method_final_bdd_mask_k = ensemble_method_final_bdd_mask_k,
+                                    ensemble_timedim_wd = ensemble_timedim_wd,
+                                    ensemble_per_layer_n = ensemble_per_layer_n,
+                                    ensemble_per_attn_iter_n = ensemble_per_attn_iter_n,
+                                    ensemble_model_n = ensemble_model_n,
+                                    ensemble_particular_layer = ensemble_particular_layer,
+                                    ensemble_layer_till = ensemble_layer_till,
+                                    ensemble_randomness = ensemble_randomness,
+                                    ensemble_iter_start_step = ensemble_iter_start_step,
+                                    ensemble_iter_n_mode = ensemble_iter_n_mode,
+                                    ensemble_iter_n_start = ensemble_iter_n_start,
+                                    ensemble_iter_n_factor = ensemble_iter_n_factor,
+                                    ensemble_iter_n_jump = ensemble_iter_n_jump,
+                                    ensemble_iter_n_till = ensemble_iter_n_till,
+
+                                    layer_id = layer_id,
                                 )
                         
                         # use this indices for cache, if you want to downsample
@@ -3894,6 +4009,29 @@ def hip_masking(
     low_res_oversample_block_stride_k: int = 1,
     
     output_key_access_log: bool = False,
+
+    # Ensemble
+    ensemble : bool = False,
+    ensemble_model_setting : str = "random_pruning",
+    ensemble_method :str = "final_attn",
+    ensemble_method_final : str = "query",
+    ensemble_method_final_inter_thresh : int = None,
+    ensemble_method_final_bdd_mask_k : int = 0,
+    ensemble_timedim_wd : int = None,
+    ensemble_per_layer_n : int = 1,
+    ensemble_per_attn_iter_n : int = 5,
+    ensemble_model_n : int = 5,
+    ensemble_particular_layer : int = 0,
+    ensemble_layer_till : int = 6,
+    ensemble_randomness : float = 0.5,
+    ensemble_iter_start_step : int = 1,
+    ensemble_iter_n_mode : str = "linear",
+    ensemble_iter_n_start : int = 0,
+    ensemble_iter_n_factor : int = 2,
+    ensemble_iter_n_jump : int = 1,
+    ensemble_iter_n_till : int = None,
+
+    layer_id : int = 0,
 ):
     assert q.ndim == 4
     assert k.ndim == 4
@@ -3978,6 +4116,29 @@ def hip_masking(
             low_res_oversample_block_stride_k=low_res_oversample_block_stride_k,
             
             output_key_access_log=output_key_access_log,
+
+            # Ensemble
+            ensemble = ensemble,
+            ensemble_model_setting = ensemble_model_setting,
+            ensemble_method = ensemble_method,
+            ensemble_method_final = ensemble_method_final,
+            ensemble_method_final_inter_thresh = ensemble_method_final_inter_thresh,
+            ensemble_method_final_bdd_mask_k = ensemble_method_final_bdd_mask_k,
+            ensemble_timedim_wd = ensemble_timedim_wd,
+            ensemble_per_layer_n = ensemble_per_layer_n,
+            ensemble_per_attn_iter_n = ensemble_per_attn_iter_n,
+            ensemble_model_n = ensemble_model_n,
+            ensemble_particular_layer = ensemble_particular_layer,
+            ensemble_layer_till = ensemble_layer_till,
+            ensemble_randomness = ensemble_randomness,
+            ensemble_iter_start_step = ensemble_iter_start_step,
+            ensemble_iter_n_mode = ensemble_iter_n_mode,
+            ensemble_iter_n_start = ensemble_iter_n_start,
+            ensemble_iter_n_factor = ensemble_iter_n_factor,
+            ensemble_iter_n_jump = ensemble_iter_n_jump,
+            ensemble_iter_n_till = ensemble_iter_n_till,
+
+            layer_id = layer_id,
         )
         
         # if i_chunk_offset > 0:
@@ -4405,20 +4566,26 @@ def hip_attention(
 
     # Ensemble
     ensemble : bool = False,
-    ensemble_model_setting = ensemble_model_setting,
-    ensemble_method = ensemble_method,
-    ensemble_method_final = ensemble_method_final,
-    ensemble_method_final_inter_thresh = ensemble_method_final_inter_thresh,
-    ensemble_method_final_bdd_mask_k = ensemble_method_final_bdd_mask_k,
-    ensemble_timedim_wd = ensemble_timedim_wd,
-    ensemble_per_layer_n = ensemble_per_layer_n,
-    ensemble_per_attn_iter_n = ensemble_per_attn_iter_n,
-    ensemble_model_n = ensemble_model_n,
-    ensemble_particular_layer = ensemble_particular_layer,
-    ensemble_layer_till = ensemble_layer_till,
-    ensemble_randomness = ensemble_randomness,
+    ensemble_model_setting : str = "random_pruning",
+    ensemble_method :str = "final_attn",
+    ensemble_method_final : str = "query",
+    ensemble_method_final_inter_thresh : int = None,
+    ensemble_method_final_bdd_mask_k : int = 0,
+    ensemble_timedim_wd : int = None,
+    ensemble_per_layer_n : int = 1,
+    ensemble_per_attn_iter_n : int = 5,
+    ensemble_model_n : int = 5,
+    ensemble_particular_layer : int = 0,
+    ensemble_layer_till : int = 6,
+    ensemble_randomness : float = 0.5,
+    ensemble_iter_start_step : int = 1,
+    ensemble_iter_n_mode : str = "linear",
+    ensemble_iter_n_start : int = 0,
+    ensemble_iter_n_factor : int = 2,
+    ensemble_iter_n_jump : int = 1,
+    ensemble_iter_n_till : int = None,
 
-    layer_id = layer_id,
+    layer_id : int = 0,
 ):
     assert q.ndim == 4
     assert k.ndim == 4
@@ -4471,6 +4638,29 @@ def hip_attention(
         low_res_oversample_block_stride_k=low_res_oversample_block_stride_k,
         
         output_key_access_log=output_key_access_log,
+
+        # Ensemble
+        ensemble = ensemble,
+        ensemble_model_setting = ensemble_model_setting,
+        ensemble_method = ensemble_method,
+        ensemble_method_final = ensemble_method_final,
+        ensemble_method_final_inter_thresh = ensemble_method_final_inter_thresh,
+        ensemble_method_final_bdd_mask_k = ensemble_method_final_bdd_mask_k,
+        ensemble_timedim_wd = ensemble_timedim_wd,
+        ensemble_per_layer_n = ensemble_per_layer_n,
+        ensemble_per_attn_iter_n = ensemble_per_attn_iter_n,
+        ensemble_model_n = ensemble_model_n,
+        ensemble_particular_layer = ensemble_particular_layer,
+        ensemble_layer_till = ensemble_layer_till,
+        ensemble_randomness = ensemble_randomness,
+        ensemble_iter_start_step = ensemble_iter_start_step,
+        ensemble_iter_n_mode = ensemble_iter_n_mode,
+        ensemble_iter_n_start = ensemble_iter_n_start,
+        ensemble_iter_n_factor = ensemble_iter_n_factor,
+        ensemble_iter_n_jump = ensemble_iter_n_jump,
+        ensemble_iter_n_till = ensemble_iter_n_till,
+
+        layer_id = layer_id,
     )
     
     # return None, None
