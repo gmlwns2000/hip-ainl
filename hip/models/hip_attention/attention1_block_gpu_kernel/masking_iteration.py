@@ -1305,7 +1305,7 @@ def _masking_iteration_compute(
 
     # ensemble
     ENSEMBLE: tl.constexpr,
-    ENSEMBLE_PER_ATTN_ITER_N: tl.constexpr,
+    ENSEMBLE_PER_ATTN_ITER: tl.constexpr,
     MODEL_I: tl.constexpr,
     ENSEMBLE_RANDOMNESS : tl.constexpr,
     ENSEMBLE_ITER_START_STEP : int,
@@ -1391,7 +1391,7 @@ def _masking_iteration_compute(
 
     # breakpoint()
     for idx_iteration in range(N_ITERATION):
-        # if N_ITERATION % ENSEMBLE_PER_ATTN_ITER_N ==0: TODO : do this once needed
+        # if N_ITERATION % ENSEMBLE_PER_ATTN_ITER ==0: TODO : do this once needed
         tl.debug_barrier()
         # tl.device_print("dd", idx_bdst)
         
@@ -1844,13 +1844,6 @@ def _masking_iteration_compute(
                     SELF_EXTEND_WINDOW,
                 )
 
-                         
-            
-
-
-
-            
-    
 
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
@@ -1928,7 +1921,7 @@ def masking_iteration(
 
     # ensemble
     ENSEMBLE : bool,
-    ENSEMBLE_PER_ATTN_ITER_N: int,
+    ENSEMBLE_PER_ATTN_ITER: bool,
     MODEL_I: int = 0,
     ENSEMBLE_RANDOMNESS : float = 5.0,
     ENSEMBLE_ITER_START_STEP : int = 1,
@@ -2263,7 +2256,7 @@ def masking_iteration(
 
                 # ensemble
                 ENSEMBLE,
-                ENSEMBLE_PER_ATTN_ITER_N,
+                ENSEMBLE_PER_ATTN_ITER,
                 MODEL_I,
                 ENSEMBLE_RANDOMNESS,
                 ENSEMBLE_ITER_START_STEP,
@@ -2374,7 +2367,7 @@ def masking_iteration(
 
             # ensemble
             ENSEMBLE,
-            ENSEMBLE_PER_ATTN_ITER_N,
+            ENSEMBLE_PER_ATTN_ITER,
             MODEL_I,
             ENSEMBLE_RANDOMNESS,
             ENSEMBLE_ITER_START_STEP,

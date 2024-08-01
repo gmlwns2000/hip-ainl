@@ -17,7 +17,7 @@ def ensemble_random_pruning(
     ensemble_method_final_inter_thresh : int,
     ensemble_method_final_bdd_mask_k : int,
     ensemble_per_layer_n : int,
-    ensemble_per_attn_iter_n : int,
+    ensemble_per_attn_iter : bool,
     ensemble_model_n : int,
     ensemble_particular_layer : int,
     ensemble_attn_mask_per_layer : torch.Tensor, 
@@ -126,7 +126,7 @@ def ensemble_random_pruning(
     #         'ensemble_method' : ensemble_method,
     #         'ensemble_method_final' : ensemble_method_final,
     #         'ensemble_per_layer_n' : ensemble_per_layer_n,
-    #         'ensemble_per_attn_iter_n' : ensemble_per_attn_iter_n,
+    #         'ensemble_per_attn_iter' : ensemble_per_attn_iter,
     #         'ensemble_model_n' : ensemble_model_n,
     #         'ensemble_particular_layer' : ensemble_particular_layer,
     #         'layer_id' : layer_id,
@@ -138,7 +138,7 @@ def ensemble_random_pruning(
     #         'sparsity_per_layer' : sparsity_per_layer,
     #         'sparse_ratio' : sparsity_ratio,
 
-    #     }, f'./cache/ensemble/llama13b_32k/method/{ensemble_model_setting}_{ensemble_method}_{ensemble_method_final}/l_{layer_id}_m_{ensemble_model_n}_pl_{ensemble_per_layer_n}_pat{ensemble_per_attn_iter_n}_ln{ensemble_particular_layer}.pth')
+    #     }, f'./cache/ensemble/llama13b_32k/method/{ensemble_model_setting}_{ensemble_method}_{ensemble_method_final}/l_{layer_id}_m_{ensemble_model_n}_pl_{ensemble_per_layer_n}_pat{ensemble_per_attn_iter}_ln{ensemble_particular_layer}.pth')
     #     print(">>> STORED.")
         # input('stored. press enter to continue >>> ')
     # breakpoint()

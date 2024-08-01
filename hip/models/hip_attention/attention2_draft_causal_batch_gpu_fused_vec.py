@@ -349,6 +349,8 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
         )
         idx_access = (key_access_location + tl.cumsum(mask_access.to(tl.int32)) - 1) % MAX_ACCESS_COUNT
         # idx_access = tl.arange(0, BLOCK_BK * KEY_DUP * BLOCK_SIZE_K // BLOCK_STRIDE_K)
+        
+        # TODO check this for ensemble
         tl.store(
             KEY_ACCESS_LOG +\
                 idx_b * stride_key_access_log_b +\
@@ -638,25 +640,29 @@ def masking_iteration_draft_cuda_dup_and_score(
     stride_key_access_count_bdst,
     MAX_ACCESS_COUNT,
     
-    INDICES, stride_indices_b, stride_indices_bdst, stride_indices_bk,
+    INDICES, stride_indices_b, stride_indices_bdst, stride_indices_sample_n, stride_indices_bk,
     KS, stride_ks_b, stride_ks_bdst,
-    GROUP_SIZE, stride_group_size_b, stride_group_size_bdst, stride_group_size_bk,
+    GROUP_SIZE, stride_group_size_b, stride_group_size_bdst, stride_group_size_sample_n, stride_group_size_bk,
     
     DUPPED_INDICES, 
     stride_dupped_indices_b, 
     stride_dupped_indices_bdst, 
+    stride_dupped_indices_sample_n,
     stride_dupped_indices_bk,
     DUPPED_GROUP_SIZE, 
     stride_dupped_group_size_b, 
     stride_dupped_group_size_bdst, 
+    stride_dupped_group_size_sample_n,
     stride_dupped_group_size_bk,
     SCORES,
     stride_scores_b,
     stride_scores_bdst,
+    stride_scores_sample_n,
     stride_scores_bk,
     SCORES_FINAL,
     stride_scores_final_b,
     stride_scores_final_bdst,
+    stride_scores_final_sample_n,
     stride_scores_final_bk,
     SCORES_CACHED: tl.constexpr,
     
@@ -696,11 +702,26 @@ def masking_iteration_draft_cuda_dup_and_score(
     
     max_group_size, # just for autotune
     i_iteration, # just for autotune
+
+    # ensemble
+    idx_ensemble_sample_id : int,
     
     pid_0=None,
     pid_1=None,
     pid_2=None,
 ):
+    # indices.shape[-1] = G * mask_block_k
+    # grid = (triton.cdiv(indices.shape[-1], BLOCK_BK), BDST, B,)
+    #  = (G * mask_block_k / BLOCK_BK, BDST, B)
+    """
+    per iteration ensemble to consider
+    - INDICES
+    - GROUP_SIZE
+    - DUPPED_INDICES
+    - DUPPED_GROUP_SIZE
+    - SCORES
+    - SCORES_FINAL
+    """
     if pid_2 is None:
         pid_b = tl.program_id(2)
     else:
@@ -766,6 +787,7 @@ def masking_iteration_draft_cuda_dup_and_score(
         INDICES +\
             idx_b * stride_indices_b +\
             idx_bdst * stride_indices_bdst +\
+            idx_ensemble_sample_id * stride_indices_sample_n +\
             idx_bk * stride_indices_bk,
         mask=mask_bk,
         other=0,
@@ -777,6 +799,7 @@ def masking_iteration_draft_cuda_dup_and_score(
         GROUP_SIZE +\
             idx_b * stride_group_size_b +\
             idx_bdst * stride_group_size_bdst +\
+            idx_ensemble_sample_id * stride_group_size_sample_n +\
             idx_bk * stride_group_size_bk,
         mask=mask_bk,
         other=0,
@@ -798,7 +821,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             dupped_indices,
             (dupped_indices + dupped_group_sizes * 0.5).to(tl.int32)
         )
-    elif BRANCH_METHOD == 'random':
+    elif BRANCH_METHOD == 'random' or BRANCH_METHOD == 'random_per_iter':
         dupped_indices = tl.where(
             (tl.arange(0, BLOCK_BK * 2) % 2) == 0,
             dupped_indices,
@@ -820,6 +843,14 @@ def masking_iteration_draft_cuda_dup_and_score(
                 ).to(tl.int32)
             )
         )
+    # elif BRANCH_METHOD == "random_per_iter_const":
+    #     pass
+    # elif BRANCH_METHOD == "random_per_iter_inc_mul":
+    #     pass
+    # elif BRANCH_METHOD == "random_per_iter_inc_add":
+    #     pass
+    # elif BRANCH_METHOD == "random_per_iter_dec":
+    #     pass
     else:
         raise Exception(BRANCH_METHOD)
     flipped_dupped_indices = tl.reshape(
@@ -875,6 +906,7 @@ def masking_iteration_draft_cuda_dup_and_score(
                 dupped_indices_for_keys_start + i_shift,
                 dupped_indices_for_keys_end
             ).to(tl.int32)
+            # TODO : check whether this is not to be modified in ensemble
             t_scores = masking_iteration_draft_cuda_dup_and_score_calc_score(
                 t_dupped_indices_for_keys,
                 
@@ -928,6 +960,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             SCORES_FINAL +\
                 idx_b * stride_scores_final_b+\
                 idx_bdst * stride_scores_final_bdst+\
+                idx_ensemble_sample_id * stride_scores_final_sample_n +\
                 idx_bk * stride_scores_final_bk,
             mask = mask_bk,
             cache_modifier=DEFAULT_CACHE_MODIFIER,
@@ -970,6 +1003,7 @@ def masking_iteration_draft_cuda_dup_and_score(
         # indices_to_sample = indices_to_sample_sorted
         # mask_to_sample = mask_to_sample_sorted
         
+        # TODO : check whether this is not to be modified in ensemble
         scores_sampled = masking_iteration_draft_cuda_dup_and_score_calc_score(
             indices_to_sample,
             1,
@@ -1073,6 +1107,7 @@ def masking_iteration_draft_cuda_dup_and_score(
         SCORES +\
             idx_b * stride_scores_b +\
             idx_bdst * stride_scores_bdst +\
+            idx_ensemble_sample_id * stride_scores_sample_n +\
             idx_bk_dup * stride_scores_bk,
         value=scores,
         mask=mask_bk_dup,
@@ -1082,6 +1117,7 @@ def masking_iteration_draft_cuda_dup_and_score(
         DUPPED_INDICES +\
             idx_b * stride_dupped_indices_b +\
             idx_bdst * stride_dupped_indices_bdst +\
+            idx_ensemble_sample_id * stride_dupped_indices_sample_n +\
             idx_bk_dup * stride_dupped_indices_bk,
         value=dupped_indices,
         mask=mask_bk_dup,
@@ -1091,6 +1127,7 @@ def masking_iteration_draft_cuda_dup_and_score(
         DUPPED_GROUP_SIZE +\
             idx_b * stride_dupped_group_size_b +\
             idx_bdst * stride_dupped_group_size_bdst +\
+            idx_ensemble_sample_id * stride_dupped_group_size_sample_n +\
             idx_bk_dup * stride_dupped_group_size_bk,
         value=dupped_group_sizes,
         mask=mask_bk_dup,
@@ -1102,32 +1139,39 @@ def masking_iteration_draft_cuda_gather(
     INDICES, 
     stride_indices_b, 
     stride_indices_bdst, 
+    stride_indices_sample_n,
     stride_indices_bk,
     GROUP_SIZES, 
     stride_group_sizes_b, 
     stride_group_sizes_bdst, 
+    stride_group_size_sample_n,
     stride_group_sizes_bk,
     SCORES_FINAL,
     stride_scores_final_b,
     stride_scores_final_bdst,
+    stride_scores_final_sample_n,
     stride_scores_final_bk,
     
     DUPPED_INDICES, 
     stride_dupped_indices_b, 
     stride_dupped_indices_bdst, 
+    stride_dupped_indices_sample_n,
     stride_dupped_indices_bk,
     DUPPED_GROUP_SIZE, 
     stride_dupped_group_size_b, 
     stride_dupped_group_size_bdst, 
+    stride_dupped_group_size_sample_n,
     stride_dupped_group_size_bk,
     SCORES,
     stride_scores_b,
     stride_scores_bdst,
+    stride_scores_sample_n,
     stride_scores_bk,
     
     TOPK_INDICES,
     stride_topk_indices_b,
     stride_topk_indices_bdst,
+    stride_topk_ids_sample_n,
     stride_topk_indices_bk,
     
     T_GROUP_SIZE,
@@ -1137,11 +1181,24 @@ def masking_iteration_draft_cuda_gather(
     G: tl.constexpr, BK,
     
     BLOCK_BK: tl.constexpr,
+    idx_ensemble_sample_id : int,
     
     pid_0=None,
     pid_1=None,
     pid_2=None,
 ):
+    """
+    ensemble per iter
+    - INDICES
+    - GROUP_SIZES
+    - SCORES_FINAL
+    - SCORES_FINAL
+    - DUPPED_INDICES
+    - DUPPED_GROUP_SIZE
+    - SCORES
+    - TOPK_INDICES
+    """
+
     if pid_0 is not None:
         pid_b = pid_2
         pid_bdst = pid_1
@@ -1168,6 +1225,7 @@ def masking_iteration_draft_cuda_gather(
         TOPK_INDICES +\
             idx_b * stride_topk_indices_b +\
             idx_bdst * stride_topk_indices_bdst +\
+            idx_ensemble_sample_id * stride_topk_ids_sample_n +\
             idx_bk * stride_topk_indices_bk,
         mask=mask_bk,
         cache_modifier=DEFAULT_CACHE_MODIFIER,
@@ -1177,6 +1235,7 @@ def masking_iteration_draft_cuda_gather(
         DUPPED_INDICES +\
             idx_b * stride_dupped_indices_b +\
             idx_bdst * stride_dupped_indices_bdst +\
+            idx_ensemble_sample_id * stride_dupped_indices_sample_n +\
             topk_indices * stride_dupped_indices_bk,
         mask=mask_bk,
         cache_modifier=DEFAULT_CACHE_MODIFIER,
@@ -1185,6 +1244,7 @@ def masking_iteration_draft_cuda_gather(
         DUPPED_GROUP_SIZE +\
             idx_b * stride_dupped_group_size_b +\
             idx_bdst * stride_dupped_group_size_bdst +\
+            idx_ensemble_sample_id * stride_group_size_sample_n +\
             topk_indices * stride_dupped_group_size_bk,
         mask=mask_bk,
         cache_modifier=DEFAULT_CACHE_MODIFIER,
@@ -1193,6 +1253,7 @@ def masking_iteration_draft_cuda_gather(
         SCORES +\
             idx_b * stride_scores_b +\
             idx_bdst * stride_scores_bdst +\
+            idx_ensemble_sample_id * stride_scores_sample_n +\
             topk_indices * stride_scores_bk,
         mask=mask_bk,
         cache_modifier=DEFAULT_CACHE_MODIFIER,
@@ -1202,6 +1263,7 @@ def masking_iteration_draft_cuda_gather(
         INDICES +\
             idx_b * stride_indices_b +\
             idx_bdst * stride_indices_bdst +\
+            idx_ensemble_sample_id * stride_indices_sample_n +\
             idx_bk * stride_indices_bk,
         value=dupped_indices,
         mask=mask_bk,
@@ -1211,6 +1273,7 @@ def masking_iteration_draft_cuda_gather(
         GROUP_SIZES +\
             idx_b * stride_group_sizes_b +\
             idx_bdst * stride_group_sizes_bdst +\
+            idx_ensemble_sample_id * stride_group_size_sample_n +\
             idx_bk * stride_group_sizes_bk,
         value=dupped_group_size,
         mask=mask_bk,
@@ -1220,6 +1283,7 @@ def masking_iteration_draft_cuda_gather(
         SCORES_FINAL +\
             idx_b * stride_scores_final_b +\
             idx_bdst * stride_scores_final_bdst +\
+            idx_ensemble_sample_id * stride_scores_final_sample_n +\
             idx_bk * stride_scores_final_bk,
         value=scores,
         mask=mask_bk,
@@ -1297,19 +1361,23 @@ def masking_iteration_draft_cuda_partial_softmax(
     SCORES, 
     stride_scores_b, 
     stride_scores_bdst, 
+    stride_scores_sample_n,
     stride_scores_bk,
     DUPPED_INDICES, 
     stride_dupped_indices_b, 
     stride_dupped_indices_bdst, 
+    stride_dupped_indices_sample_n,
     stride_dupped_indices_bk,
     DUPPED_GROUP_SIZES,
     stride_dupped_group_sizes_b,
     stride_dupped_group_sizes_bdst,
+    stride_dupped_group_size_sample_n,
     stride_dupped_group_sizes_bk,
     
     PROBS,
     stride_probs_b,
     stride_probs_bdst,
+    stride_probs_sample_n,
     stride_probs_bk,
     
     SINK_TOKEN_SIZE,
@@ -1318,11 +1386,23 @@ def masking_iteration_draft_cuda_partial_softmax(
     BLOCK_SIZE_K,
     
     BLOCK_SCORE: tl.constexpr,
+    idx_ensemble_sample_id : int,
+
     
     pid_0 = None,
     pid_1 = None,
     CARRYING: tl.constexpr = False,
 ):
+    """
+    grid : ()
+    """
+    """
+    ensemble 
+    - SCORES
+    - DUPPED_INDICES
+    - DUPPED_GROUP_SIZES
+    - PROBS
+    """
     if pid_0 is None:
         pid_0 = tl.program_id(0)
     if pid_1 is None:
@@ -1337,6 +1417,7 @@ def masking_iteration_draft_cuda_partial_softmax(
         DUPPED_INDICES +\
             idx_b * stride_dupped_indices_b +\
             idx_bdst * stride_dupped_indices_bdst +\
+            idx_ensemble_sample_id * stride_dupped_indices_sample_n +\
             idx_bk * stride_dupped_indices_bk,
         mask=mask_bk,
         other=MAX_BSRC * G,
@@ -1346,6 +1427,7 @@ def masking_iteration_draft_cuda_partial_softmax(
         DUPPED_GROUP_SIZES +\
             idx_b * stride_dupped_group_sizes_b +\
             idx_bdst * stride_dupped_group_sizes_bdst +\
+            idx_ensemble_sample_id * stride_dupped_group_size_sample_n +\
             idx_bk * stride_dupped_group_sizes_bk,
         mask=mask_bk,
         other=MAX_BSRC * G,
@@ -1356,6 +1438,7 @@ def masking_iteration_draft_cuda_partial_softmax(
         SCORES +\
             idx_b * stride_scores_b +\
             idx_bdst * stride_scores_bdst +\
+            idx_ensemble_sample_id * stride_scores_sample_n +\
             idx_bk * stride_scores_bk,
         mask=mask_bk,
         other=float('-inf'),
@@ -1383,6 +1466,7 @@ def masking_iteration_draft_cuda_partial_softmax(
         PROBS +\
             idx_b * stride_scores_b +\
             idx_bdst * stride_scores_bdst +\
+            idx_ensemble_sample_id * stride_scores_sample_n +\
             idx_bk * stride_scores_bk,
         value=scores,
         mask=mask_bk,
@@ -1391,8 +1475,8 @@ def masking_iteration_draft_cuda_partial_softmax(
 
 @triton.jit
 def masking_iteration_draft_cuda_argsort(
-    PROBS, stride_probs_b, stride_probs_bdst, stride_probs_bk,
-    IDS, stride_ids_b, stride_ids_bdst, stride_ids_bk,
+    PROBS, stride_probs_b, stride_probs_bdst, stride_probs_sample_n, stride_probs_bk,
+    IDS, stride_ids_b, stride_ids_bdst, stride_topk_ids_sample_n, stride_ids_bk,
     
     T_GROUP_SIZES, stride_t_group_size_b, stride_t_group_size_bdst,
     
@@ -1401,12 +1485,18 @@ def masking_iteration_draft_cuda_argsort(
     BK: tl.constexpr,
     TOP_BK: tl.constexpr,
     BLOCK_BDST: tl.constexpr,
+    idx_ensemble_sample_id : int,
     
     pid_0=None,
     pid_1=None,
     CARRYING: tl.constexpr = False,
     carried_probs = None,
 ):
+    """
+    ensemble per iter
+    - PROBS
+    - IDS
+    """
     if pid_0 is None:
         pid_0 = tl.program_id(0)
     if pid_1 is None:
@@ -1417,7 +1507,7 @@ def masking_iteration_draft_cuda_argsort(
     mask_bdst = idx_bdst < BDST
     idx_bk = tl.arange(0, BK)
     
-    t_group_size = tl.load(
+    t_group_size = tl.load( # TODO this 
         T_GROUP_SIZES +\
             idx_b * stride_t_group_size_b +\
             idx_bdst * stride_t_group_size_bdst,
@@ -1432,6 +1522,7 @@ def masking_iteration_draft_cuda_argsort(
         PROBS +\
             idx_b * stride_probs_b +\
             idx_bdst[:, None] * stride_probs_bdst +\
+            idx_ensemble_sample_id * stride_probs_sample_n +\
             idx_bk[None, :] * stride_probs_bk,
         mask=mask_bdst[:, None],
         cache_modifier=DEFAULT_CACHE_MODIFIER,
@@ -1463,6 +1554,7 @@ def masking_iteration_draft_cuda_argsort(
         IDS +\
             idx_b * stride_ids_b +\
             idx_bdst[:, None] * stride_ids_bdst +\
+            idx_ensemble_sample_id * stride_topk_ids_sample_n +\
             idx_bk[None, :] * stride_ids_bk,
         value=ids,
         mask=(idx_bk < TOP_BK)[None, :] & mask_bdst[:, None],
@@ -1556,6 +1648,900 @@ def get_masking_iteration_draft_cuda_fused_configs():
         'T_GROUP_SIZE',
     ]
 )
+
+
+@triton.jit
+def masking_iteration_draft_cuda_fused_per_iter(
+    Q, 
+    stride_q_bsz, 
+    stride_q_tdst,
+    stride_q_bh, 
+    stride_q_g, 
+    stride_q_hid,
+    K, 
+    stride_k_bsz, 
+    stride_k_tsrc,
+    stride_k_bh, 
+    stride_k_g, 
+    stride_k_hid,
+    POS, 
+    stride_pos_tdst,
+    COS, 
+    stride_cos_t, 
+    stride_cos_hid,
+    SIN, 
+    stride_sin_t, 
+    stride_sin_hid,
+    KEY_ACCESS_LOG, 
+    stride_key_access_log_b, 
+    stride_key_access_log_bdst, 
+    stride_key_access_log_t,
+    KEY_ACCESS_COUNT, 
+    stride_key_access_count_b,
+    stride_key_access_count_bdst, 
+    MAX_ACCESS_COUNT,
+    
+    INDICES, 
+    stride_indices_b, 
+    stride_indices_bdst, 
+    stride_indices_sample_n,
+    stride_indices_bk,
+    KS, 
+    stride_ks_b, 
+    stride_ks_bdst,
+    GROUP_SIZE, 
+    stride_group_size_b, 
+    stride_group_size_bdst, 
+    stride_group_size_sample_n,
+    stride_group_size_bk,
+    
+    DUPPED_INDICES, 
+    stride_dupped_indices_b, 
+    stride_dupped_indices_bdst, 
+    stride_dupped_indices_sample_n,
+    stride_dupped_indices_bk,
+    DUPPED_GROUP_SIZE, 
+    stride_dupped_group_size_b, 
+    stride_dupped_group_size_bdst, 
+    stride_dupped_group_size_sample_n,
+    stride_dupped_group_size_bk,
+    SCORES,
+    stride_scores_b,
+    stride_scores_bdst,
+    stride_scores_sample_n,
+    stride_scores_bk,
+    SCORES_FINAL,
+    stride_scores_final_b,
+    stride_scores_final_bdst,
+    stride_scores_final_sample_n,
+    stride_scores_final_bk,
+    SCORES_CACHED: tl.constexpr,
+    PROBS,
+    stride_probs_b,
+    stride_probs_bdst,
+    stride_probs_sample_n,
+    stride_probs_bk,
+    TOPK_IDS, 
+    stride_topk_ids_b, 
+    stride_topk_ids_bdst, 
+    stride_topk_ids_sample_n,
+    stride_topk_ids_bk,
+    
+    T_GROUP_SIZE, 
+    stride_t_group_size_b, 
+    stride_t_group_size_bdst,
+    INDICES_TDST,
+    stride_indices_tdst_t,
+    
+    mask_k,
+    
+    sink_token_size,
+    sliding_window_size,
+    
+    BH: tl.constexpr,
+    G: tl.constexpr, 
+    MAX_TDST, 
+    MAX_TSRC,
+    MAX_BDST,
+    MAX_BSRC,
+    BK: tl.constexpr,
+    HID: tl.constexpr,
+    RAND_SEED,
+    SAMPLE_METHOD: tl.constexpr,
+    BRANCH_METHOD: tl.constexpr,
+    
+    USING_EXTEND: tl.constexpr,
+    extend_window_size,
+    extend_group_size,
+    
+    USING_SPARQ: tl.constexpr,
+    SPARQ_HID: tl.constexpr,
+    Q_IND, 
+    stride_q_ind_b, 
+    stride_q_ind_g, 
+    stride_q_ind_bdst, 
+    stride_q_ind_k,
+    
+    BLOCK_SIZE_Q: tl.constexpr,
+    BLOCK_STRIDE_Q: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    BLOCK_STRIDE_K: tl.constexpr,
+    BLOCK_BK: tl.constexpr,
+    BLOCK_SCORE: tl.constexpr,
+    GROUP_BDST,
+    GROUP_BH,
+    
+    indices_bk_len: tl.constexpr,
+    probs_bk_len: tl.constexpr,
+
+    # ensemble
+    ENSEMBLE: tl.constexpr,
+    ENSEMBLE_MODEL_SETTING : tl.constexpr,
+    ENSEMBLE_METHOD : tl.constexpr,
+    ENSEMBLE_METHOD_FINAL : tl.constexpr,
+    ENSEMBLE_METHOD_FINAL_INTER_THRESH : tl.constexpr,
+    ENSEMBLE_METHOD_FINAL_BDD_MASK_K : tl.constexpr,
+    ENSEMBLE_TIMEDIM_WD : tl.constexpr,
+    ENSEMBLE_PER_LAYER_N : tl.constexpr,
+
+    ENSEMBLE_PER_ATTN_ITER: tl.constexpr,
+    MODEL_I: tl.constexpr,
+    ENSEMBLE_PARTICULAR_LAYER : tl.constexpr,
+    ENSEMBLE_LAYER_TILL : tl.constexpr,
+
+    ENSEMBLE_RANDOMNESS : tl.constexpr,
+    ENSEMBLE_ITER_START_STEP : tl.constexpr,
+    ENSEMBLE_ITER_N_MODE : tl.constexpr,
+    ENSEMBLE_ITER_N_START : tl.constexpr,
+    ENSEMBLE_ITER_N_FACTOR : tl.constexpr,
+    ENSEMBLE_ITER_N_JUMP : tl.constexpr,
+    ENSEMBLE_ITER_N_TILL : tl.constexpr,
+
+    LAYER_ID : tl.constexpr,
+    idx_ensemble_sample_id : tl.constexpr,
+
+    pid_0=None,
+    pid_1=None,
+):
+    n_program = tl.cdiv(indices_bk_len, BLOCK_BK) # indices_bk_len = indices.shape[-1] = [32, 1024, 256] = [B, cdiv_python(TDST, block_size_q), G * mask_block_k]
+    for i_program in range(n_program):
+        masking_iteration_draft_cuda_dup_and_score(
+            Q, stride_q_bsz, stride_q_tdst, stride_q_bh, stride_q_g, stride_q_hid,
+            K, stride_k_bsz, stride_k_tsrc, stride_k_bh, stride_k_g, stride_k_hid,
+            POS, stride_pos_tdst,
+            COS, stride_cos_t, stride_cos_hid,
+            SIN, stride_sin_t, stride_sin_hid,
+            KEY_ACCESS_LOG, 
+            stride_key_access_log_b, 
+            stride_key_access_log_bdst, 
+            stride_key_access_log_t,
+            KEY_ACCESS_COUNT, 
+            stride_key_access_count_b,
+            stride_key_access_count_bdst, 
+            MAX_ACCESS_COUNT,
+            
+            INDICES, stride_indices_b, stride_indices_bdst, stride_indices_sample_n, stride_indices_bk,
+            KS, stride_ks_b, stride_ks_bdst,
+            GROUP_SIZE, stride_group_size_b, stride_group_size_bdst, stride_group_size_sample_n, stride_group_size_bk,
+            
+            DUPPED_INDICES, 
+            stride_dupped_indices_b, 
+            stride_dupped_indices_bdst, 
+            stride_dupped_indices_sample_n,
+            stride_dupped_indices_bk,
+            DUPPED_GROUP_SIZE, 
+            stride_dupped_group_size_b, 
+            stride_dupped_group_size_bdst, 
+            stride_dupped_group_size_sample_n,
+            stride_dupped_group_size_bk,
+            SCORES,
+            stride_scores_b,
+            stride_scores_bdst,
+            stride_scores_sample_n,
+            stride_scores_bk,
+            SCORES_FINAL,
+            stride_scores_final_b,
+            stride_scores_final_bdst,
+            stride_scores_final_sample_n,
+            stride_scores_final_bk,
+            SCORES_CACHED,
+            
+            T_GROUP_SIZE, 
+            stride_t_group_size_b, 
+            stride_t_group_size_bdst,
+            INDICES_TDST,
+            stride_indices_tdst_t,
+            
+            mask_k,
+            
+            sliding_window_size,
+            
+            BH,
+            G, 
+            MAX_TDST, 
+            MAX_TSRC, 
+            BK, 
+            HID,
+            RAND_SEED,
+            SAMPLE_METHOD,
+            BRANCH_METHOD,
+            
+            USING_EXTEND,
+            extend_window_size,
+            extend_group_size,
+            
+            USING_SPARQ,
+            SPARQ_HID,
+            Q_IND, 
+            stride_q_ind_b, 
+            stride_q_ind_g, 
+            stride_q_ind_bdst, 
+            stride_q_ind_k,
+            
+            BLOCK_SIZE_Q,
+            BLOCK_STRIDE_Q,
+            BLOCK_SIZE_K,
+            BLOCK_STRIDE_K,
+            BLOCK_BK,
+            
+            0,
+            0,
+            idx_ensemble_sample_id,
+            
+            pid_0=i_program,
+            pid_1=pid_0,
+            pid_2=pid_1,
+        )
+    # end for
+    tl.debug_barrier()
+    
+    # same grid with master (BDST, B)
+    masking_iteration_draft_cuda_partial_softmax(
+        SCORES, 
+        stride_scores_b, 
+        stride_scores_bdst, 
+        stride_scores_sample_n,
+        stride_scores_bk,
+        DUPPED_INDICES, 
+        stride_dupped_indices_b, 
+        stride_dupped_indices_bdst, 
+        stride_dupped_indices_sample_n,
+        stride_dupped_indices_bk,
+        DUPPED_GROUP_SIZE,
+        stride_dupped_group_size_b,
+        stride_dupped_group_size_bdst,
+        stride_dupped_group_size_sample_n,
+        stride_dupped_group_size_bk,
+        
+        PROBS,
+        stride_probs_b,
+        stride_probs_bdst,
+        stride_probs_sample_n,
+        stride_probs_bk,
+        
+        sink_token_size,
+        BK,
+        G, 
+        probs_bk_len, 
+        MAX_BSRC,
+        BLOCK_SIZE_K,
+        
+        BLOCK_SCORE,
+        idx_ensemble_sample_id,
+        
+        pid_0=pid_0,
+        pid_1=pid_1,
+    )
+    tl.debug_barrier()
+    
+    # TODO: support score_head_group_size
+    
+    # same grid with master (BDST, B)
+    masking_iteration_draft_cuda_argsort(
+        PROBS,
+        stride_probs_b, 
+        stride_probs_bdst, 
+        stride_probs_sample_n,
+        stride_probs_bk,
+        TOPK_IDS, 
+        stride_topk_ids_b, 
+        stride_topk_ids_bdst, 
+        stride_topk_ids_sample_n,
+        stride_topk_ids_bk,
+        
+        T_GROUP_SIZE, 
+        stride_t_group_size_b, 
+        stride_t_group_size_bdst,
+        
+        MAX_BDST,
+        
+        probs_bk_len,
+        BK * G,
+        1,
+        idx_ensemble_sample_id,
+        
+        pid_0=pid_0,
+        pid_1=pid_1,
+    )
+    tl.debug_barrier()
+    
+    # num_program = tl.cdiv(indices_bk_len, BLOCK_BK)
+    # for i_program in range(num_program):
+    masking_iteration_draft_cuda_gather(
+        INDICES, 
+        stride_indices_b, 
+        stride_indices_bdst, 
+        stride_indices_sample_n,
+        stride_indices_bk,
+        GROUP_SIZE, 
+        stride_group_size_b, 
+        stride_group_size_bdst, 
+        stride_group_size_sample_n,
+        stride_group_size_bk,
+        SCORES_FINAL,
+        stride_scores_final_b,
+        stride_scores_final_bdst,
+        stride_scores_final_sample_n,
+        stride_scores_final_bk,
+        
+        DUPPED_INDICES, 
+        stride_dupped_indices_b, 
+        stride_dupped_indices_bdst, 
+        stride_dupped_indices_sample_n,
+        stride_dupped_indices_bk,
+        DUPPED_GROUP_SIZE, 
+        stride_dupped_group_size_b, 
+        stride_dupped_group_size_bdst, 
+        stride_dupped_group_size_sample_n,
+        stride_dupped_group_size_bk,
+        SCORES,
+        stride_scores_b,
+        stride_scores_bdst,
+        stride_scores_sample_n,
+        stride_scores_bk,
+        
+        TOPK_IDS,
+        stride_topk_ids_b,
+        stride_topk_ids_bdst,
+        stride_topk_ids_sample_n,
+        stride_topk_ids_bk,
+        
+        T_GROUP_SIZE,
+        stride_t_group_size_b, 
+        stride_t_group_size_bdst,
+        
+        G, BK, 
+        
+        indices_bk_len,
+        idx_ensemble_sample_id,
+        
+        pid_0=0,
+        pid_1=pid_0,
+        pid_2=pid_1,
+    )
+    
+    tl.debug_barrier()
+    
+    # SCORES_CACHED = True
+    
+    if BRANCH_METHOD == 'random':
+        max_group_size *= 0.7
+    else:
+        max_group_size *= 0.5
+
+
+@triton.jit
+def ensemble_make_final_masks_per_iter(
+    Q, 
+    stride_q_bsz, 
+    stride_q_tdst,
+    stride_q_bh, 
+    stride_q_g, 
+    stride_q_hid,
+    K, 
+    stride_k_bsz, 
+    stride_k_tsrc,
+    stride_k_bh, 
+    stride_k_g, 
+    stride_k_hid,
+    POS, 
+    stride_pos_tdst,
+    COS, 
+    stride_cos_t, 
+    stride_cos_hid,
+    SIN, 
+    stride_sin_t, 
+    stride_sin_hid,
+    KEY_ACCESS_LOG, 
+    stride_key_access_log_b, 
+    stride_key_access_log_bdst, 
+    stride_key_access_log_t,
+    KEY_ACCESS_COUNT, 
+    stride_key_access_count_b,
+    stride_key_access_count_bdst, 
+    MAX_ACCESS_COUNT,
+    
+    INDICES, 
+    stride_indices_b_ensemble, 
+    stride_indices_bdst_ensemble, 
+    stride_indices_samples_ensemble,
+    stride_indices_bk,
+    KS, 
+    stride_ks_b, 
+    stride_ks_bdst,
+    GROUP_SIZE, 
+    stride_group_size_b_ensemble, 
+    stride_group_size_bdst_ensemble, 
+    stride_group_size_samples_ensemble,
+    stride_group_size_bk,
+    
+    DUPPED_INDICES, 
+    stride_dupped_indices_b_ensemble, 
+    stride_dupped_indices_bdst_ensemble, 
+    stride_dupped_indices_samples_ensemble,
+    stride_dupped_indices_bk,
+    DUPPED_GROUP_SIZE, 
+    stride_dupped_group_size_b_ensemble, 
+    stride_dupped_group_size_bdst_ensemble, 
+    stride_dupped_group_size_samples_ensemble,
+    stride_dupped_group_size_bk,
+    SCORES,
+    stride_scores_b_ensemble,
+    stride_scores_bdst_ensemble,
+    stride_scores_samples_ensemble,
+    stride_scores_bk,
+    SCORES_FINAL,
+    stride_scores_final_b_ensemble,
+    stride_scores_final_bdst_ensemble,
+    stride_scores_final_samples_ensemble,
+    stride_scores_final_bk,
+    SCORES_CACHED: tl.constexpr,
+    PROBS,
+    stride_probs_b_ensemble,
+    stride_probs_bdst_ensemble,
+    stride_probs_samples_ensemble,
+    stride_probs_bk,
+    TOPK_IDS, 
+    stride_topk_ids_b_ensemble, 
+    stride_topk_ids_bdst_ensemble, 
+    stride_topk_ids_samples_ensemble,
+    stride_topk_ids_bk,
+    
+    T_GROUP_SIZE, 
+    stride_t_group_size_b, 
+    stride_t_group_size_bdst,
+    INDICES_TDST,
+    stride_indices_tdst_t,
+    
+    mask_k,
+    
+    sink_token_size,
+    sliding_window_size,
+    
+    BH: tl.constexpr,
+    G: tl.constexpr, 
+    MAX_TDST, 
+    MAX_TSRC,
+    MAX_BDST,
+    MAX_BSRC,
+    BK: tl.constexpr,
+    HID: tl.constexpr,
+    RAND_SEED,
+    SAMPLE_METHOD: tl.constexpr,
+    BRANCH_METHOD: tl.constexpr,
+    
+    USING_EXTEND: tl.constexpr,
+    extend_window_size,
+    extend_group_size,
+    
+    USING_SPARQ: tl.constexpr,
+    SPARQ_HID: tl.constexpr,
+    Q_IND, 
+    stride_q_ind_b, 
+    stride_q_ind_g, 
+    stride_q_ind_bdst, 
+    stride_q_ind_k,
+    
+    BLOCK_SIZE_Q: tl.constexpr,
+    BLOCK_STRIDE_Q: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    BLOCK_STRIDE_K: tl.constexpr,
+    BLOCK_BK: tl.constexpr,
+    BLOCK_SCORE: tl.constexpr,
+    GROUP_BDST,
+    GROUP_BH,
+    
+    indices_bk_len: tl.constexpr,
+    probs_bk_len: tl.constexpr,
+
+    # ensemble
+    ENSEMBLE: tl.constexpr,
+    ENSEMBLE_MODEL_SETTING : tl.constexpr,
+    ENSEMBLE_METHOD : tl.constexpr,
+    ENSEMBLE_METHOD_FINAL : tl.constexpr,
+    ENSEMBLE_METHOD_FINAL_INTER_THRESH : tl.constexpr,
+    ENSEMBLE_METHOD_FINAL_BDD_MASK_K : int,
+    ENSEMBLE_TIMEDIM_WD : int,
+    ENSEMBLE_PER_LAYER_N : tl.constexpr,
+
+    ENSEMBLE_PER_ATTN_ITER: tl.constexpr,
+    MODEL_I: tl.constexpr,
+    ENSEMBLE_PARTICULAR_LAYER : int,
+    ENSEMBLE_LAYER_TILL : int,
+
+    ENSEMBLE_RANDOMNESS : tl.constexpr,
+    ENSEMBLE_ITER_START_STEP : int,
+    ENSEMBLE_ITER_N_MODE : tl.constexpr,
+    ENSEMBLE_ITER_N_START : int,
+    ENSEMBLE_ITER_N_FACTOR : int,
+    ENSEMBLE_ITER_N_JUMP : int,
+    ENSEMBLE_ITER_N_TILL : int,
+
+    LAYER_ID : int,
+):
+    # make final masks
+    """
+    - INDICES [32, 1024, 256] = [B, cdiv_python(TDST, block_size_q), sample_n, G * mask_block_k]
+    GROUP_SIZES [32, 1024, 256] = [B, cdiv_python(TDST, block_size_q), sample_n, G * mask_block_k]
+    - SCORES_FINAL [32, 1024, 256] = [B, cdiv_python(TDST, block_size_q), sample_n, G * mask_block_k]
+    - PROBS [32, 1024, 512] = [B, BDST, sample_n, G * mask_block_k * 2]
+    - IDS [32, 1024, 256] = [B, BDST, sample_n, G * mask_block_k]
+    - SCORES [32, 1024, 512] = [B, BDST, sample_n, G * mask_block_k * 2]
+    - DUPPED_INDICES [32, 1024, 512] = [B, BDST, sample_n, G * mask_block_k * 2]
+    * DUPPED_GROUP_SIZED [32, 1024, 512] = [B, BDST, sample_n, G * mask_block_k * 2]
+    - T_GROUP_SIZES [32, 1024] = [B, BDST]
+
+    IDS_TDST  0 [32768] <- idx_tdst = idx_tdst % TDST
+    KS  0 [B, cdiv_python(TDST, block_size_q)]
+    """
+
+    ensemble_total_samples_curr = INDICES.shape[-2]
+    assert ensemble_total_samples_curr == GROUP_SIZE.shape[-2]
+    assert ensemble_total_samples_curr == SCORES_FINAL.shape[-2]
+    assert ensemble_total_samples_curr == PROBS.shape[-2]
+    assert ensemble_total_samples_curr == TOPK_IDS.shape[-2]
+    assert ensemble_total_samples_curr == SCORES.shape[-2]
+    assert ensemble_total_samples_curr == DUPPED_INDICES.shape[-2]
+    assert ensemble_total_samples_curr == DUPPED_GROUP_SIZE.shape[-2]
+    
+    # B, BDST, SAMPLE_N, MASK_BK
+    if ensemble_method_final == "voting":
+        # ensemble_method_final : voting
+        pass
+    if ensemble_method_final == "scoring":
+        assert SAMPLE_METHOD == "first"
+        # ensemble_method_final : scoring
+        # topk indices updated based on the score value
+        masking_iteration_draft_cuda_argsort(
+            SCORES_FINAL,
+            stride_scores_final_b_ensemble,
+            stride_scores_final_bdst_ensemble,
+            stride_scores_final_samples_ensemble,
+            stride_scores_final_bk,
+            
+            TOPK_IDS,
+            stride_topk_ids_b_ensemble, 
+            stride_topk_ids_bdst_ensemble, 
+            stride_topk_ids_samples_ensemble,
+            stride_topk_ids_bk,
+
+            T_GROUP_SIZE, 
+            stride_t_group_size_b, 
+            stride_t_group_size_bdst,
+            
+            MAX_BDST,
+            
+            probs_bk_len,
+            BK * G,
+            1,
+            idx_ensemble_sample_id,
+            
+            pid_0=pid_0,
+            pid_1=pid_1,
+        )
+
+@triton.jit
+def ensemble_make_samples_per_iter(
+    Q, 
+    stride_q_bsz, 
+    stride_q_tdst,
+    stride_q_bh, 
+    stride_q_g, 
+    stride_q_hid,
+    K, 
+    stride_k_bsz, 
+    stride_k_tsrc,
+    stride_k_bh, 
+    stride_k_g, 
+    stride_k_hid,
+    POS, 
+    stride_pos_tdst,
+    COS, 
+    stride_cos_t, 
+    stride_cos_hid,
+    SIN, 
+    stride_sin_t, 
+    stride_sin_hid,
+    KEY_ACCESS_LOG, 
+    stride_key_access_log_b, 
+    stride_key_access_log_bdst, 
+    stride_key_access_log_t,
+    KEY_ACCESS_COUNT, 
+    stride_key_access_count_b,
+    stride_key_access_count_bdst, 
+    MAX_ACCESS_COUNT,
+    
+    INDICES, 
+    stride_indices_b_ensemble, 
+    stride_indices_bdst_ensemble, 
+    stride_indices_samples_ensemble,
+    stride_indices_bk,
+    KS, 
+    stride_ks_b, 
+    stride_ks_bdst,
+    GROUP_SIZE, 
+    stride_group_size_b_ensemble, 
+    stride_group_size_bdst_ensemble, 
+    stride_group_size_samples_ensemble,
+    stride_group_size_bk,
+    
+    DUPPED_INDICES, 
+    stride_dupped_indices_b_ensemble, 
+    stride_dupped_indices_bdst_ensemble, 
+    stride_dupped_indices_samples_ensemble,
+    stride_dupped_indices_bk,
+    DUPPED_GROUP_SIZE, 
+    stride_dupped_group_size_b_ensemble, 
+    stride_dupped_group_size_bdst_ensemble, 
+    stride_dupped_group_size_samples_ensemble,
+    stride_dupped_group_size_bk,
+    SCORES,
+    stride_scores_b_ensemble,
+    stride_scores_bdst_ensemble,
+    stride_scores_samples_ensemble,
+    stride_scores_bk,
+    SCORES_FINAL,
+    stride_scores_final_b_ensemble,
+    stride_scores_final_bdst_ensemble,
+    stride_scores_final_samples_ensemble,
+    stride_scores_final_bk,
+    SCORES_CACHED: tl.constexpr,
+    PROBS,
+    stride_probs_b_ensemble,
+    stride_probs_bdst_ensemble,
+    stride_probs_samples_ensemble,
+    stride_probs_bk,
+    TOPK_IDS, 
+    stride_topk_ids_b_ensemble, 
+    stride_topk_ids_bdst_ensemble, 
+    stride_topk_ids_samples_ensemble,
+    stride_topk_ids_bk,
+    
+    T_GROUP_SIZE, 
+    stride_t_group_size_b, 
+    stride_t_group_size_bdst,
+    INDICES_TDST,
+    stride_indices_tdst_t,
+    
+    mask_k,
+    
+    sink_token_size,
+    sliding_window_size,
+    
+    BH: tl.constexpr,
+    G: tl.constexpr, 
+    MAX_TDST, 
+    MAX_TSRC,
+    MAX_BDST,
+    MAX_BSRC,
+    BK: tl.constexpr,
+    HID: tl.constexpr,
+    RAND_SEED,
+    SAMPLE_METHOD: tl.constexpr,
+    BRANCH_METHOD: tl.constexpr,
+    
+    USING_EXTEND: tl.constexpr,
+    extend_window_size,
+    extend_group_size,
+    
+    USING_SPARQ: tl.constexpr,
+    SPARQ_HID: tl.constexpr,
+    Q_IND, 
+    stride_q_ind_b, 
+    stride_q_ind_g, 
+    stride_q_ind_bdst, 
+    stride_q_ind_k,
+    
+    BLOCK_SIZE_Q: tl.constexpr,
+    BLOCK_STRIDE_Q: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    BLOCK_STRIDE_K: tl.constexpr,
+    BLOCK_BK: tl.constexpr,
+    BLOCK_SCORE: tl.constexpr,
+    GROUP_BDST,
+    GROUP_BH,
+    
+    indices_bk_len: tl.constexpr,
+    probs_bk_len: tl.constexpr,
+
+    # ensemble
+    ENSEMBLE: tl.constexpr,
+    ENSEMBLE_MODEL_SETTING : tl.constexpr,
+    ENSEMBLE_METHOD : tl.constexpr,
+    ENSEMBLE_METHOD_FINAL : tl.constexpr,
+    ENSEMBLE_METHOD_FINAL_INTER_THRESH : tl.constexpr,
+    ENSEMBLE_METHOD_FINAL_BDD_MASK_K : int,
+    ENSEMBLE_TIMEDIM_WD : int,
+    ENSEMBLE_PER_LAYER_N : tl.constexpr,
+
+    ENSEMBLE_PER_ATTN_ITER: tl.constexpr,
+    MODEL_I: tl.constexpr,
+    ENSEMBLE_PARTICULAR_LAYER : int,
+    ENSEMBLE_LAYER_TILL : int,
+
+    ENSEMBLE_RANDOMNESS : tl.constexpr,
+    ENSEMBLE_ITER_START_STEP : int,
+    ENSEMBLE_ITER_N_MODE : tl.constexpr,
+    ENSEMBLE_ITER_N_START : int,
+    ENSEMBLE_ITER_N_FACTOR : int,
+    ENSEMBLE_ITER_N_JUMP : int,
+    ENSEMBLE_ITER_N_TILL : int,
+
+    LAYER_ID : int,
+):
+    idx_ensemble_sample_id = tl.program_id(0)
+
+    masking_iteration_draft_cuda_fused_per_iter(
+        Q, 
+        stride_q_bsz, 
+        stride_q_tdst,
+        stride_q_bh, 
+        stride_q_g, 
+        stride_q_hid,
+        K, 
+        stride_k_bsz, 
+        stride_k_tsrc,
+        stride_k_bh, 
+        stride_k_g, 
+        stride_k_hid,
+        POS, 
+        stride_pos_tdst,
+        COS, 
+        stride_cos_t, 
+        stride_cos_hid,
+        SIN, 
+        stride_sin_t, 
+        stride_sin_hid,
+        KEY_ACCESS_LOG, 
+        stride_key_access_log_b, 
+        stride_key_access_log_bdst, 
+        stride_key_access_log_t,
+        KEY_ACCESS_COUNT, 
+        stride_key_access_count_b,
+        stride_key_access_count_bdst, 
+        MAX_ACCESS_COUNT,
+        
+        INDICES, 
+        stride_indices_b, 
+        stride_indices_bdst, 
+        stride_indices_sample_n,
+        stride_indices_bk,
+        KS, 
+        stride_ks_b, 
+        stride_ks_bdst,
+        GROUP_SIZE, 
+        stride_group_size_b, 
+        stride_group_size_bdst, 
+        stride_group_size_sample_n,
+        stride_group_size_bk,
+        
+        DUPPED_INDICES, 
+        stride_dupped_indices_b, 
+        stride_dupped_indices_bdst, 
+        stride_dupped_indices_sample_n,
+        stride_dupped_indices_bk,
+        DUPPED_GROUP_SIZE, 
+        stride_dupped_group_size_b, 
+        stride_dupped_group_size_bdst, 
+        stride_dupped_group_size_sample_n,
+        stride_dupped_group_size_bk,
+        SCORES,
+        stride_scores_b,
+        stride_scores_bdst,
+        stride_scores_sample_n,
+        stride_scores_bk,
+        SCORES_FINAL,
+        stride_scores_final_b,
+        stride_scores_final_bdst,
+        stride_scores_final_sample_n,
+        stride_scores_final_bk,
+        SCORES_CACHED,
+        PROBS,
+        stride_probs_b,
+        stride_probs_bdst,
+        stride_probs_sample_n,
+        stride_probs_bk,
+        TOPK_IDS, 
+        stride_topk_ids_b, 
+        stride_topk_ids_bdst, 
+        stride_topk_ids_sample_n,
+        stride_topk_ids_bk,
+        
+        T_GROUP_SIZE, 
+        stride_t_group_size_b, 
+        stride_t_group_size_bdst,
+        INDICES_TDST,
+        stride_indices_tdst_t,
+        
+        mask_k,
+        
+        sink_token_size,
+        sliding_window_size,
+        
+        BH,
+        G, 
+        MAX_TDST, 
+        MAX_TSRC,
+        MAX_BDST,
+        MAX_BSRC,
+        BK,
+        HID,
+        RAND_SEED,
+        SAMPLE_METHOD,
+        BRANCH_METHOD,
+        
+        USING_EXTEND,
+        extend_window_size,
+        extend_group_size,
+        
+        USING_SPARQ,
+        SPARQ_HID,
+        Q_IND, 
+        stride_q_ind_b, 
+        stride_q_ind_g, 
+        stride_q_ind_bdst, 
+        stride_q_ind_k,
+        
+        BLOCK_SIZE_Q,
+        BLOCK_STRIDE_Q,
+        BLOCK_SIZE_K,
+        BLOCK_STRIDE_K,
+        BLOCK_BK,
+        BLOCK_SCORE,
+        GROUP_BDST,
+        GROUP_BH,
+        
+        indices_bk_len,
+        probs_bk_len,
+
+        # ensemble
+        ENSEMBLE,
+        ENSEMBLE_MODEL_SETTING,
+        ENSEMBLE_METHOD,
+        ENSEMBLE_METHOD_FINAL,
+        ENSEMBLE_METHOD_FINAL_INTER_THRESH,
+        ENSEMBLE_METHOD_FINAL_BDD_MASK_K,
+        ENSEMBLE_TIMEDIM_WD,
+        ENSEMBLE_PER_LAYER_N,
+
+        ENSEMBLE_PER_ATTN_ITER,
+        MODEL_I,
+        ENSEMBLE_PARTICULAR_LAYER,
+        ENSEMBLE_LAYER_TILL,
+
+        ENSEMBLE_RANDOMNESS,
+        ENSEMBLE_ITER_START_STEP,
+        ENSEMBLE_ITER_N_MODE,
+        ENSEMBLE_ITER_N_START,
+        ENSEMBLE_ITER_N_FACTOR,
+        ENSEMBLE_ITER_N_JUMP,
+        ENSEMBLE_ITER_N_TILL,
+
+        LAYER_ID,
+        idx_ensemble_sample_id,
+    )
+
+
 @triton.jit
 def masking_iteration_draft_cuda_fused(
     Q, 
@@ -1671,6 +2657,31 @@ def masking_iteration_draft_cuda_fused(
     
     indices_bk_len: tl.constexpr,
     probs_bk_len: tl.constexpr,
+
+    # ensemble
+    ENSEMBLE: tl.constexpr,
+    ENSEMBLE_MODEL_SETTING : tl.constexpr,
+    ENSEMBLE_METHOD : tl.constexpr,
+    ENSEMBLE_METHOD_FINAL : tl.constexpr,
+    ENSEMBLE_METHOD_FINAL_INTER_THRESH : tl.constexpr,
+    ENSEMBLE_METHOD_FINAL_BDD_MASK_K : int,
+    ENSEMBLE_TIMEDIM_WD : int,
+    ENSEMBLE_PER_LAYER_N : tl.constexpr,
+
+    ENSEMBLE_PER_ATTN_ITER: tl.constexpr,
+    MODEL_I: tl.constexpr,
+    ENSEMBLE_PARTICULAR_LAYER : int,
+    ENSEMBLE_LAYER_TILL : int,
+
+    ENSEMBLE_RANDOMNESS : tl.constexpr,
+    ENSEMBLE_ITER_START_STEP : int,
+    ENSEMBLE_ITER_N_MODE : tl.constexpr,
+    ENSEMBLE_ITER_N_START : int,
+    ENSEMBLE_ITER_N_FACTOR : int,
+    ENSEMBLE_ITER_N_JUMP : int,
+    ENSEMBLE_ITER_N_TILL : int,
+
+    LAYER_ID : int,
 ):
     """
     grid = (
@@ -1718,6 +2729,7 @@ def masking_iteration_draft_cuda_fused(
     pid_1 = _pid_2 * BH + _pid_0 # BSZ * BH + BH
     
     num_groups = tl.minimum(GROUP_BDST, (MAX_BDST - _pid_1 * GROUP_BDST))
+
     for i_group in range(num_groups):
         # originally bdst dim, before vectorize head
         pid_0 = _pid_1 * GROUP_BDST + i_group
@@ -1730,15 +2742,439 @@ def masking_iteration_draft_cuda_fused(
                 idx_bdst * stride_t_group_size_bdst,
         ).to(tl.float32)
         
-        while max_group_size > 1:
-            n_program = tl.cdiv(indices_bk_len, BLOCK_BK)
-            for i_program in range(n_program):
-                masking_iteration_draft_cuda_dup_and_score(
-                    Q, stride_q_bsz, stride_q_tdst, stride_q_bh, stride_q_g, stride_q_hid,
-                    K, stride_k_bsz, stride_k_tsrc, stride_k_bh, stride_k_g, stride_k_hid,
-                    POS, stride_pos_tdst,
-                    COS, stride_cos_t, stride_cos_hid,
-                    SIN, stride_sin_t, stride_sin_hid,
+        idx_iteration = 0
+        while max_group_size > 1: # per iteration operation
+            # ensemble per iteration
+            """
+            - INDICES  10553505638 [32, 1024, 256] = [B, cdiv_python(TDST, block_size_q), G * mask_block_k]
+            GROUP_SIZES  -252174336 [32, 1024, 256] = [B, cdiv_python(TDST, block_size_q), G * mask_block_k]
+            - SCORES_FINAL  38797312.0 [32, 1024, 256] = [B, cdiv_python(TDST, block_size_q), G * mask_block_k]
+            - PROBS  -3424256.0 [32, 1024, 512] = [B, BDST, G * mask_block_k * 2]
+            - IDS  259179218862864 [32, 1024, 256] = [B, BDST, G * mask_block_k]
+            - SCORES  -127926272.0 [32, 1024, 512] = [B, BDST, G * mask_block_k * 2]
+            - DUPPED_INDICES  129907109728630 [32, 1024, 512] = [B, BDST, G * mask_block_k * 2]
+            * DUPPED_GROUP_SIZED  478408894197341 [32, 1024, 512] = [B, BDST, G * mask_block_k * 2] TODO heuristic?
+            T_GROUP_SIZES  -1007232.0 [32, 1024] = [B, BDST] TODO heuristic?
+
+            IDS_TDST  0 [32768] <- idx_tdst = idx_tdst % TDST
+            KS  0 [B, cdiv_python(TDST, block_size_q)]
+            """
+            if ENSEMBLE == True and ENSEMBLE_MODEL_SETTING == "random_per_iter":
+                assert SAMPLE_METHOD == 'first'
+                assert ENSEMBLE_ITER_N_MODE in ["exponent", "linear", "linear_exponent" ,"constant"]
+                # NOTE assert ENSEMBLE_ITER_N_JUMP <= N_ITERATION
+
+                if ENSEMBLE_ITER_N_TILL is None:
+                    ENSEMBLE_ITER_N_TILL = 32000
+
+                if idx_iteration < ENSEMBLE_ITER_START_STEP:
+                    assert INDICES.ndim == 3
+                    assert GROUP_SIZE.ndim == 3
+                    assert SCORES_FINAL.ndim == 3
+                    assert PROBS.ndim == 3
+                    assert TOPK_IDS.ndim == 3
+                    assert SCORES.ndim == 3
+                    assert DUPPED_INDICES.ndim == 3
+                    assert DUPPED_GROUP_SIZED.ndim == 3
+                    # assert T_GROUP_SIZE.ndim == 3 # TODO seems managing T_GROUP_SIZE is unnecessary?
+
+                    # use sample # 1 = default setting w/o ensemble
+                    ensemble_total_samples_curr = 1
+
+                    # TODO : discard newly defined variables?
+                    # INDICES
+                    stride_indices_b_ensemble = stride_indices_b * ensemble_total_samples_curr
+                    stride_indices_bdst_ensemble = stride_indices_bdst * ensemble_total_samples_curr
+                    stride_indices_samples_ensemble = 0
+
+                    # GROUP_SIZE
+                    stride_group_size_b_ensemble = stride_group_size_b * ensemble_total_samples_curr
+                    stride_group_size_bdst_ensemble = stride_group_size_bdst * ensemble_total_samples_curr
+                    stride_group_size_samples_ensemble = 0
+
+                    # SCORES_FINAL
+                    stride_scores_final_b_ensemble = stride_scores_final_b * ensemble_total_samples_curr
+                    stride_scores_final_bdst_ensemble = stride_scores_final_bdst * ensemble_total_samples_curr
+                    stride_scores_final_samples_ensemble = 0
+                    
+                    # PROBS
+                    stride_probs_b_ensemble = stride_probs_b * ensemble_total_samples_curr
+                    stride_probs_bdst_ensemble = stride_probs_bdst * ensemble_total_samples_curr
+                    stride_probs_samples_ensemble = 0
+
+                    # TOPK_IDS
+                    stride_topk_ids_b_ensemble = stride_topk_ids_b * ensemble_total_samples_curr
+                    stride_topk_ids_bdst_ensemble = stride_topk_ids_bdst * ensemble_total_samples_curr
+                    stride_topk_ids_samples_ensemble = 0
+
+                    # SCORES
+                    stride_scores_b_ensemble = stride_scores_b * ensemble_total_samples_curr
+                    stride_scores_bdst_ensemble = stride_scores_bdst * ensemble_total_samples_curr
+                    stride_scores_samples_ensemble = 0
+
+                    # DUPPED_INDICES
+                    stride_dupped_indices_b_ensemble = stride_dupped_indices_b * ensemble_total_samples_curr
+                    stride_dupped_indices_bdst_ensemble = stride_dupped_indices_bdst * ensemble_total_samples_curr
+                    stride_dupped_indices_samples_ensemble = 0
+
+                    # DUPPED_GROUP_SIZED
+                    stride_dupped_group_size_b_ensemble = stride_dupped_group_size_b * ensemble_total_samples_curr
+                    stride_dupped_group_size_bdst_ensemble = stride_dupped_group_size_bdst * ensemble_total_samples_curr
+                    stride_dupped_group_size_samples_ensemble = 0
+
+
+                elif idx_iteration == ENSEMBLE_ITER_START_STEP:
+                    ensemble_sample_per_iter_old = 1 # TODO : differ for idx_iteration == 0?
+                    ensemble_sample_per_iter_new = ENSEMBLE_ITER_N_START
+                    ensemble_total_samples_curr = ENSEMBLE_ITER_N_START
+
+                    # MASK : [32, 1024, 1, 128] = (N_H, T, grid_src_stride(ensemble_sample_per_iter_old), MASK_K_B)
+                    # >>>  : [32, 1024, ensemble_total_samples_curr, 128]
+                    # TMASK: [32, 1024, 1, 256] = [N_H, T, grid_src_stride(ensemble_sample_per_iter_old), MASK_K_B * scale_up]
+                    # >>>  : [32, 1024, ensemble_total_samples_curr, 256]
+                    assert INDICES.ndim == 3
+                    assert GROUP_SIZE.ndim == 3
+                    assert SCORES_FINAL.ndim == 3
+                    assert PROBS.ndim == 3
+                    assert TOPK_IDS.ndim == 3
+                    assert SCORES.ndim == 3
+                    assert DUPPED_INDICES.ndim == 3
+                    assert DUPPED_GROUP_SIZED.ndim == 3
+
+                    INDICES = INDICES.unsqueeze(2)
+                    INDICES = INDICES.expand(-1, -1, ensemble_sample_per_iter_new, -1)
+                    INDICES = INDICES.reshape(
+                        INDICES.shape[0],
+                        INDICES.shape[1],
+                        ensemble_total_samples_curr,
+                        INDICES.shape[-1]
+                    )
+
+                    GROUP_SIZE = GROUP_SIZE.unsqueeze(2)
+                    GROUP_SIZE = GROUP_SIZE.expand(-1, -1, ensemble_sample_per_iter_new, -1)
+                    GROUP_SIZE = GROUP_SIZE.reshape(
+                        GROUP_SIZE.shape[0],
+                        GROUP_SIZE.shape[1],
+                        ensemble_total_samples_curr,
+                        GROUP_SIZE.shape[-1]
+                    )
+
+                    SCORES_FINAL = SCORES_FINAL.unsqueeze(2)
+                    SCORES_FINAL = SCORES_FINAL.expand(-1, -1, ensemble_sample_per_iter_new, -1)
+                    SCORES_FINAL = SCORES_FINAL.reshape(
+                        SCORES_FINAL.shape[0],
+                        SCORES_FINAL.shape[1],
+                        ensemble_total_samples_curr,
+                        SCORES_FINAL.shape[-1],
+                    )
+
+                    PROBS = PROBS.unsqueeze(2)
+                    PROBS = PROBS.expand(-1, -1, ensemble_sample_per_iter_new, -1)
+                    PROBS = PROBS.reshape(
+                        PROBS.shape[0],
+                        PROBS.shape[1],
+                        ensemble_total_samples_curr,
+                        PROBS.shape[-1]
+                    )
+
+                    TOPK_IDS = TOPK_IDS.unsqueeze(2)
+                    TOPK_IDS = TOPK_IDS.expand(-1, -1, ensemble_sample_per_iter_new, -1)
+                    TOPK_IDS = TOPK_IDS.reshape(
+                        TOPK_IDS.shape[0],
+                        TOPK_IDS.shape[1],
+                        ensemble_total_samples_curr,
+                        TOPK_IDS.shape[-1],
+                    )
+
+                    # TODO no??
+                    SCORES = SCORES.unsqueeze(2)
+                    SCORES = SCORES.expand(-1, -1, ensemble_sample_per_iter_new, -1)
+                    SCORES = SCORES.reshape(
+                        SCORES.shape[0],
+                        SCORES.shape[1],
+                        ensemble_total_samples_curr,
+                        SCORES.shape[-1]
+                    )
+
+                    DUPPED_INDICES = DUPPED_INDICES.unsqueeze(2)
+                    DUPPED_INDICES = DUPPED_INDICES.expand(-1, -1, ensemble_sample_per_iter_new, -1)
+                    DUPPED_INDICES = DUPPED_INDICES.reshape(
+                        DUPPED_INDICES.shape[0],
+                        DUPPED_INDICES.shape[1],
+                        ensemble_total_samples_curr,
+                        DUPPED_INDICES.shape[-1]
+                    )
+
+                    DUPPED_GROUP_SIZED = DUPPED_GROUP_SIZED.unsqueeze(2)
+                    DUPPED_GROUP_SIZED = DUPPED_GROUP_SIZED.expand(-1, -1, ensemble_sample_per_iter_new, -1)
+                    DUPPED_GROUP_SIZED = DUPPED_GROUP_SIZED.reshape(
+                        DUPPED_GROUP_SIZED.shape[0],
+                        DUPPED_GROUP_SIZED.shape[1],
+                        ensemble_total_samples_curr,
+                        DUPPED_GROUP_SIZED.shape[-1]
+                    )
+
+                    # INDICES
+                    stride_indices_b_ensemble = stride_indices_b * ensemble_total_samples_curr
+                    stride_indices_bdst_ensemble = stride_indices_bdst * ensemble_total_samples_curr
+                    stride_indices_samples_ensemble = stride_indices_bdst
+
+                    # GROUP_SIZE
+                    stride_group_size_b_ensemble = stride_group_size_b * ensemble_total_samples_curr
+                    stride_group_size_bdst_ensemble = stride_group_size_bdst * ensemble_total_samples_curr
+                    stride_group_size_samples_ensemble = stride_group_size_bdst
+
+                    # SCORES_FINAL
+                    stride_scores_final_b_ensemble = stride_scores_final_b * ensemble_total_samples_curr
+                    stride_scores_final_bdst_ensemble = stride_scores_final_bdst * ensemble_total_samples_curr
+                    stride_scores_final_samples_ensemble = stride_scores_final_bdst
+                    
+                    # PROBS
+                    stride_probs_b_ensemble = stride_probs_b * ensemble_total_samples_curr
+                    stride_probs_bdst_ensemble = stride_probs_bdst * ensemble_total_samples_curr
+                    stride_probs_samples_ensemble = stride_probs_bdst
+
+                    # TOPK_IDS
+                    stride_topk_ids_b_ensemble = stride_topk_ids_b * ensemble_total_samples_curr
+                    stride_topk_ids_bdst_ensemble = stride_topk_ids_bdst * ensemble_total_samples_curr
+                    stride_topk_ids_samples_ensemble = stride_topk_ids_bdst
+
+                    # SCORES
+                    stride_scores_b_ensemble = stride_scores_b * ensemble_total_samples_curr
+                    stride_scores_bdst_ensemble = stride_scores_bdst * ensemble_total_samples_curr
+                    stride_scores_samples_ensemble = stride_scores_bdst
+
+                    # DUPPED_INDICES
+                    stride_dupped_indices_b_ensemble = stride_dupped_indices_b * ensemble_total_samples_curr
+                    stride_dupped_indices_bdst_ensemble = stride_dupped_indices_bdst * ensemble_total_samples_curr
+                    stride_dupped_indices_samples_ensemble = stride_dupped_indices_bdst
+
+                    # DUPPED_GROUP_SIZED
+                    stride_dupped_group_size_b_ensemble = stride_dupped_group_size_b * ensemble_total_samples_curr
+                    stride_dupped_group_size_bdst_ensemble = stride_dupped_group_size_bdst * ensemble_total_samples_curr
+                    stride_dupped_group_size_samples_ensemble = stride_dupped_group_size_bdst
+
+
+                elif (idx_iteration > ENSEMBLE_ITER_START_STEP) and (idx_iteration <= ENSEMBLE_ITER_N_TILL) and ((idx_iteration - ENSEMBLE_ITER_START_STEP) % ENSEMBLE_ITER_N_JUMP == 0):
+                    # TODO add when idx_iteration is in the middle or at the end
+                    ensemble_sample_per_iter_old = ensemble_sample_per_iter_new
+                    if ENSEMBLE_ITER_N_MODE == "constant":
+                        ensemble_sample_per_iter_new = max(round(ensemble_sample_per_iter_old), 1) # TODO check
+                    else:
+                        ensemble_step = (idx_iteration - ENSEMBLE_ITER_START_STEP) // ENSEMBLE_ITER_N_JUMP  
+                        if ENSEMBLE_ITER_N_MODE == "exponent":
+                            ensemble_sample_per_iter_new = max(round(ensemble_sample_per_iter_old * (ENSEMBLE_ITER_N_FACTOR ** ensemble_step)), 1)
+                        elif ENSEMBLE_ITER_N_MODE == "linear":
+                            ensemble_sample_per_iter_new = max(round(ensemble_sample_per_iter_old + (ENSEMBLE_ITER_N_FACTOR * ensemble_step)), 1)
+                        elif ENSEMBLE_ITER_N_MODE ==  "linear_exponent":
+                            ensemble_sample_per_iter_new = max(round(ensemble_sample_per_iter_old + (ENSEMBLE_ITER_N_FACTOR ** ensemble_step)), 1)
+                        ensemble_total_samples_curr = ensemble_total_samples_curr * ensemble_sample_per_iter_new
+
+                        # ensemble
+                        # NOTE method 1: simply ensemble at the final iteration step
+                        # NOTE method 2: ensemble per some iteration steps (internal guiding)
+                        assert INDICES.ndim == 4
+                        assert GROUP_SIZE.ndim == 4
+                        assert SCORES_FINAL.ndim == 4
+                        assert PROBS.ndim == 4
+                        assert TOPK_IDS.ndim == 4
+                        assert SCORES.ndim == 4
+                        assert DUPPED_INDICES.ndim == 4
+                        assert DUPPED_GROUP_SIZED.ndim == 4
+
+                        # MASK : shape[0], shape[1], ensemble_total_samples_curr, shape[-2], shape[-1]
+                        # TMASK : shape[0], shape[1], ensemble_total_samples_curr, shape[-2], shape[-1]
+                        INDICES = INDICES.unsqueeze(2)
+                        INDICES = INDICES.expand(-1, -1, ensemble_sample_per_iter_new, -1, -1)
+                        INDICES = INDICES.reshape(
+                            INDICES.shape[0],
+                            INDICES.shape[1],
+                            ensemble_total_samples_curr,
+                            INDICES.shape[-2],
+                            INDICES.shape[-1]
+                        )
+
+                        GROUP_SIZE = GROUP_SIZE.unsqueeze(2)
+                        GROUP_SIZE = GROUP_SIZE.expand(-1, -1, ensemble_sample_per_iter_new, -1, -1)
+                        GROUP_SIZE = GROUP_SIZE.reshape(
+                            GROUP_SIZE.shape[0],
+                            GROUP_SIZE.shape[1],
+                            ensemble_total_samples_curr,
+                            GROUP_SIZE.shape[-2],
+                            GROUP_SIZE.shape[-1]
+                        )
+
+                        SCORES_FINAL = SCORES_FINAL.unsqueeze(2)
+                        SCORES_FINAL = SCORES_FINAL.expand(-1, -1, ensemble_sample_per_iter_new, -1, -1)
+                        SCORES_FINAL = SCORES_FINAL.reshape(
+                            SCORES_FINAL.shape[0],
+                            SCORES_FINAL.shape[1],
+                            ensemble_total_samples_curr,
+                            SCORES_FINAL.shape[-2],
+                            SCORES_FINAL.shape[-1],
+                        )
+
+                        PROBS = PROBS.unsqueeze(2)
+                        PROBS = PROBS.expand(-1, -1, ensemble_sample_per_iter_new, -1, -1)
+                        PROBS = PROBS.reshape(
+                            PROBS.shape[0],
+                            PROBS.shape[1],
+                            ensemble_total_samples_curr,
+                            PROBS.shape[-2],
+                            PROBS.shape[-1]
+                        )
+
+                        TOPK_IDS = TOPK_IDS.unsqueeze(2)
+                        TOPK_IDS = TOPK_IDS.expand(-1, -1, ensemble_sample_per_iter_new, -1, -1)
+                        TOPK_IDS = TOPK_IDS.reshape(
+                            TOPK_IDS.shape[0],
+                            TOPK_IDS.shape[1],
+                            ensemble_total_samples_curr,
+                            TOPK_IDS.shape[-2],
+                            TOPK_IDS.shape[-1],
+                        )
+
+                        # TODO no??
+                        SCORES = SCORES.unsqueeze(2)
+                        SCORES = SCORES.expand(-1, -1, ensemble_sample_per_iter_new, -1, -1)
+                        SCORES = SCORES.reshape(
+                            SCORES.shape[0],
+                            SCORES.shape[1],
+                            ensemble_total_samples_curr,
+                            SCORES.shape[-2],
+                            SCORES.shape[-1]
+                        )
+
+                        DUPPED_INDICES = DUPPED_INDICES.unsqueeze(2)
+                        DUPPED_INDICES = DUPPED_INDICES.expand(-1, -1, ensemble_sample_per_iter_new, -1, -1)
+                        DUPPED_INDICES = DUPPED_INDICES.reshape(
+                            DUPPED_INDICES.shape[0],
+                            DUPPED_INDICES.shape[1],
+                            ensemble_total_samples_curr,
+                            DUPPED_INDICES.shape[-2],
+                            DUPPED_INDICES.shape[-1]
+                        )
+
+                        DUPPED_GROUP_SIZED = DUPPED_GROUP_SIZED.unsqueeze(2)
+                        DUPPED_GROUP_SIZED = DUPPED_GROUP_SIZED.expand(-1, -1, ensemble_sample_per_iter_new, -1, -1)
+                        DUPPED_GROUP_SIZED = DUPPED_GROUP_SIZED.reshape(
+                            DUPPED_GROUP_SIZED.shape[0],
+                            DUPPED_GROUP_SIZED.shape[1],
+                            ensemble_total_samples_curr,
+                            DUPPED_GROUP_SIZED.shape[-2],
+                            DUPPED_GROUP_SIZED.shape[-1]
+                        )
+
+                        # NOTE if the # of samples are too much, I guess there'll be a memory issue
+                        # INDICES
+                        stride_indices_b_ensemble = stride_indices_b * ensemble_total_samples_curr
+                        stride_indices_bdst_ensemble = stride_indices_bdst * ensemble_total_samples_curr
+                        stride_indices_samples_ensemble = stride_indices_bdst
+
+                        # GROUP_SIZE
+                        stride_group_size_b_ensemble = stride_group_size_b * ensemble_total_samples_curr
+                        stride_group_size_bdst_ensemble = stride_group_size_bdst * ensemble_total_samples_curr
+                        stride_group_size_samples_ensemble = stride_group_size_bdst
+
+                        # SCORES_FINAL
+                        stride_scores_final_b_ensemble = stride_scores_final_b * ensemble_total_samples_curr
+                        stride_scores_final_bdst_ensemble = stride_scores_final_bdst * ensemble_total_samples_curr
+                        stride_scores_final_samples_ensemble = stride_scores_final_bdst
+                        
+                        # PROBS
+                        stride_probs_b_ensemble = stride_probs_b * ensemble_total_samples_curr
+                        stride_probs_bdst_ensemble = stride_probs_bdst * ensemble_total_samples_curr
+                        stride_probs_samples_ensemble = stride_probs_bdst
+
+                        # TOPK_IDS
+                        stride_topk_ids_b_ensemble = stride_topk_ids_b * ensemble_total_samples_curr
+                        stride_topk_ids_bdst_ensemble = stride_topk_ids_bdst * ensemble_total_samples_curr
+                        stride_topk_ids_samples_ensemble = stride_topk_ids_bdst
+
+                        # SCORES
+                        stride_scores_b_ensemble = stride_scores_b * ensemble_total_samples_curr
+                        stride_scores_bdst_ensemble = stride_scores_bdst * ensemble_total_samples_curr
+                        stride_scores_samples_ensemble = stride_scores_bdst
+
+                        # DUPPED_INDICES
+                        stride_dupped_indices_b_ensemble = stride_dupped_indices_b * ensemble_total_samples_curr
+                        stride_dupped_indices_bdst_ensemble = stride_dupped_indices_bdst * ensemble_total_samples_curr
+                        stride_dupped_indices_samples_ensemble = stride_dupped_indices_bdst
+
+                        # DUPPED_GROUP_SIZED
+                        stride_dupped_group_size_b_ensemble = stride_dupped_group_size_b * ensemble_total_samples_curr
+                        stride_dupped_group_size_bdst_ensemble = stride_dupped_group_size_bdst * ensemble_total_samples_curr
+                        stride_dupped_group_size_samples_ensemble = stride_dupped_group_size_bdst
+                    
+                else:# don't make samples in this iteration step
+                    # NOTE don't set ensemble_sample_per_iter_new = 1. just send the sample # as 1.
+                    # TODO check : `ensemble_total_samples_curr` should be same as the previous iteration's value
+                    # size of MASK should be same as before
+                    
+                    # INDICES
+                    stride_indices_b_ensemble = stride_indices_b * ensemble_total_samples_curr
+                    stride_indices_bdst_ensemble = stride_indices_bdst * ensemble_total_samples_curr
+                    stride_indices_samples_ensemble = stride_indices_bdst
+
+                    # GROUP_SIZE
+                    stride_group_size_b_ensemble = stride_group_size_b * ensemble_total_samples_curr
+                    stride_group_size_bdst_ensemble = stride_group_size_bdst * ensemble_total_samples_curr
+                    stride_group_size_samples_ensemble = stride_group_size_bdst
+
+                    # SCORES_FINAL
+                    stride_scores_final_b_ensemble = stride_scores_final_b * ensemble_total_samples_curr
+                    stride_scores_final_bdst_ensemble = stride_scores_final_bdst * ensemble_total_samples_curr
+                    stride_scores_final_samples_ensemble = stride_scores_final_bdst
+                    
+                    # PROBS
+                    stride_probs_b_ensemble = stride_probs_b * ensemble_total_samples_curr
+                    stride_probs_bdst_ensemble = stride_probs_bdst * ensemble_total_samples_curr
+                    stride_probs_samples_ensemble = stride_probs_bdst
+
+                    # TOPK_IDS
+                    stride_topk_ids_b_ensemble = stride_topk_ids_b * ensemble_total_samples_curr
+                    stride_topk_ids_bdst_ensemble = stride_topk_ids_bdst * ensemble_total_samples_curr
+                    stride_topk_ids_samples_ensemble = stride_topk_ids_bdst
+
+                    # SCORES
+                    stride_scores_b_ensemble = stride_scores_b * ensemble_total_samples_curr
+                    stride_scores_bdst_ensemble = stride_scores_bdst * ensemble_total_samples_curr
+                    stride_scores_samples_ensemble = stride_scores_bdst
+
+                    # DUPPED_INDICES
+                    stride_dupped_indices_b_ensemble = stride_dupped_indices_b * ensemble_total_samples_curr
+                    stride_dupped_indices_bdst_ensemble = stride_dupped_indices_bdst * ensemble_total_samples_curr
+                    stride_dupped_indices_samples_ensemble = stride_dupped_indices_bdst
+
+                    # DUPPED_GROUP_SIZED
+                    stride_dupped_group_size_b_ensemble = stride_dupped_group_size_b * ensemble_total_samples_curr
+                    stride_dupped_group_size_bdst_ensemble = stride_dupped_group_size_bdst * ensemble_total_samples_curr
+                    stride_dupped_group_size_samples_ensemble = stride_dupped_group_size_bdst
+
+                # stride_mask_src_grid_ensemble = stride_mask_src_grid * ensemble_total_samples_curr
+                
+                grid = (ensemble_total_samples_curr, )
+                ensemble_make_samples_per_iter[grid](
+                    Q, 
+                    stride_q_bsz, 
+                    stride_q_tdst,
+                    stride_q_bh, 
+                    stride_q_g, 
+                    stride_q_hid,
+                    K, 
+                    stride_k_bsz, 
+                    stride_k_tsrc,
+                    stride_k_bh, 
+                    stride_k_g, 
+                    stride_k_hid,
+                    POS, 
+                    stride_pos_tdst,
+                    COS, 
+                    stride_cos_t, 
+                    stride_cos_hid,
+                    SIN, 
+                    stride_sin_t, 
+                    stride_sin_hid,
                     KEY_ACCESS_LOG, 
                     stride_key_access_log_b, 
                     stride_key_access_log_bdst, 
@@ -1748,27 +3184,51 @@ def masking_iteration_draft_cuda_fused(
                     stride_key_access_count_bdst, 
                     MAX_ACCESS_COUNT,
                     
-                    INDICES, stride_indices_b, stride_indices_bdst, stride_indices_bk,
-                    KS, stride_ks_b, stride_ks_bdst,
-                    GROUP_SIZE, stride_group_size_b, stride_group_size_bdst, stride_group_size_bk,
+                    INDICES, 
+                    stride_indices_b_ensemble, 
+                    stride_indices_bdst_ensemble, 
+                    stride_indices_samples_ensemble,
+                    stride_indices_bk,
+                    KS, 
+                    stride_ks_b, 
+                    stride_ks_bdst,
+                    GROUP_SIZE, 
+                    stride_group_size_b_ensemble, 
+                    stride_group_size_bdst_ensemble, 
+                    stride_group_size_samples_ensemble,
+                    stride_group_size_bk,
                     
                     DUPPED_INDICES, 
-                    stride_dupped_indices_b, 
-                    stride_dupped_indices_bdst, 
+                    stride_dupped_indices_b_ensemble, 
+                    stride_dupped_indices_bdst_ensemble, 
+                    stride_dupped_indices_samples_ensemble,
                     stride_dupped_indices_bk,
                     DUPPED_GROUP_SIZE, 
-                    stride_dupped_group_size_b, 
-                    stride_dupped_group_size_bdst, 
+                    stride_dupped_group_size_b_ensemble, 
+                    stride_dupped_group_size_bdst_ensemble, 
+                    stride_dupped_group_size_samples_ensemble,
                     stride_dupped_group_size_bk,
                     SCORES,
-                    stride_scores_b,
-                    stride_scores_bdst,
+                    stride_scores_b_ensemble,
+                    stride_scores_bdst_ensemble,
+                    stride_scores_samples_ensemble,
                     stride_scores_bk,
                     SCORES_FINAL,
-                    stride_scores_final_b,
-                    stride_scores_final_bdst,
+                    stride_scores_final_b_ensemble,
+                    stride_scores_final_bdst_ensemble,
+                    stride_scores_final_samples_ensemble,
                     stride_scores_final_bk,
                     SCORES_CACHED,
+                    PROBS,
+                    stride_probs_b_ensemble,
+                    stride_probs_bdst_ensemble,
+                    stride_probs_samples_ensemble,
+                    stride_probs_bk,
+                    TOPK_IDS, 
+                    stride_topk_ids_b_ensemble, 
+                    stride_topk_ids_bdst_ensemble, 
+                    stride_topk_ids_samples_ensemble,
+                    stride_topk_ids_bk,
                     
                     T_GROUP_SIZE, 
                     stride_t_group_size_b, 
@@ -1778,13 +3238,16 @@ def masking_iteration_draft_cuda_fused(
                     
                     mask_k,
                     
+                    sink_token_size,
                     sliding_window_size,
                     
                     BH,
                     G, 
                     MAX_TDST, 
-                    MAX_TSRC, 
-                    BK, 
+                    MAX_TSRC,
+                    MAX_BDST,
+                    MAX_BSRC,
+                    BK,
                     HID,
                     RAND_SEED,
                     SAMPLE_METHOD,
@@ -1807,134 +3270,520 @@ def masking_iteration_draft_cuda_fused(
                     BLOCK_SIZE_K,
                     BLOCK_STRIDE_K,
                     BLOCK_BK,
+                    BLOCK_SCORE,
+                    GROUP_BDST,
+                    GROUP_BH,
                     
-                    0,
-                    0,
-                    
-                    pid_0=i_program,
-                    pid_1=pid_0,
-                    pid_2=pid_1,
+                    indices_bk_len,
+                    probs_bk_len,
+
+                    # ensemble
+                    ENSEMBLE,
+                    ENSEMBLE_MODEL_SETTING,
+                    ENSEMBLE_METHOD,
+                    ENSEMBLE_METHOD_FINAL,
+                    ENSEMBLE_METHOD_FINAL_INTER_THRESH,
+                    ENSEMBLE_METHOD_FINAL_BDD_MASK_K,
+                    ENSEMBLE_TIMEDIM_WD,
+                    ENSEMBLE_PER_LAYER_N,
+
+                    ENSEMBLE_PER_ATTN_ITER,
+                    MODEL_I,
+                    ENSEMBLE_PARTICULAR_LAYER,
+                    ENSEMBLE_LAYER_TILL,
+
+                    ENSEMBLE_RANDOMNESS,
+                    ENSEMBLE_ITER_START_STEP,
+                    ENSEMBLE_ITER_N_MODE,
+                    ENSEMBLE_ITER_N_START,
+                    ENSEMBLE_ITER_N_FACTOR,
+                    ENSEMBLE_ITER_N_JUMP,
+                    ENSEMBLE_ITER_N_TILL,
+
+                    LAYER_ID,
                 )
-            # end for
-            tl.debug_barrier()
-            
-            # same grid with master (BDST, B)
-            masking_iteration_draft_cuda_partial_softmax(
-                SCORES, 
-                stride_scores_b, 
-                stride_scores_bdst, 
-                stride_scores_bk,
+
+                assert ENSEMBLE_PER_ATTN_ITER 
+                if ENSEMBLE_PER_ATTN_ITER:
+                    ensemble_make_final_masks_per_iter(
+                        Q, 
+                        stride_q_bsz, 
+                        stride_q_tdst,
+                        stride_q_bh, 
+                        stride_q_g, 
+                        stride_q_hid,
+                        K, 
+                        stride_k_bsz, 
+                        stride_k_tsrc,
+                        stride_k_bh, 
+                        stride_k_g, 
+                        stride_k_hid,
+                        POS, 
+                        stride_pos_tdst,
+                        COS, 
+                        stride_cos_t, 
+                        stride_cos_hid,
+                        SIN, 
+                        stride_sin_t, 
+                        stride_sin_hid,
+                        KEY_ACCESS_LOG, 
+                        stride_key_access_log_b, 
+                        stride_key_access_log_bdst, 
+                        stride_key_access_log_t,
+                        KEY_ACCESS_COUNT, 
+                        stride_key_access_count_b,
+                        stride_key_access_count_bdst, 
+                        MAX_ACCESS_COUNT,
+                        
+                        INDICES, 
+                        stride_indices_b_ensemble, 
+                        stride_indices_bdst_ensemble, 
+                        stride_indices_samples_ensemble,
+                        stride_indices_bk,
+                        KS, 
+                        stride_ks_b, 
+                        stride_ks_bdst,
+                        GROUP_SIZE, 
+                        stride_group_size_b_ensemble, 
+                        stride_group_size_bdst_ensemble, 
+                        stride_group_size_samples_ensemble,
+                        stride_group_size_bk,
+                        
+                        DUPPED_INDICES, 
+                        stride_dupped_indices_b_ensemble, 
+                        stride_dupped_indices_bdst_ensemble, 
+                        stride_dupped_indices_samples_ensemble,
+                        stride_dupped_indices_bk,
+                        DUPPED_GROUP_SIZE, 
+                        stride_dupped_group_size_b_ensemble, 
+                        stride_dupped_group_size_bdst_ensemble, 
+                        stride_dupped_group_size_samples_ensemble,
+                        stride_dupped_group_size_bk,
+                        SCORES,
+                        stride_scores_b_ensemble,
+                        stride_scores_bdst_ensemble,
+                        stride_scores_samples_ensemble,
+                        stride_scores_bk,
+                        SCORES_FINAL,
+                        stride_scores_final_b_ensemble,
+                        stride_scores_final_bdst_ensemble,
+                        stride_scores_final_samples_ensemble,
+                        stride_scores_final_bk,
+                        SCORES_CACHED,
+                        PROBS,
+                        stride_probs_b_ensemble,
+                        stride_probs_bdst_ensemble,
+                        stride_probs_samples_ensemble,
+                        stride_probs_bk,
+                        TOPK_IDS, 
+                        stride_topk_ids_b_ensemble, 
+                        stride_topk_ids_bdst_ensemble, 
+                        stride_topk_ids_samples_ensemble,
+                        stride_topk_ids_bk,
+                        
+                        T_GROUP_SIZE, 
+                        stride_t_group_size_b, 
+                        stride_t_group_size_bdst,
+                        INDICES_TDST,
+                        stride_indices_tdst_t,
+                        
+                        mask_k,
+                        
+                        sink_token_size,
+                        sliding_window_size,
+                        
+                        BH,
+                        G, 
+                        MAX_TDST, 
+                        MAX_TSRC,
+                        MAX_BDST,
+                        MAX_BSRC,
+                        BK,
+                        HID,
+                        RAND_SEED,
+                        SAMPLE_METHOD,
+                        BRANCH_METHOD,
+                        
+                        USING_EXTEND,
+                        extend_window_size,
+                        extend_group_size,
+                        
+                        USING_SPARQ,
+                        SPARQ_HID,
+                        Q_IND, 
+                        stride_q_ind_b, 
+                        stride_q_ind_g, 
+                        stride_q_ind_bdst, 
+                        stride_q_ind_k,
+                        
+                        BLOCK_SIZE_Q,
+                        BLOCK_STRIDE_Q,
+                        BLOCK_SIZE_K,
+                        BLOCK_STRIDE_K,
+                        BLOCK_BK,
+                        BLOCK_SCORE,
+                        GROUP_BDST,
+                        GROUP_BH,
+                        
+                        indices_bk_len,
+                        probs_bk_len,
+
+                        # ensemble
+                        ENSEMBLE,
+                        ENSEMBLE_MODEL_SETTING,
+                        ENSEMBLE_METHOD,
+                        ENSEMBLE_METHOD_FINAL,
+                        ENSEMBLE_METHOD_FINAL_INTER_THRESH,
+                        ENSEMBLE_METHOD_FINAL_BDD_MASK_K,
+                        ENSEMBLE_TIMEDIM_WD,
+                        ENSEMBLE_PER_LAYER_N,
+
+                        ENSEMBLE_PER_ATTN_ITER,
+                        MODEL_I,
+                        ENSEMBLE_PARTICULAR_LAYER,
+                        ENSEMBLE_LAYER_TILL,
+
+                        ENSEMBLE_RANDOMNESS,
+                        ENSEMBLE_ITER_START_STEP,
+                        ENSEMBLE_ITER_N_MODE,
+                        ENSEMBLE_ITER_N_START,
+                        ENSEMBLE_ITER_N_FACTOR,
+                        ENSEMBLE_ITER_N_JUMP,
+                        ENSEMBLE_ITER_N_TILL,
+
+                        LAYER_ID,
+
+                    )
+            else:
+                # no ensemble
+                assert INDICES.ndim == 3
+                assert SCORES_FINAL.ndim == 3
+                assert PROBS.ndim == 3
+                assert TOPK_IDS.ndim == 3
+                assert SCORES.ndim == 3
+                assert DUPPED_INDICES.ndim == 3
+
+                masking_iteration_draft_cuda_fused_per_iter(
+                    Q, 
+                    stride_q_bsz, 
+                    stride_q_tdst,
+                    stride_q_bh, 
+                    stride_q_g, 
+                    stride_q_hid,
+                    K, 
+                    stride_k_bsz, 
+                    stride_k_tsrc,
+                    stride_k_bh, 
+                    stride_k_g, 
+                    stride_k_hid,
+                    POS, 
+                    stride_pos_tdst,
+                    COS, 
+                    stride_cos_t, 
+                    stride_cos_hid,
+                    SIN, 
+                    stride_sin_t, 
+                    stride_sin_hid,
+                    KEY_ACCESS_LOG, 
+                    stride_key_access_log_b, 
+                    stride_key_access_log_bdst, 
+                    stride_key_access_log_t,
+                    KEY_ACCESS_COUNT, 
+                    stride_key_access_count_b,
+                    stride_key_access_count_bdst, 
+                    MAX_ACCESS_COUNT,
+                    
+                    INDICES, 
+                    stride_indices_b, 
+                    stride_indices_bdst, 
+                    0,
+                    stride_indices_bk,
+                    KS, 
+                    stride_ks_b, 
+                    stride_ks_bdst,
+                    GROUP_SIZE, 
+                    stride_group_size_b, 
+                    stride_group_size_bdst, 
+                    0,
+                    stride_group_size_bk,
+                    
+                    DUPPED_INDICES, 
+                    stride_dupped_indices_b, 
+                    stride_dupped_indices_bdst, 
+                    0,
+                    stride_dupped_indices_bk,
+                    DUPPED_GROUP_SIZE, 
+                    stride_dupped_group_size_b, 
+                    stride_dupped_group_size_bdst, 
+                    0,
+                    stride_dupped_group_size_bk,
+                    SCORES,
+                    stride_scores_b,
+                    stride_scores_bdst,
+                    0,
+                    stride_scores_bk,
+                    SCORES_FINAL,
+                    stride_scores_final_b,
+                    stride_scores_final_bdst,
+                    0,
+                    stride_scores_final_bk,
+                    SCORES_CACHED,
+                    PROBS,
+                    stride_probs_b,
+                    stride_probs_bdst,
+                    0,
+                    stride_probs_bk,
+                    TOPK_IDS, 
+                    stride_topk_ids_b, 
+                    stride_topk_ids_bdst, 
+                    0,
+                    stride_topk_ids_bk,
+                    
+                    T_GROUP_SIZE, 
+                    stride_t_group_size_b, 
+                    stride_t_group_size_bdst,
+                    INDICES_TDST,
+                    stride_indices_tdst_t,
+                    
+                    mask_k,
+                    
+                    sink_token_size,
+                    sliding_window_size,
+                    
+                    BH,
+                    G, 
+                    MAX_TDST, 
+                    MAX_TSRC,
+                    MAX_BDST,
+                    MAX_BSRC,
+                    BK,
+                    HID,
+                    RAND_SEED,
+                    SAMPLE_METHOD,
+                    BRANCH_METHOD,
+                    
+                    USING_EXTEND,
+                    extend_window_size,
+                    extend_group_size,
+                    
+                    USING_SPARQ,
+                    SPARQ_HID,
+                    Q_IND, 
+                    stride_q_ind_b, 
+                    stride_q_ind_g, 
+                    stride_q_ind_bdst, 
+                    stride_q_ind_k,
+                    
+                    BLOCK_SIZE_Q,
+                    BLOCK_STRIDE_Q,
+                    BLOCK_SIZE_K,
+                    BLOCK_STRIDE_K,
+                    BLOCK_BK,
+                    BLOCK_SCORE,
+                    GROUP_BDST,
+                    GROUP_BH,
+                    
+                    indices_bk_len,
+                    probs_bk_len,
+
+                    # ensemble
+                    ENSEMBLE,
+                    ENSEMBLE_MODEL_SETTING,
+                    ENSEMBLE_METHOD,
+                    ENSEMBLE_METHOD_FINAL,
+                    ENSEMBLE_METHOD_FINAL_INTER_THRESH,
+                    ENSEMBLE_METHOD_FINAL_BDD_MASK_K,
+                    ENSEMBLE_TIMEDIM_WD,
+                    ENSEMBLE_PER_LAYER_N,
+
+                    ENSEMBLE_PER_ATTN_ITER,
+                    MODEL_I,
+                    ENSEMBLE_PARTICULAR_LAYER,
+                    ENSEMBLE_LAYER_TILL,
+
+                    ENSEMBLE_RANDOMNESS,
+                    ENSEMBLE_ITER_START_STEP,
+                    ENSEMBLE_ITER_N_MODE,
+                    ENSEMBLE_ITER_N_START,
+                    ENSEMBLE_ITER_N_FACTOR,
+                    ENSEMBLE_ITER_N_JUMP,
+                    ENSEMBLE_ITER_N_TILL,
+
+                    LAYER_ID,
+                    0,
+
+                    pid_0,
+                    pid_1,
+                )
+                tl.debug_barrier()
+
+            idx_iteration += 1
+            """
+            - INDICES [32, 1024, 256] = [B, cdiv_python(TDST, block_size_q), sample_n, G * mask_block_k]
+            GROUP_SIZES [32, 1024, 256] = [B, cdiv_python(TDST, block_size_q), sample_n, G * mask_block_k]
+            - SCORES_FINAL [32, 1024, 256] = [B, cdiv_python(TDST, block_size_q), sample_n, G * mask_block_k]
+            - PROBS [32, 1024, 512] = [B, BDST, sample_n, G * mask_block_k * 2]
+            - IDS [32, 1024, 256] = [B, BDST, sample_n, G * mask_block_k]
+            - SCORES [32, 1024, 512] = [B, BDST, sample_n, G * mask_block_k * 2]
+            - DUPPED_INDICES [32, 1024, 512] = [B, BDST, sample_n, G * mask_block_k * 2]
+            * DUPPED_GROUP_SIZED [32, 1024, 512] = [B, BDST, sample_n, G * mask_block_k * 2]
+            T_GROUP_SIZES [32, 1024] = [B, BDST]
+
+            IDS_TDST  0 [32768] <- idx_tdst = idx_tdst % TDST
+            KS  0 [B, cdiv_python(TDST, block_size_q)]
+            """
+
+        if (not ENSEMBLE_PER_ATTN_ITER) and ENSEMBLE == True and ENSEMBLE_MODEL_SETTING == "random_per_iter":
+            raise Exception()
+            ensemble_make_final_masks_per_iter(
+                Q, 
+                stride_q_bsz, 
+                stride_q_tdst,
+                stride_q_bh, 
+                stride_q_g, 
+                stride_q_hid,
+                K, 
+                stride_k_bsz, 
+                stride_k_tsrc,
+                stride_k_bh, 
+                stride_k_g, 
+                stride_k_hid,
+                POS, 
+                stride_pos_tdst,
+                COS, 
+                stride_cos_t, 
+                stride_cos_hid,
+                SIN, 
+                stride_sin_t, 
+                stride_sin_hid,
+                KEY_ACCESS_LOG, 
+                stride_key_access_log_b, 
+                stride_key_access_log_bdst, 
+                stride_key_access_log_t,
+                KEY_ACCESS_COUNT, 
+                stride_key_access_count_b,
+                stride_key_access_count_bdst, 
+                MAX_ACCESS_COUNT,
+                
+                INDICES, 
+                stride_indices_b_ensemble, 
+                stride_indices_bdst_ensemble, 
+                stride_indices_samples_ensemble,
+                stride_indices_bk,
+                KS, 
+                stride_ks_b, 
+                stride_ks_bdst,
+                GROUP_SIZE, 
+                stride_group_size_b_ensemble, 
+                stride_group_size_bdst_ensemble, 
+                stride_group_size_samples_ensemble,
+                stride_group_size_bk,
+                
                 DUPPED_INDICES, 
-                stride_dupped_indices_b, 
-                stride_dupped_indices_bdst, 
+                stride_dupped_indices_b_ensemble, 
+                stride_dupped_indices_bdst_ensemble, 
+                stride_dupped_indices_samples_ensemble,
                 stride_dupped_indices_bk,
-                DUPPED_GROUP_SIZE,
-                stride_dupped_group_size_b,
-                stride_dupped_group_size_bdst,
+                DUPPED_GROUP_SIZE, 
+                stride_dupped_group_size_b_ensemble, 
+                stride_dupped_group_size_bdst_ensemble, 
+                stride_dupped_group_size_samples_ensemble,
                 stride_dupped_group_size_bk,
-                
+                SCORES,
+                stride_scores_b_ensemble,
+                stride_scores_bdst_ensemble,
+                stride_scores_samples_ensemble,
+                stride_scores_bk,
+                SCORES_FINAL,
+                stride_scores_final_b_ensemble,
+                stride_scores_final_bdst_ensemble,
+                stride_scores_final_samples_ensemble,
+                stride_scores_final_bk,
+                SCORES_CACHED,
                 PROBS,
-                stride_probs_b,
-                stride_probs_bdst,
-                stride_probs_bk,
-                
-                sink_token_size,
-                BK,
-                G, 
-                probs_bk_len, 
-                MAX_BSRC,
-                BLOCK_SIZE_K,
-                
-                BLOCK_SCORE,
-                
-                pid_0=pid_0,
-                pid_1=pid_1,
-            )
-            tl.debug_barrier()
-            
-            # TODO: support score_head_group_size
-            
-            # same grid with master (BDST, B)
-            masking_iteration_draft_cuda_argsort(
-                PROBS,
-                stride_probs_b, 
-                stride_probs_bdst, 
+                stride_probs_b_ensemble,
+                stride_probs_bdst_ensemble,
+                stride_probs_samples_ensemble,
                 stride_probs_bk,
                 TOPK_IDS, 
-                stride_topk_ids_b, 
-                stride_topk_ids_bdst, 
+                stride_topk_ids_b_ensemble, 
+                stride_topk_ids_bdst_ensemble, 
+                stride_topk_ids_samples_ensemble,
                 stride_topk_ids_bk,
                 
                 T_GROUP_SIZE, 
                 stride_t_group_size_b, 
                 stride_t_group_size_bdst,
+                INDICES_TDST,
+                stride_indices_tdst_t,
                 
+                mask_k,
+                
+                sink_token_size,
+                sliding_window_size,
+                
+                BH,
+                G, 
+                MAX_TDST, 
+                MAX_TSRC,
                 MAX_BDST,
+                MAX_BSRC,
+                BK,
+                HID,
+                RAND_SEED,
+                SAMPLE_METHOD,
+                BRANCH_METHOD,
                 
-                probs_bk_len,
-                BK * G,
-                1,
+                USING_EXTEND,
+                extend_window_size,
+                extend_group_size,
                 
-                pid_0=pid_0,
-                pid_1=pid_1,
-            )
-            tl.debug_barrier()
-            
-            # num_program = tl.cdiv(indices_bk_len, BLOCK_BK)
-            # for i_program in range(num_program):
-            masking_iteration_draft_cuda_gather(
-                INDICES, 
-                stride_indices_b, 
-                stride_indices_bdst, 
-                stride_indices_bk,
-                GROUP_SIZE, 
-                stride_group_size_b, 
-                stride_group_size_bdst, 
-                stride_group_size_bk,
-                SCORES_FINAL,
-                stride_scores_final_b,
-                stride_scores_final_bdst,
-                stride_scores_final_bk,
+                USING_SPARQ,
+                SPARQ_HID,
+                Q_IND, 
+                stride_q_ind_b, 
+                stride_q_ind_g, 
+                stride_q_ind_bdst, 
+                stride_q_ind_k,
                 
-                DUPPED_INDICES, 
-                stride_dupped_indices_b, 
-                stride_dupped_indices_bdst, 
-                stride_dupped_indices_bk,
-                DUPPED_GROUP_SIZE, 
-                stride_dupped_group_size_b, 
-                stride_dupped_group_size_bdst, 
-                stride_dupped_group_size_bk,
-                SCORES,
-                stride_scores_b,
-                stride_scores_bdst,
-                stride_scores_bk,
-                
-                TOPK_IDS,
-                stride_topk_ids_b,
-                stride_topk_ids_bdst,
-                stride_topk_ids_bk,
-                
-                T_GROUP_SIZE,
-                stride_t_group_size_b, 
-                stride_t_group_size_bdst,
-                
-                G, BK, 
+                BLOCK_SIZE_Q,
+                BLOCK_STRIDE_Q,
+                BLOCK_SIZE_K,
+                BLOCK_STRIDE_K,
+                BLOCK_BK,
+                BLOCK_SCORE,
+                GROUP_BDST,
+                GROUP_BH,
                 
                 indices_bk_len,
-                
-                pid_0=0,
-                pid_1=pid_0,
-                pid_2=pid_1,
+                probs_bk_len,
+
+                # ensemble
+                ENSEMBLE,
+                ENSEMBLE_MODEL_SETTING,
+                ENSEMBLE_METHOD,
+                ENSEMBLE_METHOD_FINAL,
+                ENSEMBLE_METHOD_FINAL_INTER_THRESH,
+                ENSEMBLE_METHOD_FINAL_BDD_MASK_K,
+                ENSEMBLE_TIMEDIM_WD,
+                ENSEMBLE_PER_LAYER_N,
+
+                ENSEMBLE_PER_ATTN_ITER,
+                MODEL_I,
+                ENSEMBLE_PARTICULAR_LAYER,
+                ENSEMBLE_LAYER_TILL,
+
+                ENSEMBLE_RANDOMNESS,
+                ENSEMBLE_ITER_START_STEP,
+                ENSEMBLE_ITER_N_MODE,
+                ENSEMBLE_ITER_N_START,
+                ENSEMBLE_ITER_N_FACTOR,
+                ENSEMBLE_ITER_N_JUMP,
+                ENSEMBLE_ITER_N_TILL,
+
+                LAYER_ID,
             )
-            
-            tl.debug_barrier()
-            
-            # SCORES_CACHED = True
-            
-            if BRANCH_METHOD == 'random':
-                max_group_size *= 0.7
-            else:
-                max_group_size *= 0.5
+
         tl.store(
             T_GROUP_SIZE +\
                 idx_b * stride_t_group_size_b +\
@@ -2138,38 +3987,70 @@ def masking_iteration_draft_cuda_initialize_score(
     )
 
 def masking_iteration_draft_per_iteration(
-    q: Tensor,
-    k: Tensor,
-    position_ids: Tensor,
-    mask_k: int,
-    block_size_q: int,
-    block_stride_q: int,
-    block_size_k: int,
-    block_stride_k: int,
-    block_size_k_group: int,
-    sliding_window_size: int,
-    sink_token_size: int,
-    using_extend: bool,
-    rope_cos: Optional[Tensor],
-    rope_sin: Optional[Tensor],
-    self_extend_neighboor_window: int,
-    self_extend_group_size: int,
-    topk_head_group_size: int,
-    sample_method: str,
-    branch_method: str,
-    score_head_group_size: int,
-    sparq_ind: Optional[Tensor],
+    q, 
+    k, 
+    position_ids, 
+    rope_cos, 
+    rope_sin, 
+
+    key_access_log, 
+    key_access_count, 
+    KEY_ACCESS_LEN,
     
-    output_key_access_log: bool,
+    indices, 
+    ks, 
+    group_sizes, 
     
-    # seeds
-    indices_seed: Optional[Tensor] = None,
-    ks_seed: Optional[Tensor] = None,
-    scores_seed: Optional[Tensor] = None,
-    group_size_seed: Optional[Tensor] = None,
-    max_group_size_seed: Optional[float] = None,
+    dupped_indices,
+    dupped_group_sizes,
+    scores,
+    scores_final,
+    scores_cached,
+    probs,
+    topk_indices,
     
-    indices_tdst: Optional[Tensor] = None,
+    t_group_sizes,
+    indices_tdst, stride_indices_tdst_t,
+    
+    mask_k,
+    
+    sink_token_size,
+    sliding_window_size,
+    
+    B,
+    BH,
+    G, 
+    TDST, 
+    TSRC,
+    BDST, # cdiv_python(TDST, block_size_q), <- maybe not used?
+    BSRC, # cdiv_python(TSRC, block_size_k), <- maybe not used?
+    mask_block_k, 
+    HID,
+    RAND_SEED, # random.randint(0, 1024*1024), <- maybe not used?
+    sample_method,
+    branch_method,
+    score_head_group_size,
+    
+    using_extend,
+    self_extend_neighboor_window,
+    self_extend_group_size,
+    
+    using_sparq,
+    sparq_hid,
+    sparq_ind,
+    
+    block_size_q,
+    block_stride_q,
+    block_size_k,
+    block_stride_k,
+    BLOCK_BK,
+    BLOCK_SCORE,
+    
+    indices_bk_len,
+    probs_bk_len,
+
+    max_group_size,
+    i_iteration,
 
     # Ensemble
     ensemble : bool = False,
@@ -2180,7 +4061,7 @@ def masking_iteration_draft_per_iteration(
     ensemble_method_final_bdd_mask_k : int = 0,
     ensemble_timedim_wd : int = None,
     ensemble_per_layer_n : int = 1,
-    ensemble_per_attn_iter_n : int = 5,
+    ensemble_per_attn_iter : bool = False,
     ensemble_model_n : int = 5,
     ensemble_particular_layer : int = 0,
     ensemble_layer_till : int = 6,
@@ -2217,13 +4098,13 @@ def masking_iteration_draft_per_iteration(
         scores_cached,
         
         t_group_sizes, *t_group_sizes.stride(),
-        indices_tdst, *indices_tdst_stride,
+        indices_tdst, stride_indices_tdst_t, # TODO check : stride_indices_tdst_t vs *indices_tdst_stride
         
         mask_k,
         
         sliding_window_size,
         
-        G, TDST, TSRC, mask_block_k, HID,
+        BH, G, TDST, TSRC, mask_block_k, HID,
         random.randint(0, 1024*1024),
         sample_method,
         branch_method,
@@ -2379,7 +4260,7 @@ def masking_iteration_draft(
     ensemble_method_final_bdd_mask_k : int = 0,
     ensemble_timedim_wd : int = None,
     ensemble_per_layer_n : int = 1,
-    ensemble_per_attn_iter_n : int = 5,
+    ensemble_per_attn_iter : bool = False,
     ensemble_model_n : int = 5,
     ensemble_particular_layer : int = 0,
     ensemble_layer_till : int = 6,
@@ -2706,6 +4587,39 @@ def masking_iteration_draft(
             BSZ
         )
         
+        if os.getenv('HIP_PER_ITER_CHANGE', '0') == '1':
+            print(f"{'[BEF]'}")
+            if indices != None:
+                indices_bef = indices.clone()
+            if group_sizes != None:
+                group_sizes_bef = group_sizes.clone()
+            if scores_final != None:
+                scores_final_bef = scores_final.clone()
+            if probs != None:
+                probs_bef = probs.clone()
+
+            if key_access_log != None: # None
+                key_access_log_bef = key_access_log.clone()
+            if key_access_count != None: # None
+                key_access_count_bef = key_access_count.clone()
+            # if KEY_ACCESS_LEN != None: # int
+            #     KEY_ACCESS_LEN_BEF = KEY_ACCESS_LEN.clone()
+            if topk_indices != None:
+                topk_indices_bef = topk_indices.clone()
+            if scores != None:
+                scores_bef = scores.clone()
+
+            if dupped_indices != None:
+                dupped_indices_bef = dupped_indices.clone()
+            if dupped_group_sizes != None:
+                dupped_group_sizes_bef = dupped_group_sizes.clone()
+            if t_group_sizes != None:
+                t_group_sizes_bef = t_group_sizes.clone()
+            if indices_tdst != None:
+                indices_tdst_bef = indices_tdst.clone()
+            if ks != None:
+                ks_bef = ks.clone()
+
         masking_iteration_draft_cuda_fused[grid](
             q, *q.stride(),
             k, *k.stride(),
@@ -2765,47 +4679,183 @@ def masking_iteration_draft(
             GROUP_BDST,
             GROUP_BH,
             
-            indices_bk_len=indices.shape[-1],
-            probs_bk_len=probs.shape[-1],
+            indices.shape[-1],
+            probs.shape[-1],
+
+            # Ensemble
+            ensemble,
+            ensemble_model_setting,
+            ensemble_method,
+            ensemble_method_final,
+            ensemble_method_final_inter_thresh,
+            ensemble_method_final_bdd_mask_k,
+            ensemble_timedim_wd,
+            ensemble_per_layer_n,
+
+            ensemble_per_attn_iter,
+            ensemble_model_n,
+            ensemble_particular_layer,
+            ensemble_layer_till,
+
+            ensemble_randomness,
+            ensemble_iter_start_step,
+            ensemble_iter_n_mode,
+            ensemble_iter_n_start,
+            ensemble_iter_n_factor,
+            ensemble_iter_n_jump,
+            ensemble_iter_n_till,
+
+            layer_id,
             
             # num_warps=4,
             # num_stages=2,
         )
+
+        """
+        - INDICES  10553505638 [32, 1024, 256] = [B, cdiv_python(TDST, block_size_q), G * mask_block_k]
+        GROUP_SIZES  -252174336 [32, 1024, 256] = [B, cdiv_python(TDST, block_size_q), G * mask_block_k]
+        - SCORES_FINAL  38797312.0 [32, 1024, 256] = [B, cdiv_python(TDST, block_size_q), G * mask_block_k]
+        - PROBS  -3424256.0 [32, 1024, 512] = [B, BDST, G * mask_block_k * 2]
+        - IDS  259179218862864 [32, 1024, 256] = [B, BDST, G * mask_block_k]
+        - SCORES  -127926272.0 [32, 1024, 512] = [B, BDST, G * mask_block_k * 2]
+        - DUPPED_INDICES  129907109728630 [32, 1024, 512] = [B, BDST, G * mask_block_k * 2]
+        * DUPPED_GROUP_SIZED  478408894197341 [32, 1024, 512] = [B, BDST, G * mask_block_k * 2]
+        T_GROUP_SIZES  -1007232.0 [32, 1024] = [B, BDST]
+
+        IDS_TDST  0 [32768] <- idx_tdst = idx_tdst % TDST
+        KS  0 [B, cdiv_python(TDST, block_size_q)]
+        """
+
+        if os.getenv('HIP_PER_ITER_CHANGE', '0') == '1':
+            print(f"{'[AFTER]'}")
+            print('INDICES ', indices.shape)
+            print('GROUP_SIZES ', group_sizes.shape)
+            print('SCORES_FINAL ', scores_final.shape)
+            print('PROBS ', probs.shape)
+            print('IDS ', topk_indices.shape)
+            print('SCORES ', scores.shape)
+            print('DUPPED_INDICES ', dupped_indices.shape)
+            print('DUPPED_GROUP_SIZED ', dupped_group_sizes.shape)
+            print('T_GROUP_SIZES ', t_group_sizes.shape)
+            print('IDS_TDST ', indices_tdst.shape)
+
+            print('INDICES ', indices_bef)
+            print('INDICES ', indices)
+            print('GROUP_SIZES ', group_sizes_bef)
+            print('GROUP_SIZES ', group_sizes)
+            print('SCORES_FINAL ', scores_final_bef)
+            print('SCORES_FINAL ', scores_final)
+            print('PROBS ', probs_bef)
+            print('PROBS ', probs)
+            # print('KEY_ACCESS_LOG ', key_access_log_bef) # just for check
+            # print('KEY_ACCESS_LOG ', key_access_log) # just for check
+            print('key_access_count ', key_access_count)
+            # print('KEY_ACCESS_LEN ', KEY_ACCESS_LEN)
+
+            print('IDS ', topk_indices_bef)
+            print('IDS ', topk_indices)
+            print('SCORES ', scores_bef)
+            print('SCORES ', scores)
+            print('DUPPED_INDICES ', dupped_indices_bef)
+            print('DUPPED_INDICES ', dupped_indices)
+            print('DUPPED_GROUP_SIZED ', dupped_group_sizes_bef)
+            print('DUPPED_GROUP_SIZED ', dupped_group_sizes)
+            # print('SCORES_CACHE ', scores_cached_bef)
+            # print('SCORES_CACHE ', scores_cached)
+            print('T_GROUP_SIZES ', t_group_sizes_bef)
+            print('T_GROUP_SIZES ', t_group_sizes)
+            print('IDS_TDST ', indices_tdst_bef)
+            print('IDS_TDST ', indices_tdst)
+
+
+            if indices != None:
+                print('INDICES ', torch.sum(indices-indices_bef).item())
+            if group_sizes != None:
+                print('GROUP_SIZES ', torch.sum(group_sizes-group_sizes_bef).item())
+            if scores_final != None:
+                print('SCORES_FINAL ', torch.sum(scores_final-scores_final_bef).item()) 
+            if probs != None:
+                print('PROBS ', torch.sum(probs-probs_bef).item())
+
+            if key_access_log != None:
+                print('KEY_ACCESS_LOG ', torch.sum(key_access_log-key_access_log_bef).item())  # just for check
+            if key_access_count != None:
+                print('key_access_count ', torch.sum(key_access_count-key_access_count_bef).item())
+            if topk_indices != None:
+                print('IDS ', torch.sum(topk_indices-topk_indices_bef).item()) 
+            if scores != None:
+                print('SCORES ', torch.sum(scores-scores_bef).item()) 
+
+            if dupped_indices != None:
+                print('DUPPED_INDICES ', torch.sum(dupped_indices-dupped_indices_bef).item())
+            if dupped_group_sizes != None:
+                print('DUPPED_GROUP_SIZED ', torch.sum(dupped_group_sizes-dupped_group_sizes_bef).item())
+
+            if t_group_sizes != None:
+                print('T_GROUP_SIZES ', torch.sum(t_group_sizes-t_group_sizes_bef).item()) 
+            if indices_tdst != None:
+                print('IDS_TDST ', torch.sum(indices_tdst-indices_tdst_bef).item())
+            if ks != None:
+                print("KS ", torch.sum(ks-ks_bef).item())
+
+        # breakpoint()
     else:
         raise NotImplementedError()
         i_iteration = 0
         while max_group_size > 1:
-            print(f"{i_iteration}.BEF")
-            print('KEY_ACCESS_LOG ', KEY_ACCESS_LOG)
-            print('SCORES ', SCORES)
-            print('DUPPED_INDICES ', DUPPED_INDICES)
-            print('DUPPED_GROUP_SIZE ', DUPPED_GROUP_SIZE)
-            print('INDICES ', INDICES)
-            print('GROUP_SIZES ', GROUP_SIZES)
-            print('SCORES_FINAL ', SCORES_FINAL)
+            if os.getenv('HIP_PER_ITER_CHANGE', '0') == '1':
+                print(f"{i_iteration}.BEF")
+                if indices != None:
+                    indices_bef = indices.clone()
+                if group_sizes != None:
+                    group_sizes_bef = group_sizes.clone()
+                if scores_final != None:
+                    scores_final_bef = scores_final.clone()
+                if probs != None:
+                    probs_bef = probs.clone()
+
+                if key_access_log != None:
+                    key_access_log_bef = key_access_log.clone()
+                if topk_indices != None:
+                    topk_indices_bef = topk_indices.clone()
+                if scores != None:
+                    scores_bef = scores.clone()
+
+                if dupped_indices != None:
+                    dupped_indices_bef = dupped_indices.clone()
+                if dupped_group_sizes != None:
+                    dupped_group_sizes_bef = dupped_group_sizes.clone()
+                if t_group_sizes != None:
+                    t_group_sizes_bef = t_group_sizes.clone()
+                if indices_tdst != None:
+                    indices_tdst_bef = indices_tdst.clone()
+                if ks != None:
+                    ks_bef = ks.clone()
+
             masking_iteration_draft_per_iteration(
-                q, *q.stride(),
-                k, *k.stride(),
-                position_ids, *position_ids.stride(),
-                rope_cos, *(rope_cos.stride() if rope_cos is not None else (0, 0)),
-                rope_sin, *(rope_sin.stride() if rope_sin is not None else (0, 0)),
-                key_access_log, *(key_access_log.stride() if key_access_log is not None else (0, 0, 0)),
-                key_access_count, *(key_access_count.stride() if key_access_count is not None else (0, 0)),
+                q,
+                k,
+                position_ids,
+                rope_cos,
+                rope_sin,
+
+                key_access_log,
+                key_access_count,
                 KEY_ACCESS_LEN,
                 
-                indices, *indices.stride(),
-                ks, *ks.stride(),
-                group_sizes, *group_sizes.stride(),
+                indices,
+                ks,
+                group_sizes,
                 
-                dupped_indices, *dupped_indices.stride(),
-                dupped_group_sizes, *dupped_group_sizes.stride(),
-                scores, *scores.stride(),
-                scores_final, *scores_final.stride(),
+                dupped_indices,
+                dupped_group_sizes,
+                scores,
+                scores_final,
                 scores_cached,
-                probs, *probs.stride(),
-                topk_indices, *topk_indices.stride(),
+                probs,
+                topk_indices,
                 
-                t_group_sizes, *t_group_sizes.stride(),
+                t_group_sizes,
                 indices_tdst, *indices_tdst_stride,
                 
                 mask_k,
@@ -2813,17 +4863,19 @@ def masking_iteration_draft(
                 sink_token_size,
                 sliding_window_size,
                 
+                B,
                 BH,
                 G, 
                 TDST, 
                 TSRC,
-                cdiv_python(TDST, block_size_q),
-                cdiv_python(TSRC, block_size_k),
+                BDST, # cdiv_python(TDST, block_size_q),
+                BSRC, # cdiv_python(TSRC, block_size_k),
                 mask_block_k, 
                 HID,
                 random.randint(0, 1024*1024),
                 sample_method,
                 branch_method,
+                score_head_group_size,
                 
                 using_extend,
                 self_extend_neighboor_window,
@@ -2831,7 +4883,7 @@ def masking_iteration_draft(
                 
                 using_sparq,
                 sparq_hid,
-                sparq_ind, *(sparq_ind.stride() if sparq_ind is not None else (0, 0, 0, 0)),
+                sparq_ind,
                 
                 block_size_q,
                 block_stride_q,
@@ -2839,26 +4891,144 @@ def masking_iteration_draft(
                 block_stride_k,
                 BLOCK_BK,
                 BLOCK_SCORE,
-                GROUP_BDST,
-                GROUP_BH,
                 
-                indices_bk_len=indices.shape[-1],
-                probs_bk_len=probs.shape[-1],
+                indices.shape[-1],
+                probs.shape[-1],
+
+                max_group_size,
+                i_iteration,
                 
                 # num_warps=4,
                 # num_stages=2,
+
+                # Ensemble
+                ensemble,
+                ensemble_model_setting,
+                ensemble_method,
+                ensemble_method_final,
+                ensemble_method_final_inter_thresh,
+                ensemble_method_final_bdd_mask_k,
+                ensemble_timedim_wd,
+                ensemble_per_layer_n,
+                ensemble_per_attn_iter,
+                ensemble_model_n,
+                ensemble_particular_layer,
+                ensemble_layer_till,
+                ensemble_randomness,
+                ensemble_iter_start_step,
+                ensemble_iter_n_mode,
+                ensemble_iter_n_start,
+                ensemble_iter_n_factor,
+                ensemble_iter_n_jump,
+                ensemble_iter_n_till,
+
+                layer_id,
             )
             # TODO ensemble
             # indices
-            print(f"{i_iteration}.AFT")
-            print('KEY_ACCESS_LOG ', KEY_ACCESS_LOG)
-            print('SCORES ', SCORES)
-            print('DUPPED_INDICES ', DUPPED_INDICES)
-            print('DUPPED_GROUP_SIZE ', DUPPED_GROUP_SIZE)
-            print('INDICES ', INDICES)
-            print('GROUP_SIZES ', GROUP_SIZES)
-            print('SCORES_FINAL ', SCORES_FINAL)
-            breakpoint()
+            """
+            [modified per iteration]
+            masking_iteration_draft_cuda_gather
+            - INDICES #
+            - GROUP_SIZES 
+            - SCORES_FINAL
+            masking_iteration_draft_cuda_partial_softmax
+            - PROBS
+            masking_iteration_draft_cuda_argsort
+            - IDS
+            - T_GROUP_SIZE
+            masking_iteration_draft_cuda_dup_and_score
+            - SCORES
+            - DUPPED_INDICES
+            - DUPPED_GROUP_SIZED
+            masking_iteration_draft_per_iteration
+            - T_GROUP_SIZES
+            """
+            
+            """
+            INDICES  3611757070 [32, 1024, 256] = [B, cdiv_python(TDST, block_size_q), G * mask_block_k]
+            GROUP_SIZES  -130119940 [32, 1024, 256] = [B, cdiv_python(TDST, block_size_q), G * mask_block_k]
+            SCORES_FINAL  16384000.0 [32, 1024, 256] = [B, cdiv_python(TDST, block_size_q), G * mask_block_k]
+            PROBS  749568.0 [32, 1024, 512] = [B, BDST, G * mask_block_k * 2]
+            IDS  259179882173949 [32, 1024, 256] = [B, BDST, G * mask_block_k]
+            SCORES  -200278016.0 [32, 1024, 512] = [B, BDST, G * mask_block_k * 2]
+            DUPPED_INDICES  129884654592879 [32, 1024, 512] = [B, BDST, G * mask_block_k * 2]
+            DUPPED_GROUP_SIZED  478409142849152 [32, 1024, 512] = [B, BDST, G * mask_block_k * 2]
+            T_GROUP_SIZES  -515840.0 [32, 1024] = [B, BDST]
+            
+            IDS_TDST  0 [32768] <- idx_tdst = idx_tdst % TDST
+            KS 0 [B, cdiv_python(TDST, block_size_q)]
+            """
+
+            indices 
+
+            if os.getenv('HIP_PER_ITER_CHANGE', '0') == '1':
+                print('INDICES ', indices.shape)
+                print('GROUP_SIZES ', group_sizes.shape)
+                print('SCORES_FINAL ', scores_final.shape)
+                print('PROBS ', probs.shape)
+                print('IDS ', topk_indices.shape)
+                print('SCORES ', scores.shape)
+                print('DUPPED_INDICES ', dupped_indices.shape)
+                print('DUPPED_GROUP_SIZED ', dupped_group_sizes.shape)
+                print('T_GROUP_SIZES ', t_group_sizes.shape)
+                print('IDS_TDST ', indices_tdst.shape)
+
+                print('INDICES ', indices_bef)
+                print('INDICES ', indices)
+                print('GROUP_SIZES ', group_sizes_bef)
+                print('GROUP_SIZES ', group_sizes)
+                print('SCORES_FINAL ', scores_final_bef)
+                print('SCORES_FINAL ', scores_final)
+                print('PROBS ', probs_bef)
+                print('PROBS ', probs)
+                # print('KEY_ACCESS_LOG ', key_access_log_bef) # just for check
+                # print('KEY_ACCESS_LOG ', key_access_log) # just for check
+                print('IDS ', topk_indices_bef)
+                print('IDS ', topk_indices)
+                print('SCORES ', scores_bef)
+                print('SCORES ', scores)
+                print('DUPPED_INDICES ', dupped_indices_bef)
+                print('DUPPED_INDICES ', dupped_indices)
+                print('DUPPED_GROUP_SIZED ', dupped_group_sizes_bef)
+                print('DUPPED_GROUP_SIZED ', dupped_group_sizes)
+                # print('SCORES_CACHE ', scores_cached_bef)
+                # print('SCORES_CACHE ', scores_cached)
+                print('T_GROUP_SIZES ', t_group_sizes_bef)
+                print('T_GROUP_SIZES ', t_group_sizes)
+                print('IDS_TDST ', indices_tdst_bef)
+                print('IDS_TDST ', indices_tdst)
+
+
+                if indices != None:
+                    print('INDICES ', torch.sum(indices-indices_bef).item())
+                if group_sizes != None:
+                    print('GROUP_SIZES ', torch.sum(group_sizes-group_sizes_bef).item())
+                if scores_final != None:
+                    print('SCORES_FINAL ', torch.sum(scores_final-scores_final_bef).item()) 
+                if probs != None:
+                    print('PROBS ', torch.sum(probs-probs_bef).item())
+
+                if key_access_log != None:
+                    print('KEY_ACCESS_LOG ', torch.sum(key_access_log-key_access_log_bef).item())  # just for check
+                if topk_indices != None:
+                    print('IDS ', torch.sum(topk_indices-topk_indices_bef).item()) 
+                if scores != None:
+                    print('SCORES ', torch.sum(scores-scores_bef).item()) 
+
+                if dupped_indices != None:
+                    print('DUPPED_INDICES ', torch.sum(dupped_indices-dupped_indices_bef).item())
+                if dupped_group_sizes != None:
+                    print('DUPPED_GROUP_SIZED ', torch.sum(dupped_group_sizes-dupped_group_sizes_bef).item())
+    
+                if t_group_sizes != None:
+                    print('T_GROUP_SIZES ', torch.sum(t_group_sizes-t_group_sizes_bef).item()) 
+                if indices_tdst != None:
+                    print('IDS_TDST ', torch.sum(indices_tdst-indices_tdst_bef).item())
+                if ks != None:
+                    print("KS ", torch.sum(ks-ks_bef).item())
+
+            # breakpoint()
             i_iteration += 1
     
     indices.mul_(block_size_k)
@@ -2884,6 +5054,7 @@ def masking_iteration_draft(
     # print(t)
     # print(tu)
     # print(t.shape, tu.shape, c)
+    # breakpoint()
     
     return indices, ks, ks_count, ks_start_end, scores_final, group_sizes, key_access_log, key_access_count
 
@@ -3457,7 +5628,7 @@ def masking_step_loop(
     ensemble_method_final_bdd_mask_k : int = 0,
     ensemble_timedim_wd : int = None,
     ensemble_per_layer_n : int = 1,
-    ensemble_per_attn_iter_n : int = 5,
+    ensemble_per_attn_iter : bool = False,
     ensemble_model_n : int = 5,
     ensemble_particular_layer : int = 0,
     ensemble_layer_till : int = 6,
@@ -3544,7 +5715,7 @@ def masking_step_loop(
                             ensemble_method_final_bdd_mask_k = ensemble_method_final_bdd_mask_k,
                             ensemble_timedim_wd = ensemble_timedim_wd,
                             ensemble_per_layer_n = ensemble_per_layer_n,
-                            ensemble_per_attn_iter_n = ensemble_per_attn_iter_n,
+                            ensemble_per_attn_iter = ensemble_per_attn_iter,
                             ensemble_model_n = ensemble_model_n,
                             ensemble_particular_layer = ensemble_particular_layer,
                             ensemble_layer_till = ensemble_layer_till,
@@ -3653,7 +5824,7 @@ def masking_step_loop(
                                 ensemble_method_final_bdd_mask_k = ensemble_method_final_bdd_mask_k,
                                 ensemble_timedim_wd = ensemble_timedim_wd,
                                 ensemble_per_layer_n = ensemble_per_layer_n,
-                                ensemble_per_attn_iter_n = ensemble_per_attn_iter_n,
+                                ensemble_per_attn_iter = ensemble_per_attn_iter,
                                 ensemble_model_n = ensemble_model_n,
                                 ensemble_particular_layer = ensemble_particular_layer,
                                 ensemble_layer_till = ensemble_layer_till,
@@ -3805,7 +5976,7 @@ def masking_step_loop(
                                     ensemble_method_final_bdd_mask_k = ensemble_method_final_bdd_mask_k,
                                     ensemble_timedim_wd = ensemble_timedim_wd,
                                     ensemble_per_layer_n = ensemble_per_layer_n,
-                                    ensemble_per_attn_iter_n = ensemble_per_attn_iter_n,
+                                    ensemble_per_attn_iter = ensemble_per_attn_iter,
                                     ensemble_model_n = ensemble_model_n,
                                     ensemble_particular_layer = ensemble_particular_layer,
                                     ensemble_layer_till = ensemble_layer_till,
@@ -4174,7 +6345,7 @@ def hip_masking(
     ensemble_method_final_bdd_mask_k : int = 0,
     ensemble_timedim_wd : int = None,
     ensemble_per_layer_n : int = 1,
-    ensemble_per_attn_iter_n : int = 5,
+    ensemble_per_attn_iter : bool = False,
     ensemble_model_n : int = 5,
     ensemble_particular_layer : int = 0,
     ensemble_layer_till : int = 6,
@@ -4281,7 +6452,7 @@ def hip_masking(
             ensemble_method_final_bdd_mask_k = ensemble_method_final_bdd_mask_k,
             ensemble_timedim_wd = ensemble_timedim_wd,
             ensemble_per_layer_n = ensemble_per_layer_n,
-            ensemble_per_attn_iter_n = ensemble_per_attn_iter_n,
+            ensemble_per_attn_iter = ensemble_per_attn_iter,
             ensemble_model_n = ensemble_model_n,
             ensemble_particular_layer = ensemble_particular_layer,
             ensemble_layer_till = ensemble_layer_till,
@@ -4728,7 +6899,7 @@ def hip_attention(
     ensemble_method_final_bdd_mask_k : int = 0,
     ensemble_timedim_wd : int = None,
     ensemble_per_layer_n : int = 1,
-    ensemble_per_attn_iter_n : int = 5,
+    ensemble_per_attn_iter : bool = False,
     ensemble_model_n : int = 5,
     ensemble_particular_layer : int = 0,
     ensemble_layer_till : int = 6,
@@ -4803,7 +6974,7 @@ def hip_attention(
         ensemble_method_final_bdd_mask_k = ensemble_method_final_bdd_mask_k,
         ensemble_timedim_wd = ensemble_timedim_wd,
         ensemble_per_layer_n = ensemble_per_layer_n,
-        ensemble_per_attn_iter_n = ensemble_per_attn_iter_n,
+        ensemble_per_attn_iter = ensemble_per_attn_iter,
         ensemble_model_n = ensemble_model_n,
         ensemble_particular_layer = ensemble_particular_layer,
         ensemble_layer_till = ensemble_layer_till,

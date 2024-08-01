@@ -187,7 +187,7 @@ def load_model(args):
             m.ensemble_timedim_wd = args.ensemble_timedim_wd
 
             m.ensemble_per_layer_n = args.ensemble_per_layer_n
-            m.ensemble_per_attn_iter_n = args.ensemble_per_attn_iter_n
+            m.ensemble_per_attn_iter = args.ensemble_per_attn_iter
             m.ensemble_model_n = args.ensemble_model_n
             m.ensemble_particular_layer = args.ensemble_particular_layer
             m.ensemble_layer_till = args.ensemble_layer_till

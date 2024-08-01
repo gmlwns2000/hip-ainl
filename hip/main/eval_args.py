@@ -26,7 +26,7 @@ class ArgsType:
     ensemble_method_final_bdd_mask_k : int = 0
     ensemble_timedim_wd : int = 3
     ensemble_per_layer_n : int = 1
-    ensemble_per_attn_iter_n : int = 5
+    ensemble_per_attn_iter : bool = False
     ensemble_model_n : int = 5
 
     ensemble_particular_layer : int = None
@@ -70,7 +70,7 @@ def eval_args(
     parser.add_argument('--ensemble-timedim-wd', type=int, default=3)
 
     parser.add_argument('--ensemble-per-layer-n', type=int, default=1)
-    parser.add_argument('--ensemble-per-attn-iter-n', type=int, default=5)
+    parser.add_argument('--ensemble-per-attn-iter', type=bool, default=False)
     parser.add_argument('--ensemble-model-n', type=int, default=20)
     parser.add_argument('--ensemble-particular-layer', type=int, default=None)
     parser.add_argument('--ensemble-layer-till', type=int, default=None)

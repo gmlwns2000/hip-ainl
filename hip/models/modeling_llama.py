@@ -755,7 +755,7 @@ class LlamaCustomAttention(LlamaAttention):
         self.ensemble_method_final_bdd_mask_k = 0
         self.ensemble_timedim_wd = None
         self.ensemble_per_layer_n = 1
-        self.ensemble_per_attn_iter_n = 5
+        self.ensemble_per_attn_iter = False
         self.ensemble_model_n = 5
         self.ensemble_particular_layer = None
         self.ensemble_layer_till = 6
@@ -932,7 +932,7 @@ class LlamaCustomAttention(LlamaAttention):
         #     'ensemble_method_final_bdd_mask_k': self.ensemble_method_final_bdd_mask_k,
         #     'ensemble_timedim_wd': self.ensemble_timedim_wd,
         #     'ensemble_per_layer_n': self.ensemble_per_layer_n,
-        #     'ensemble_per_attn_iter_n': self.ensemble_per_attn_iter_n,
+        #     'ensemble_per_attn_iter': self.ensemble_per_attn_iter,
         #     'ensemble_model_n': self.ensemble_model_n,
         #     'ensemble_particular_layer': self.ensemble_particular_layer,
         #     'ensemble_layer_till': self.ensemble_layer_till,
@@ -993,7 +993,7 @@ class LlamaCustomAttention(LlamaAttention):
             ensemble_method_final_bdd_mask_k = self.ensemble_method_final_bdd_mask_k,
             ensemble_timedim_wd= self.ensemble_timedim_wd,
             ensemble_per_layer_n = self.ensemble_per_layer_n,
-            ensemble_per_attn_iter_n = self.ensemble_per_attn_iter_n,
+            ensemble_per_attn_iter = self.ensemble_per_attn_iter,
             ensemble_model_n = self.ensemble_model_n,
             ensemble_particular_layer = self.ensemble_particular_layer,
             ensemble_layer_till = self.ensemble_layer_till,

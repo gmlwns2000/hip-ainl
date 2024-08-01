@@ -140,7 +140,7 @@ def hip_attention_mask(
     sampling_method: str = 'first',
 
     ENSEMBLE : bool = False,
-    ENSEMBLE_PER_ATTN_ITER_N : int = 5,
+    ENSEMBLE_PER_ATTN_ITER : bool = False,
     MODEL_I : int = 0,
     ENSEMBLE_RANDOMNESS : float = 5.0,
     ENSEMBLE_ITER_START_STEP : int = 1,
@@ -407,7 +407,7 @@ def hip_attention_mask(
             sliding_window_size,
             
             ENSEMBLE,
-            ENSEMBLE_PER_ATTN_ITER_N,
+            ENSEMBLE_PER_ATTN_ITER,
             MODEL_I,
             ENSEMBLE_RANDOMNESS,
             ENSEMBLE_ITER_START_STEP,
@@ -1231,7 +1231,7 @@ def hip_attention(
     ensemble_method_final_bdd_mask_k : int = 0,
     ensemble_timedim_wd : int = None,
     ensemble_per_layer_n : int = 1,
-    ensemble_per_attn_iter_n : int = 5,
+    ensemble_per_attn_iter : bool = False,
     ensemble_model_n : int = 5,
     ensemble_particular_layer : int = 0,
     ensemble_layer_till : int = 6,
@@ -1309,7 +1309,7 @@ def hip_attention(
     #     'ensemble_method_final_bdd_mask_k': ensemble_method_final_bdd_mask_k,
     #     'ensemble_timedim_wd': ensemble_timedim_wd,
     #     'ensemble_per_layer_n': ensemble_per_layer_n,
-    #     'ensemble_per_attn_iter_n': ensemble_per_attn_iter_n,
+    #     'ensemble_per_attn_iter': ensemble_per_attn_iter,
     #     'ensemble_model_n': ensemble_model_n,
     #     'ensemble_particular_layer': ensemble_particular_layer,
     #     'ensemble_layer_till': ensemble_layer_till,
@@ -1485,7 +1485,7 @@ def hip_attention(
                 enable_sparq=enable_sparq,
                 
                 sampling_method=sampling_method,
-                ensemble_per_attn_iter_n=ensemble_per_attn_iter_n,
+                ensemble_per_attn_iter=ensemble_per_attn_iter,
                 
                 using_sliding_window=using_sliding_window,
                 sliding_window_size=sliding_window_size,
@@ -1582,7 +1582,7 @@ def hip_attention(
                     sampling_method=sampling_method,
                     
                     # ensemble
-                    ENSEMBLE_PER_ATTN_ITER_N=ensemble_per_attn_iter_n,
+                    ENSEMBLE_PER_ATTN_ITER=ensemble_per_attn_iter,
                     # ENSEMBLE_RANDOMNESS = ensemble_randomness,
 
                     using_sliding_window=using_sliding_window,
@@ -1673,7 +1673,7 @@ def hip_attention(
                                                     grid_src_stride=estimated_ksrc_stride,
                                                     grid_k_stride=estimated_ksrc_stride,
 
-                                                    ENSEMBLE_PER_ATTN_ITER_N=ensemble_per_attn_iter_n,
+                                                    ENSEMBLE_PER_ATTN_ITER=ensemble_per_attn_iter,
                                                     MODEL_I = i,
                                                     ENSEMBLE_RANDOMNESS = ensemble_randomness,
 
@@ -1714,13 +1714,13 @@ def hip_attention(
                                                         'ensemble_method' : ensemble_method,
                                                         'ensemble_method_final' : ensemble_method_final,
                                                         'ensemble_per_layer_n' : ensemble_per_layer_n,
-                                                        'ensemble_per_attn_iter_n' : ensemble_per_attn_iter_n,
+                                                        'ensemble_per_attn_iter' : ensemble_per_attn_iter,
                                                         'ensemble_model_n' : ensemble_model_n,
                                                         'ensemble_particular_layer' : ensemble_particular_layer,
                                                         'ensemble_randomness' : ensemble_randomness,
                                                         'layer_id' : layer_id,
                                                         'model_i': i,
-                                                    }, f'./cache/ensemble/llama13b_32k/models/{ensemble_model_setting}_{ensemble_method}_{ensemble_method_final}/l_{layer_id}_m_{ensemble_model_n}_{i}_pl_{ensemble_per_layer_n}_pat{ensemble_per_attn_iter_n}_ln{ensemble_particular_layer}_r{ensemble_randomness}.pth')
+                                                    }, f'./cache/ensemble/llama13b_32k/models/{ensemble_model_setting}_{ensemble_method}_{ensemble_method_final}/l_{layer_id}_m_{ensemble_model_n}_{i}_pl_{ensemble_per_layer_n}_pat{ensemble_per_attn_iter}_ln{ensemble_particular_layer}_r{ensemble_randomness}.pth')
                                                     print(">>> STORED.")
                                                     # input('stored. press enter to continue >>> ')
                                         
@@ -1743,7 +1743,7 @@ def hip_attention(
                                             ensemble_method_final_bdd_mask_k,
                                             ensemble_timedim_wd,
                                             ensemble_per_layer_n,
-                                            ensemble_per_attn_iter_n,
+                                            ensemble_per_attn_iter,
                                             ensemble_model_n,
                                             ensemble_particular_layer,
                                             ensemble_attn_mask_per_layer, 
@@ -1773,7 +1773,7 @@ def hip_attention(
                                         #         'ensemble_method_final_bdd_mask_k' : ensemble_method_final_bdd_mask_k,
                                         #         'ensemble_timedim_wd' : ensemble_timedim_wd,
                                         #         'ensemble_per_layer_n' : ensemble_per_layer_n,
-                                        #         'ensemble_per_attn_iter_n' : ensemble_per_attn_iter_n,
+                                        #         'ensemble_per_attn_iter' : ensemble_per_attn_iter,
                                         #         'ensemble_model_n' : ensemble_model_n,
                                         #         'ensemble_particular_layer' : ensemble_particular_layer,
                                         #         'ensemble_layer_till' : ensemble_layer_till
@@ -1786,7 +1786,7 @@ def hip_attention(
                                         #         'sparsity_per_layer' : sparsity_per_layer,
                                         #         'sparse_ratio' : sparsity_ratio,
 
-                                        #     }, f'./cache/ensemble/llama13b_32k/method/{ensemble_model_setting}_{ensemble_method}_{ensemble_method_final}/l_{layer_id}_m_{ensemble_model_n}_pl_{ensemble_per_layer_n}_pat{ensemble_per_attn_iter_n}_ln{ensemble_particular_layer}.pth')
+                                        #     }, f'./cache/ensemble/llama13b_32k/method/{ensemble_model_setting}_{ensemble_method}_{ensemble_method_final}/l_{layer_id}_m_{ensemble_model_n}_pl_{ensemble_per_layer_n}_pat{ensemble_per_attn_iter}_ln{ensemble_particular_layer}.pth')
                                         #     print(">>> STORED.")
                             elif "random_per_iter" in ensemble_model_setting:
                                 assert ensemble_model_setting in ["random_per_iter_const", "random_per_iter_inc_mul", "random_per_iter_inc_add", "random_per_iter_dec"]
@@ -1827,7 +1827,7 @@ def hip_attention(
                                     grid_k_stride=estimated_ksrc_stride,
 
                                     ENSEMBLE=ensemble,
-                                    ENSEMBLE_PER_ATTN_ITER_N=ensemble_per_attn_iter_n,
+                                    ENSEMBLE_PER_ATTN_ITER=ensemble_per_attn_iter,
                                     MODEL_I = i,
                                     ENSEMBLE_RANDOMNESS = ensemble_randomness,
                                     ENSEMBLE_ITER_START_STEP = ensemble_iter_start_step,
@@ -1883,7 +1883,7 @@ def hip_attention(
                                     grid_src_stride=estimated_ksrc_stride,
                                     grid_k_stride=estimated_ksrc_stride,
 
-                                    ENSEMBLE_PER_ATTN_ITER_N=ensemble_per_attn_iter_n,
+                                    ENSEMBLE_PER_ATTN_ITER=ensemble_per_attn_iter,
                                     MODEL_I = i,
                                     ENSEMBLE_RANDOMNESS = ensemble_randomness,
 
@@ -1960,7 +1960,7 @@ def hip_attention(
                             grid_src_stride=estimated_ksrc_stride,
                             grid_k_stride=estimated_ksrc_stride,
 
-                            ENSEMBLE_PER_ATTN_ITER_N=ensemble_per_attn_iter_n,
+                            ENSEMBLE_PER_ATTN_ITER=ensemble_per_attn_iter,
                             MODEL_I = i,
                             ENSEMBLE_RANDOMNESS = ensemble_randomness,
 
@@ -2236,7 +2236,7 @@ def main_latency_benchmark():
                         is_causal=is_causal,
 
                         sampling_method = sampling_method, ###CHECK
-                        ensemble_per_attn_iter_n = ensemble_per_attn_iter_n,
+                        ENSEMBLE_PER_ATTN_ITER = ensemble_per_attn_iter,
                         model_i = model_i
                     )
                 else:
@@ -2258,7 +2258,7 @@ def main_latency_benchmark():
                         precomputed_ks=ks,
 
                         sampling_method = sampling_method, ###CHECK
-                        ensemble_per_attn_iter_n = ensemble_per_attn_iter_n,
+                        ensemble_per_attn_iter = ensemble_per_attn_iter,
                         model_i = model_i
                     )
                 if mask is None:
