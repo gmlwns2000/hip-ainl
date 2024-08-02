@@ -80,7 +80,7 @@ def eval_args(
     parser.add_argument('--ensemble-iter-n-start', type=int, default=0)
     parser.add_argument('--ensemble-iter-n-factor', type=int, default=2)
     parser.add_argument('--ensemble-iter-n-jump', type=int, default=1)
-    parser.add_argument('--ensemble-iter-n-till', type=int, default=None)
+    parser.add_argument('--ensemble-iter-n-till', type=int, default=32000)
 
     parser.add_argument('--visualize', action='store_true')
 
