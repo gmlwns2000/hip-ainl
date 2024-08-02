@@ -1,11 +1,13 @@
 import os
 import torch
+import nvtx
 
 from hip.models.hip_attention.attention1_gpu import flash_attention
 from hip.models.hip_attention.attention1_block_gpu import hip_attention
 from hip.models.attn_l1_loss import compute_attn_lp_loss_triton
 
 
+@nvtx.annotate('custom_attention')
 def custom_attention(
     query_states, key_states, value_states,
     attention_mask, causal_mask,
@@ -67,7 +69,7 @@ def custom_attention(
     ensemble_iter_n_start = 0,
     ensemble_iter_n_factor = 2,
     ensemble_iter_n_jump = 1,
-    ensemble_iter_n_till = None,
+    ensemble_iter_n_till = 32000,
 
     tree_stride = -1,
 
@@ -165,18 +167,24 @@ def custom_attention(
     @return: Attention output, last cumsum, attention sparsity loss
     """
     sparsity = attn_sparsity_loss = None
+    
+    N, H, T, HID = query_states.shape
+    _N, _H, _T, _HID = key_states.shape
+    is_prompt = (N, T, HID) == (_N, _T, _HID)
+    assert (H % _H) == 0
+    H_KV = _H
 
     if attention_method in ['none', 'sdpa', 'fa2']:
         # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
         # Reference: https://github.com/pytorch/pytorch/issues/112577.
-        if query_states.device.type == "cuda":
+        if query_states.device.type == "cuda" and attention_method == 'sdpa':
             query_states = query_states.contiguous()
             key_states = key_states.contiguous()
             value_states = value_states.contiguous()
 
-        from flash_attn import flash_attn_qkvpacked_func, flash_attn_func
+        from flash_attn import flash_attn_qkvpacked_func, flash_attn_func, flash_attn_with_kvcache
         
-        if query_states.shape == key_states.shape:
+        if is_prompt:
             if attention_method in ['none', 'fa2']:
                 assert causal_mask is None
                 attn_output = flash_attn_func(
@@ -200,16 +208,25 @@ def custom_attention(
             else:
                 raise Exception()
         else:
-            from torch.nn.attention import SDPBackend, sdpa_kernel
-            with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
-                attn_output = torch.nn.functional.scaled_dot_product_attention(
-                    query_states,
-                    key_states,
-                    value_states,
-                    attn_mask=causal_mask,
-                    is_causal=causal_mask is None,
-                    dropout_p=attention_dropout,
-                )
+            if attention_method in ['none', 'fa2']:
+                attn_output = flash_attn_with_kvcache(
+                    q=query_states.permute(0, 2, 1, 3),
+                    k_cache=key_states.permute(0, 2, 1, 3),
+                    v_cache=value_states.permute(0, 2, 1, 3),
+                    softmax_scale=None,
+                    causal=True,
+                ).permute(0, 2, 1, 3)
+            elif attention_method in ['sdpa']:
+                from torch.nn.attention import SDPBackend, sdpa_kernel
+                with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
+                    attn_output = torch.nn.functional.scaled_dot_product_attention(
+                        query_states,
+                        key_states,
+                        value_states,
+                        attn_mask=causal_mask,
+                        is_causal=causal_mask is None,
+                        dropout_p=attention_dropout,
+                    )
 
         if os.environ.get('CHECKOUT_STATES', '0') == '1' and (layer_id == 0 or layer_id == 31) :
             os.makedirs('./cache/llama/', exist_ok=True)
@@ -293,8 +310,8 @@ def custom_attention(
                 # ).to(torch.int32)
                 
                 q = q.reshape(N * H, TDST, HID)  # .contiguous()
-                k = k.reshape(N * H, TSRC, HID)  # .contiguous()
-                v = v.reshape(N * H, TSRC, HID)  # .contiguous()
+                k = k.reshape(N * H_KV, TSRC, HID)  # .contiguous()
+                v = v.reshape(N * H_KV, TSRC, HID)  # .contiguous()
                 q_hip = q[:, :, :]
                 
                 attn_output_hip, _ = hip_attention(
@@ -375,12 +392,12 @@ def custom_attention(
                 # k = k.reshape(N * H, TSRC, HID)
                 # v = v.reshape(N * H, TSRC, HID)
                 
-                q_quant = q.to(torch.float8_e5m2).view(torch.uint8)#[...,::2]
-                k_quant = k.to(torch.float8_e5m2).view(torch.uint8)#[...,::2]
-                # q_quant = q
-                # k_quant = k
-                
-                # print(q.shape, k.shape, v.shape)
+                if q.shape == k.shape:
+                    q_quant = q.to(torch.float8_e5m2).view(torch.uint8)#[...,::2]
+                    k_quant = k.to(torch.float8_e5m2).view(torch.uint8)#[...,::2]
+                else:
+                    q_quant = q
+                    k_quant = k
                 
                 attn_output_hip, _ = hip_attention_draft(
                     q, k, v,
@@ -391,9 +408,10 @@ def custom_attention(
                     block_stride_q=2,
                     block_size_k=tree_block_size_k,
                     block_stride_k=max(2, tree_block_size_k // 2),
+                    # block_stride_k=1,
                     block_size_k_group=1,
                     
-                    sliding_window_size=512,
+                    sliding_window_size=int(os.getenv('HIP_DRAFT_SLIDING_WINDOW', '512')),
                     sink_token_size=32,
                     
                     using_extend=False,
@@ -403,8 +421,8 @@ def custom_attention(
                     self_extend_group_size=4,
                     
                     topk_head_group_size=1,
-                    sample_method='first',
-                    branch_method='half',
+                    sample_method=os.getenv('HIP_DRAFT_SAMPLING_METHOD', 'first'),
+                    branch_method=os.getenv('HIP_DRAFT_BRANCH_METHOD', 'half'),
                     
                     # this may good or not, but definatly great with self-extend
                     traverse_from_last_step=False,
@@ -448,13 +466,13 @@ def custom_attention(
 
                     layer_id = layer_id,
                 )
-                attn_output_hip = attn_output_hip.permute(0, 2, 1, 3).contiguous()
+                attn_output_hip = attn_output_hip.permute(0, 2, 1, 3)#.contiguous()
         except RuntimeError as ex:
             os.makedirs('cache/hip', exist_ok=True)
             torch.save({
-                'q': q_hip,
-                'k': k[:, :LAST_DENSE_QUERIES, :],
-                'v': v[:, :LAST_DENSE_QUERIES, :],
+                'q': q,
+                'k': k,
+                'v': v,
                 'mask_k': tree_k,
                 'block_size_q': tree_block_size_q,
                 'block_size_k': tree_block_size_k,

@@ -148,7 +148,7 @@ def hip_attention_mask(
     ENSEMBLE_ITER_N_START : int = 0,
     ENSEMBLE_ITER_N_FACTOR : int = 2,
     ENSEMBLE_ITER_N_JUMP : int = 1,
-    ENSEMBLE_ITER_N_TILL : int = None,
+    ENSEMBLE_ITER_N_TILL : int = 32000,
     
     using_sliding_window=True,
     sliding_window_size=128,
@@ -1241,7 +1241,7 @@ def hip_attention(
     ensemble_iter_n_start : int = 0,
     ensemble_iter_n_factor : int = 2,
     ensemble_iter_n_jump : int = 1,
-    ensemble_iter_n_till : int = None,
+    ensemble_iter_n_till : int = 32000,
 
     layer_id : int = 0,    
     
@@ -2028,6 +2028,8 @@ def streaming_attention(q: Tensor, k: Tensor, v: Tensor, cos: Tensor, sin: Tenso
     
     return sink_attention(q, k, v, cos, sin, window_size=window_size)
 
+from hip.models.hip_attention.attention2_draft_causal_batch_gpu_fused_vec import hip_attention as hip_attention_11
+
 def main_latency_benchmark():
     global DEBUG
     
@@ -2048,6 +2050,7 @@ def main_latency_benchmark():
     parser.add_argument('--head_size', type=int, default=-1)
     parser.add_argument('--refresh_interval', type=int, default=8)
     parser.add_argument('--not_causal', action='store_true')
+    parser.add_argument('--head_groups', type=int, default=4)
     args = parser.parse_args()
     
     if args.query_size > 1:
@@ -2097,11 +2100,11 @@ def main_latency_benchmark():
     head_size = q.shape[0]
     cos = sin = torch.randn((k.shape[1], k.shape[2]), dtype=k.dtype, device=k.device)
     
-    if METHOD in 'flash':
+    if METHOD in ['flash', 'hip1.1']:
         q = q.view(BSIZE, -1, QUERY_SIZE, HID).permute(0, 2, 1, 3).contiguous()
-        k = k.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).permute(0, 2, 1, 3).contiguous()
-        v = v.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).permute(0, 2, 1, 3).contiguous()
-    elif METHOD in 'landmark':
+        k = k.view(BSIZE, -1, CHUNK_LEN * DUPS, HID)[:, ::args.head_groups, :, :].permute(0, 2, 1, 3).contiguous()
+        v = v.view(BSIZE, -1, CHUNK_LEN * DUPS, HID)[:, ::args.head_groups, :, :].permute(0, 2, 1, 3).contiguous()
+    elif METHOD in ['landmark']:
         q = q.view(BSIZE, -1, QUERY_SIZE, HID).contiguous()
         k = k.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).contiguous()
         v = v.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).contiguous()
@@ -2111,6 +2114,9 @@ def main_latency_benchmark():
     v = v.cuda()
     cos = cos.cuda()
     sin = sin.cuda()
+    if METHOD in ['hip1.1']:
+        q_quant = q.to(torch.float8_e5m2).view(torch.uint8)
+        k_quant = k.to(torch.float8_e5m2).view(torch.uint8)
     
     hip_attention_mask = torch.full((q.shape[0], k.shape[1]), True, dtype=torch.bool, device=q.device)
     
@@ -2143,6 +2149,20 @@ def main_latency_benchmark():
                     _q, _k, _v,
                     causal=True, 
                     scale=1
+                )
+            elif METHOD == 'hip1.1':
+                assert is_causal
+                _, mask = hip_attention_11(
+                    q,
+                    k,
+                    v,
+                    # attention_mask=hip_attention_mask,
+                    mask_k=args.k,
+                    block_size_q=args.block_size_q,
+                    block_size_k=args.block_size_k,
+                    q_quant=q_quant,
+                    k_quant=k_quant,
+                    # sample_method='center'
                 )
             elif METHOD == 'hip':
                 if state is None:
@@ -2225,7 +2245,7 @@ def main_latency_benchmark():
         
         end.record()
         torch.cuda.synchronize()
-        elapsed = start.elapsed_time(end)
+        elapsed = start.elapsed_time(end) / args.batch_size
         
         if i > n_samples * 0.1:
             if not started:
@@ -2238,7 +2258,7 @@ def main_latency_benchmark():
         print(get_bench().format_tracetree())
     
     samples = np.array(samples)
-    print(f'({METHOD}) {np.mean(samples):.4f} ms +- {np.std(samples):.4f} ms (q: {tuple(q.shape)}, k: {tuple(k.shape)}, v: {tuple(v.shape)})')
+    print(f'({METHOD}) {np.mean(samples):.8f} ms +- {np.std(samples):.4f} ms (q: {tuple(q.shape)}, k: {tuple(k.shape)}, v: {tuple(v.shape)})')
     
     os.makedirs('./cache/attention1_block_gpu/', exist_ok=True)
     with open('./cache/attention1_block_gpu/result.json', 'w') as f:

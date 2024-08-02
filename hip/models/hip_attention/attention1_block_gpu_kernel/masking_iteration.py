@@ -1468,8 +1468,8 @@ def _masking_iteration_compute(
                 assert ENSEMBLE_ITER_N_MODE in ["exponent", "linear", "linear_exponent" ,"constant"]
                 assert ENSEMBLE_ITER_N_JUMP <= N_ITERATION
 
-                if ENSEMBLE_ITER_N_TILL is None:
-                    ENSEMBLE_ITER_N_TILL = N_ITERATION
+                # if ENSEMBLE_ITER_N_TILL is None:
+                #     ENSEMBLE_ITER_N_TILL = N_ITERATION
 
                 if idx_iteration < ENSEMBLE_ITER_START_STEP:
                     assert MASK.ndim == 4
@@ -1929,7 +1929,7 @@ def masking_iteration(
     ENSEMBLE_ITER_N_START : int = 0,
     ENSEMBLE_ITER_N_FACTOR : int = 2,
     ENSEMBLE_ITER_N_JUMP : int = 1,
-    ENSEMBLE_ITER_N_TILL : int = None,
+    ENSEMBLE_ITER_N_TILL : int = 32000,
 
     DEBUG: bool = False,
 ):

@@ -17,7 +17,7 @@ from hip.models.modeling_llama import LlamaForCausalLM, LlamaConfig
 from hip.utils import seed, get_bench
 
 @torch.inference_mode
-def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, visualize):
+def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, visualize, quite=False):
     try:
         from vllm import LLM, SamplingParams
     except ModuleNotFoundError:
@@ -30,13 +30,17 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, visuali
         outfile = f'./cache/llama_eval/{args.name}/ppl_{args.method}_{args.model}_s{args.stride}_dl{args.dense_layers}_k{args.k}_bq{args.block_size_q}_bk{args.block_size_k}_ckpt{args.checkpoint is not None}_ensbn{args.ensemble_model_n}_{args.ensemble_method_final}_mft{args.ensemble_method_final_inter_thresh}_bmk{args.ensemble_method_final_bdd_mask_k}_lt{args.ensemble_layer_till}_r{args.ensemble_randomness}_twd{args.ensemble_timedim_wd}.json'
 
     pathlib.Path(outfile).parent.mkdir(parents=True, exist_ok=True)
-    print("Will write to", outfile)
+    if not quite:
+        print("Will write to", outfile)
     if os.path.exists(outfile) and not args.overwrite:
         print(f'PPL already computed, skipping: {outfile}')
         return
 
     os.makedirs('./cache', exist_ok=True)
     cache_path = f'./cache/llama_eval_{args.dataset}_{args.model}.pth'
+    PG19_BOOK_INDEX = int(os.getenv('PG19_BOOK_INDEX', '-1'))
+    if PG19_BOOK_INDEX >= 0:
+        cache_path = 'none'
     if not os.path.exists(cache_path):
         assert args.dataset in ['wikitext', 'pg19']
         if args.dataset == 'wikitext':
@@ -44,9 +48,19 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, visuali
             sequence = "\n\n".join(test["text"])
         elif args.dataset == 'pg19':
             test = load_dataset("emozilla/pg19-test", split="test")
-            sequence = "\n\n".join(test["text"])
-        encodings = tokenizer(sequence, return_tensors="pt").input_ids
-        torch.save(encodings, cache_path)
+            books = test["text"]
+            if PG19_BOOK_INDEX >= 0:
+                books = list(sorted(books, key=lambda x: tokenizer(x, return_tensors="pt").input_ids.size(1)))
+                sequence = books[PG19_BOOK_INDEX]
+            else:
+                sequence = "\n\n".join(books)
+        if isinstance(sequence, torch.Tensor):
+            encodings = sequence
+        else:
+            encodings = tokenizer(sequence, return_tensors="pt").input_ids
+        print(encodings.shape)
+        if PG19_BOOK_INDEX < 0:
+            torch.save(encodings, cache_path)
     else:
         encodings = torch.load(cache_path)
 
@@ -54,7 +68,8 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, visuali
     max_length = stride = args.stride if args.stride > 0 else max_length
     seq_len = encodings.size(1)
     
-    print(f'[{args.dataset}] {seq_len} tokens loaded')
+    if not quite:
+        print(f'[{args.dataset}] {seq_len} tokens loaded')
 
     nlls = []
     prev_end_loc = 0
@@ -62,7 +77,7 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, visuali
     sparse_sum = 0
     sparse_cnt = 0
     t = time.time()
-    with tqdm(range(0, seq_len, stride)[:args.count], dynamic_ncols=True) as pbar:
+    with tqdm(range(0, seq_len, stride)[:args.count], dynamic_ncols=True, disable=quite) as pbar:
         for begin_loc in pbar:
             if visualize and viz_i == 0:
                 print("STORE FOR VISUALIZATION")
@@ -95,11 +110,46 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, visuali
                     samples = []
                     with tqdm(range(sample_counts), dynamic_ncols=True, position=1, disable=sample_counts <= 1) as pbar_sample:
                         for _ in pbar_sample:
-                            outputs = model(
-                                input_ids,
-                                labels=target_ids,
-                                output_logits=False,
-                            )
+                            if args.method == 'h2o':
+                                loss_sum = 0
+                                loss_count = 0
+                                prompt_ids = input_ids[:, :args.k]
+                                prompt_target_ids = target_ids[:, :args.k]
+                                decode_ids = input_ids[:, args.k:]
+                                # decode_target_ids = target_ids[:, args.k:]
+                                outputs = model(
+                                    prompt_ids,
+                                    labels=prompt_target_ids,
+                                    output_logits=True,
+                                )
+                                loss_sum += outputs.loss * prompt_ids.shape[-1]
+                                loss_count += prompt_ids.shape[-1]
+                                tqdm.write(f'H2O Loss: {math.exp(loss_sum / loss_count)}')
+                                for curr_idx in tqdm(range(decode_ids.shape[-1]), dynamic_ncols=True):
+                                    curr_token = decode_ids[:, curr_idx:curr_idx+1]
+                                    outputs = model(
+                                        curr_token,
+                                        # labels=curr_target,
+                                        output_logits=True,
+                                        position_ids=torch.arange(curr_idx, curr_idx+1, device=curr_token.device)[None, :],
+                                        past_key_values=outputs.past_key_values
+                                    )
+                                    loss = torch.nn.functional.cross_entropy(
+                                        outputs.logits.view(-1, model.config.vocab_size), 
+                                        decode_ids[:, curr_idx+1:curr_idx+2].view(-1)
+                                    )
+                                    loss_sum += loss * curr_token.shape[-1]
+                                    loss_count += curr_token.shape[-1]
+                                    tqdm.write(f'H2O Loss idx={args.k+curr_idx+1}: {math.exp(loss_sum / loss_count)}')
+                                for m in model.modules():
+                                    if hasattr(m, '_clean_cache'):
+                                        m._clean_cache()
+                            else:
+                                outputs = model(
+                                    input_ids,
+                                    labels=target_ids,
+                                    output_logits=False,
+                                )
                             samples.append(outputs.loss)
                             pbar_sample.set_description(
                                 f'ppl: {torch.exp(torch.stack(nlls + [outputs.loss.cpu()]).mean()).item():.6f}'
@@ -121,8 +171,8 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, visuali
                 else:
                     sparse_sum += 1
                 sparse_cnt += 1
-
-            tqdm.write(f'step {len(nlls)} PPL: {ppl:.6f}, {time.time() - t:.4f} sec')
+            if not quite:
+                tqdm.write(f'step {len(nlls)} PPL: {ppl:.6f}, {time.time() - t:.4f} sec')
             t = time.time()
             pbar.set_description(f"ppl: {ppl:.3f} sparse: {sparse_sum/(sparse_cnt+1e-8):.2f}")
             
@@ -135,4 +185,7 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, visuali
     with open(outfile, 'w') as f:
         json.dump({'ppl': ppl, 'sparsity': sparsity}, f)
 
-    print(f'PPL: {ppl:.4f} SPARSE: {sparsity:.3f}')
+    if not quite:
+        print(f'PPL: {ppl:.4f} SPARSE: {sparsity:.3f}')
+
+    return ppl
