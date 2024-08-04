@@ -459,6 +459,7 @@ class LlamaCustomAttention(LlamaAttention):
         self.ensemble_iter_n_factor = 2
         self.ensemble_iter_n_jump = 1
         self.ensemble_iter_n_till = 32000
+        self.ensemble_ret_ratio = 1.0
 
         self.tree_reformer = self.tree_performer = None
 
@@ -864,6 +865,7 @@ class LlamaCustomAttention(LlamaAttention):
             ensemble_iter_n_factor = self.ensemble_iter_n_factor,
             ensemble_iter_n_jump = self.ensemble_iter_n_jump,
             ensemble_iter_n_till = self.ensemble_iter_n_till,
+            ensemble_ret_ratio = self.ensemble_ret_ratio,
 
             layer_id = self.layer_idx,
 

@@ -70,6 +70,7 @@ def custom_attention(
     ensemble_iter_n_factor = 2,
     ensemble_iter_n_jump = 1,
     ensemble_iter_n_till = 32000,
+    ensemble_ret_ratio = 1.0,
 
     tree_stride = -1,
 
@@ -463,6 +464,7 @@ def custom_attention(
                     ensemble_iter_n_factor = ensemble_iter_n_factor,
                     ensemble_iter_n_jump = ensemble_iter_n_jump,
                     ensemble_iter_n_till = ensemble_iter_n_till,
+                    ensemble_ret_ratio=ensemble_ret_ratio,
 
                     layer_id = layer_id,
                 )

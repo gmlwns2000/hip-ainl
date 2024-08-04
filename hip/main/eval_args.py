@@ -32,6 +32,7 @@ class ArgsType:
     ensemble_particular_layer : int = None
     ensemble_layer_till : int = None
     ensemble_randomness : float = 0.5
+    ensemble_ret_ratio : float = 1.0
 
 
 
@@ -81,6 +82,7 @@ def eval_args(
     parser.add_argument('--ensemble-iter-n-factor', type=int, default=2)
     parser.add_argument('--ensemble-iter-n-jump', type=int, default=1)
     parser.add_argument('--ensemble-iter-n-till', type=int, default=32000)
+    parser.add_argument('--ensemble-ret-ratio', type=float, default=1.0)
 
     parser.add_argument('--visualize', action='store_true')
 

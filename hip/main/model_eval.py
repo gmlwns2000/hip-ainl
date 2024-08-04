@@ -209,6 +209,7 @@ def load_model(args):
             m.ensemble_iter_n_factor = args.ensemble_iter_n_factor
             m.ensemble_iter_n_jump = args.ensemble_iter_n_jump
             m.ensemble_iter_n_till = args.ensemble_iter_n_till
+            m.ensemble_ret_ratio = args.ensemble_ret_ratio
 
             m.tree_dense_layers = list(range(args.dense_layers))
             m.tree_rope_method = args.rope_method

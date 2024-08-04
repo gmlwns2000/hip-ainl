@@ -672,7 +672,7 @@ def masking_iteration_draft_cuda_dup_and_score(
     T_GROUP_SIZE, 
     stride_t_group_size_b, 
     stride_t_group_size_bdst,
-    stride_t_group_size_sample_n,
+    # stride_t_group_size_sample_n,
     INDICES_TDST,
     stride_indices_tdst_t,
     
@@ -781,8 +781,8 @@ def masking_iteration_draft_cuda_dup_and_score(
     t_group_size = tl.load(
         T_GROUP_SIZE +\
             idx_b * stride_t_group_size_b +\
-            idx_bdst * stride_t_group_size_bdst +\
-            idx_ensemble_sample_id * stride_t_group_size_sample_n,
+            idx_bdst * stride_t_group_size_bdst
+            # idx_ensemble_sample_id * stride_t_group_size_sample_n,
         cache_modifier=DEFAULT_CACHE_MODIFIER,
     )
     if t_group_size <= 1.0:
@@ -1183,7 +1183,7 @@ def masking_iteration_draft_cuda_gather(
     T_GROUP_SIZE,
     stride_t_group_size_b, 
     stride_t_group_size_bdst,
-    stride_t_group_size_sample_n,
+    # stride_t_group_size_sample_n,
     
     G: tl.constexpr, BK,
     
@@ -1223,8 +1223,8 @@ def masking_iteration_draft_cuda_gather(
     t_group_size = tl.load(
         T_GROUP_SIZE +\
             idx_b * stride_t_group_size_b +\
-            idx_bdst * stride_t_group_size_bdst +\
-            idx_ensemble_sample_id * stride_t_group_size_sample_n,
+            idx_bdst * stride_t_group_size_bdst # +\
+            # idx_ensemble_sample_id * stride_t_group_size_sample_n,
     )
     if t_group_size <= 1.0:
         return
@@ -1481,23 +1481,35 @@ def masking_iteration_draft_cuda_partial_softmax(
         cache_modifier=DEFAULT_CACHE_MODIFIER,
     )
 
-# TODO
 @triton.jit
-def ensemble_masking_iteration_draft_cuda_argsort(
-    SCORES_FINAL, stride_scores_final_b, stride_scores_final_bdst, stride_scores_final_sample_n, stride_scores_final_bk,
-    IDS, stride_ids_b, stride_ids_bdst, stride_topk_ids_sample_n, stride_ids_bk,
-    
-    T_GROUP_SIZES, stride_t_group_size_b, stride_t_group_size_bdst, stride_t_group_size_sample_n,
-    
-    BDST,
-    
-    BK: tl.constexpr,
-    TOP_BK: tl.constexpr,
+def ensemble_masking_iteration_cuda_argsort_gather(
+    INDICES, 
+    stride_indices_b, 
+    stride_indices_bdst, 
+    stride_indices_sample_n,
+    stride_indices_bk,
+    GROUP_SIZES, 
+    stride_group_sizes_b, 
+    stride_group_sizes_bdst, 
+    stride_group_size_sample_n,
+    stride_group_sizes_bk,
+
+    SCORES_FINAL, 
+    stride_scores_final_b, 
+    stride_scores_final_bdst, 
+    stride_scores_final_sample_n, 
+    stride_scores_final_bk,
+
+    TOP_BK: tl.constexpr, # BK * G
     BLOCK_BDST: tl.constexpr,
-    idx_ensemble_sample_id : int,
+    BLOCK_BK,
+
+    ensemble_sample_per_iter_new,
+    ENSEMBLE_RET_RATIO,
     
     pid_0=None,
     pid_1=None,
+    pid_2=None,
     CARRYING: tl.constexpr = False,
     carried_probs = None,
 ):
@@ -1506,74 +1518,132 @@ def ensemble_masking_iteration_draft_cuda_argsort(
     - PROBS
     - IDS
     """
-    if pid_0 is None:
-        pid_0 = tl.program_id(0)
-    if pid_1 is None:
-        pid_1 = tl.program_id(1)
-    
-    idx_b = pid_1
-    idx_bdst = pid_0 * BLOCK_BDST + tl.arange(0, BLOCK_BDST)
-    mask_bdst = idx_bdst < BDST
-    idx_bk = tl.arange(0, BK)
-    
-    # t_group_size = tl.load( # TODO clarify whether this is not needed
-    #     T_GROUP_SIZES +\
-    #         idx_b * stride_t_group_size_b +\
-    #         idx_bdst * stride_t_group_size_bdst +\
-    #         idx_ensemble_sample_id * stride_t_group_size_sample_n,
-    #     mask=mask_bdst,
-    #     other=1.0,
-    #     cache_modifier=DEFAULT_CACHE_MODIFIER,
-    # )
-    # if tl.max(t_group_size) < 1.0:
-    #     return
+    if pid_0 is not None:
+        idx_b = pid_2
+        idx_bdst = pid_1
+        pid_bk = pid_0
+    else:
+        idx_b = tl.program_id(2)
+        idx_bdst = tl.program_id(1)
+        pid_bk = tl.program_id(0)
 
-    # NOTE now consider all the samples altogether
-    scores = tl.load(
+    # TODO NOTE idx_bdst not using range but integer (cf. masking_iteration_draft_cuda_argsort)
+
+    idx_samples = tl.arange(0, ensemble_sample_per_iter_new)
+    idx_bk = tl.arange(0, TOP_BK)
+
+    TOP_BK_FIN = tl.ceil(TOP_BK * ENSEMBLE_RET_RATIO)
+    assert ENSEMBLE_RET_RATIO == 1.0
+    assert TOP_BK_FIN <= SCORES_FINAL.shape[-1] * SCORES_FINAL.shape[-2]
+
+    scores = tl.load( # TODO check; not that sure for the size
         SCORES_FINAL +\
             idx_b * stride_scores_final_b +\
-            idx_bdst[:, None] * stride_scores_final_bdst +\
-            idx_ensemble_sample_id * stride_scores_final_sample_n +\
+            idx_bdst * stride_scores_final_bdst +\
+            idx_samples[:, None] * stride_scores_final_sample_n +\
             idx_bk[None, :] * stride_scores_final_bk,
-        mask=mask_bdst[:, None],
+        # mask=mask_samples[:, None] & mask_bk[None, :], # NOTE already considered
         cache_modifier=DEFAULT_CACHE_MODIFIER,
     )
-    ids = tl.broadcast_to(tl.arange(0, BK)[None, :], (BLOCK_BDST, BK)).to(tl.int32)
+
+    scores = tl.ravel(scores)
+    ids = tl.arange(0, TOP_BK * ensemble_sample_per_iter_new)
     
-    # ids_low, ids_high = tl.split(tl.reshape(ids, TOP_BK, 2))
-    # probs_low, probs_high = tl.split(tl.reshape(probs.to(tl.float32), TOP_BK, 2))
-    # probs_low, ids_low = tl_argsort(probs_low, ids_low, 0, True)
-    # probs_high, ids_high = tl_argsort(probs_high, ids_high, 0, True)
-    # tl.store(
-    #     IDS +\
-    #         idx_b * stride_ids_b +\
-    #         idx_bdst[:, None] * stride_ids_bdst +\
-    #         tl.arange(0, TOP_BK)[None, :] * stride_ids_bk,
-    #     value=tl.where(
-    #         probs_low > probs_high,
-    #         ids_low,
-    #         ids_high,
-    #     )[None, :],
-    #     mask=mask_bdst[:, None],
-    #     cache_modifier=DEFAULT_CACHE_MODIFIER,
-    # )
-    
-    _, ids = tl_argsort(scores.to(tl.float32), ids, 1, True)
+    _, ids = tl_argsort(scores.to(tl.float32), ids, -1, True)
+    # BK * ensemble_sample_per_iter -> [ensemble_sample_per_iter_new, BK]
+
+    assert SCORES_FINAL.shape[-1] == TOP_BK
+    top_bk_ids = ids[:TOP_BK_FIN]
+    top_bk_ids_quot = top_bk_ids // (SCORES_FINAL.shape[-1])
+    top_bk_ids_rem = top_bk_ids % (SCORES_FINAL.shape[-1])
+
+    assert len(idx_samples) == SCORES_FINAL.shape[-2]
+    assert len(idx_bk) == SCORES_FINAL.shape[-1]
+    result = tl.full((SCORES_FINAL.shape[-2], SCORES_FINAL.shape[-1]), -1, tl.int64)
+    result[top_bk_ids_quot, top_bk_ids_rem] = top_bk_ids_rem
+
     # ids, _ = tl.split(tl.trans(tl.reshape(ids, 2, TOP_BK), 1, 0))
     
-    tl.store( # TODO check inserting None
-        IDS +\
-            idx_b * stride_ids_b +\
-            idx_bdst[:, None] * stride_ids_bdst +\
-            idx_ensemble_sample_id * stride_topk_ids_sample_n +\
-            idx_bk[None, :] * stride_ids_bk,
-        value=ids,
-        mask=(idx_bk < TOP_BK)[None, :] & mask_bdst[:, None],
+    # TODO NOTE no need to store to ID (cuda_gather done right below)
+    
+    # NOTE using different idx_bk
+    assert pid_bk == 0
+    assert BLOCK_BK == TOP_BK
+    idx_bk_str = pid_bk * TOP_BK + tl.arange(0, TOP_BK) # BLOCK_BK = G * mask_block_k
+    mask_bk_str = idx_bk_str < TOP_BK
+
+    indices = tl.load(
+        INDICES +\
+            idx_b * stride_indices_b +\
+            idx_bdst * stride_indices_bdst +\
+            idx_samples[:, None] * stride_indices_sample_n +\
+            idx_bk_str[None, :] * stride_indices_bk, 
+        mask=(result >= 0), # TODO Q) Block pointer?
         cache_modifier=DEFAULT_CACHE_MODIFIER,
     )
 
-    # TODO : should update all other tensors
+    group_sizes = tl.load(
+        GROUP_SIZES +\
+            idx_b * stride_group_sizes_b +\
+            idx_bdst * stride_group_sizes_bdst +\
+            idx_samples[:, None] * stride_group_size_sample_n +\
+            idx_bk_str[None, :] * stride_group_sizes_bk,
+        mask=(result >= 0),
+        cache_modifier=DEFAULT_CACHE_MODIFIER,
+    )
 
+    scores_final = tl.load(
+        SCORES_FINAL +\
+            idx_b * stride_scores_final_b +\
+            idx_bdst * stride_scores_final_bdst +\
+            idx_samples[:, None] * stride_scores_final_sample_n +\
+            idx_bk_str[None, :] * stride_scores_final_bk,
+        mask=(result >= 0),
+        cache_modifier=DEFAULT_CACHE_MODIFIER,
+    )
+
+    # TODO Q) shape = (SAMPLE_NUM, BK * G) or 1 dim flattened size?
+    assert len(indices) == tl.ceil(TOP_BK * ENSEMBLE_RET_RATIO) # include padding?
+    assert len(group_sizes) == tl.ceil(TOP_BK * ENSEMBLE_RET_RATIO)
+    assert len(scores_final) == tl.ceil(TOP_BK * ENSEMBLE_RET_RATIO)
+
+    # TODO check whether this is okay when ENEMSBLE_RET_RATIO > 1.0
+    assert (TOP_BK * ENSEMBLE_RET_RATIO) <= SCORES_FINAL.shape[-2] * SCORES_FINAL.shape[-1]
+    
+    assert ENSEMBLE_RET_RATIO == 1.0
+    tl.store(
+        INDICES +\
+            idx_b * stride_indices_b +\
+            idx_bdst * stride_indices_bdst +\
+            0 * stride_indices_sample_n +\
+            idx_bk_str * stride_indices_bk,
+        value = indices,
+        mask=mask_bk_str,
+        cache_modifier=DEFAULT_CACHE_MODIFIER,
+    )
+
+    tl.store(
+        GROUP_SIZES +\
+            idx_b * stride_group_sizes_b +\
+            idx_bdst * stride_group_sizes_bdst +\
+            0 * stride_group_size_sample_n +\
+            idx_bk_str * stride_group_sizes_bk,
+        value=group_sizes,
+        mask=mask_bk_str,
+        cache_modifier=DEFAULT_CACHE_MODIFIER,
+    )
+    tl.store(
+        SCORES_FINAL +\
+            idx_b * stride_scores_final_b +\
+            idx_bdst * stride_scores_final_bdst +\
+            0 * stride_scores_final_sample_n +\
+            idx_bk_str * stride_scores_final_bk,
+        value=scores_final,
+        mask=mask_bk_str,
+        cache_modifier=DEFAULT_CACHE_MODIFIER,
+    )
+
+    # TODO modify other parts to consider when ENEMSBLE_RET_RATIO > 1.0 (load much more etc)
 
 
 @triton.jit
@@ -1581,7 +1651,7 @@ def masking_iteration_draft_cuda_argsort(
     PROBS, stride_probs_b, stride_probs_bdst, stride_probs_sample_n, stride_probs_bk,
     IDS, stride_ids_b, stride_ids_bdst, stride_topk_ids_sample_n, stride_ids_bk,
     
-    T_GROUP_SIZES, stride_t_group_size_b, stride_t_group_size_bdst, stride_t_group_size_sample_n,
+    T_GROUP_SIZES, stride_t_group_size_b, stride_t_group_size_bdst, # stride_t_group_size_sample_n,
     
     BDST,
     
@@ -1614,7 +1684,7 @@ def masking_iteration_draft_cuda_argsort(
         T_GROUP_SIZES +\
             idx_b * stride_t_group_size_b +\
             idx_bdst * stride_t_group_size_bdst
-            idx_ensemble_sample_id * stride_t_group_size_sample_n,
+            # idx_ensemble_sample_id * stride_t_group_size_sample_n,
         mask=mask_bdst,
         other=1.0,
         cache_modifier=DEFAULT_CACHE_MODIFIER,
@@ -1665,6 +1735,7 @@ def masking_iteration_draft_cuda_argsort(
         cache_modifier=DEFAULT_CACHE_MODIFIER,
     )
 
+
 @triton.jit
 def masking_iteration_draft_cuda_fused_per_iter(
     Q, 
@@ -1676,9 +1747,8 @@ def masking_iteration_draft_cuda_fused_per_iter(
     K, 
     stride_k_bsz, 
     stride_k_tsrc,
-    stride_k_bh, 
-    stride_k_g, 
-    stride_k_hid,
+    stride_k_head, 
+    stride_k_hid, 
     POS, 
     stride_pos_tdst,
     COS, 
@@ -1745,7 +1815,7 @@ def masking_iteration_draft_cuda_fused_per_iter(
     T_GROUP_SIZE, 
     stride_t_group_size_b, 
     stride_t_group_size_bdst,
-    stride_t_group_size_sample_n,
+    # stride_t_group_size_sample_n,
     INDICES_TDST,
     stride_indices_tdst_t,
     
@@ -1812,9 +1882,11 @@ def masking_iteration_draft_cuda_fused_per_iter(
     ENSEMBLE_ITER_N_FACTOR : tl.constexpr,
     ENSEMBLE_ITER_N_JUMP : tl.constexpr,
     ENSEMBLE_ITER_N_TILL : tl.constexpr,
+    ENSEMBLE_RET_RATIO : tl.constexpr,
 
     LAYER_ID : tl.constexpr,
     idx_ensemble_sample_id : tl.constexpr,
+    ensemble_sample_per_iter_new,
     max_group_size : tl.constexpr,
 
     pid_0=None,
@@ -1850,7 +1922,7 @@ def masking_iteration_draft_cuda_fused_per_iter(
     for i_program in range(n_program):
         masking_iteration_draft_cuda_dup_and_score(
             Q, stride_q_bsz, stride_q_tdst, stride_q_bh, stride_q_g, stride_q_hid,
-            K, stride_k_bsz, stride_k_tsrc, stride_k_bh, stride_k_g, stride_k_hid,
+            K, stride_k_bsz, stride_k_tsrc, stride_k_head, stride_k_hid,
             POS, stride_pos_tdst,
             COS, stride_cos_t, stride_cos_hid,
             SIN, stride_sin_t, stride_sin_hid,
@@ -1892,7 +1964,7 @@ def masking_iteration_draft_cuda_fused_per_iter(
             T_GROUP_SIZE, 
             stride_t_group_size_b, 
             stride_t_group_size_bdst,
-            stride_t_group_size_sample_n,
+            # stride_t_group_size_sample_n,
             INDICES_TDST,
             stride_indices_tdst_t,
             
@@ -1996,7 +2068,7 @@ def masking_iteration_draft_cuda_fused_per_iter(
         T_GROUP_SIZE, 
         stride_t_group_size_b, 
         stride_t_group_size_bdst,
-        stride_t_group_size_sample_n,
+        # stride_t_group_size_sample_n,
         
         MAX_BDST,
         
@@ -2054,12 +2126,13 @@ def masking_iteration_draft_cuda_fused_per_iter(
         T_GROUP_SIZE,
         stride_t_group_size_b, 
         stride_t_group_size_bdst,
-        stride_t_group_size_sample_n,
+        # stride_t_group_size_sample_n,
         
         G, BK, 
         
         indices_bk_len,
-        idx_ensemble_sample_id,
+        ensemble_sample_per_iter_new,
+        ENSEMBLE_RET_RATIO,
         
         pid_0=0,
         pid_1=pid_0,
@@ -2079,93 +2152,24 @@ def masking_iteration_draft_cuda_fused_per_iter(
 
 
 @triton.jit
-def ensemble_make_final_mask_per_iter(
-    Q, 
-    stride_q_bsz, 
-    stride_q_tdst,
-    stride_q_bh, 
-    stride_q_g, 
-    stride_q_hid,
-    K, 
-    stride_k_bsz, 
-    stride_k_tsrc,
-    stride_k_bh, 
-    stride_k_g, 
-    stride_k_hid,
-    POS, 
-    stride_pos_tdst,
-    COS, 
-    stride_cos_t, 
-    stride_cos_hid,
-    SIN, 
-    stride_sin_t, 
-    stride_sin_hid,
-    KEY_ACCESS_LOG, 
-    stride_key_access_log_b, 
-    stride_key_access_log_bdst, 
-    stride_key_access_log_t,
-    KEY_ACCESS_COUNT, 
-    stride_key_access_count_b,
-    stride_key_access_count_bdst, 
-    MAX_ACCESS_COUNT,
-    
+def ensemble_make_final_mask_per_iter(    
     INDICES, 
-    stride_indices_b_ensemble, 
-    stride_indices_bdst_ensemble, 
+    stride_indices_b, 
+    stride_indices_bdst, 
     stride_indices_samples_ensemble,
     stride_indices_bk,
-    KS, 
-    stride_ks_b, 
-    stride_ks_bdst,
+    
     GROUP_SIZE, 
-    stride_group_size_b_ensemble, 
-    stride_group_size_bdst_ensemble, 
+    stride_group_size_b, 
+    stride_group_size_bdst, 
     stride_group_size_samples_ensemble,
     stride_group_size_bk,
     
-    DUPPED_INDICES, 
-    stride_dupped_indices_b_ensemble, 
-    stride_dupped_indices_bdst_ensemble, 
-    stride_dupped_indices_samples_ensemble,
-    stride_dupped_indices_bk,
-    DUPPED_GROUP_SIZE, 
-    stride_dupped_group_size_b_ensemble, 
-    stride_dupped_group_size_bdst_ensemble, 
-    stride_dupped_group_size_samples_ensemble,
-    stride_dupped_group_size_bk,
-    SCORES,
-    stride_scores_b_ensemble,
-    stride_scores_bdst_ensemble,
-    stride_scores_samples_ensemble,
-    stride_scores_bk,
     SCORES_FINAL,
-    stride_scores_final_b_ensemble,
-    stride_scores_final_bdst_ensemble,
+    stride_scores_final_b,
+    stride_scores_final_bdst,
     stride_scores_final_samples_ensemble,
     stride_scores_final_bk,
-    SCORES_CACHED: tl.constexpr,
-    PROBS,
-    stride_probs_b_ensemble,
-    stride_probs_bdst_ensemble,
-    stride_probs_samples_ensemble,
-    stride_probs_bk,
-    TOPK_IDS, 
-    stride_topk_ids_b_ensemble, 
-    stride_topk_ids_bdst_ensemble, 
-    stride_topk_ids_samples_ensemble,
-    stride_topk_ids_bk,
-    
-    T_GROUP_SIZE, 
-    stride_t_group_size_b, 
-    stride_t_group_size_bdst,
-    stride_t_group_size_sample_n,
-    INDICES_TDST,
-    stride_indices_tdst_t,
-    
-    mask_k,
-    
-    sink_token_size,
-    sliding_window_size,
     
     BH: tl.constexpr,
     G: tl.constexpr, 
@@ -2204,30 +2208,11 @@ def ensemble_make_final_mask_per_iter(
     probs_bk_len: tl.constexpr,
 
     # ensemble
-    ENSEMBLE: tl.constexpr,
-    ENSEMBLE_MODEL_SETTING : tl.constexpr,
-    ENSEMBLE_METHOD : tl.constexpr,
     ENSEMBLE_METHOD_FINAL : tl.constexpr,
-    ENSEMBLE_METHOD_FINAL_INTER_THRESH : tl.constexpr,
-    ENSEMBLE_METHOD_FINAL_BDD_MASK_K : int,
-    ENSEMBLE_TIMEDIM_WD : int,
-    ENSEMBLE_PER_LAYER_N : tl.constexpr,
 
-    ENSEMBLE_PER_ATTN_ITER: tl.constexpr,
-    MODEL_I: tl.constexpr,
-    ENSEMBLE_PARTICULAR_LAYER : int,
-    ENSEMBLE_LAYER_TILL : int,
+    ensemble_sample_per_iter_new,
+    ENSEMBLE_RET_RATIO,
 
-    ENSEMBLE_RANDOMNESS : tl.constexpr,
-    ENSEMBLE_ITER_START_STEP : int,
-    ENSEMBLE_ITER_N_MODE : tl.constexpr,
-    ENSEMBLE_ITER_N_START : int,
-    ENSEMBLE_ITER_N_FACTOR : int,
-    ENSEMBLE_ITER_N_JUMP : int,
-    ENSEMBLE_ITER_N_TILL : int,
-
-    LAYER_ID : int,
-    # idx_ensemble_sample_id : tl.constexpr, # NOTE do not send
     pid_0=None,
     pid_1=None,
 ):
@@ -2248,55 +2233,46 @@ def ensemble_make_final_mask_per_iter(
     KS  0 [B, cdiv_python(TDST, block_size_q)]
     """
 
-    ensemble_total_samples_curr = INDICES.shape[-2]
-    assert ensemble_total_samples_curr == GROUP_SIZE.shape[-2]
-    assert ensemble_total_samples_curr == SCORES_FINAL.shape[-2]
-    assert ensemble_total_samples_curr == PROBS.shape[-2]
-    assert ensemble_total_samples_curr == TOPK_IDS.shape[-2]
-    assert ensemble_total_samples_curr == SCORES.shape[-2]
-    assert ensemble_total_samples_curr == DUPPED_INDICES.shape[-2]
-    assert ensemble_total_samples_curr == DUPPED_GROUP_SIZE.shape[-2]
+    ensemble_samples_padd_or_not = INDICES.shape[-2]
+    assert ensemble_samples_padd_or_not == GROUP_SIZE.shape[-2]
+    assert ensemble_samples_padd_or_not == SCORES_FINAL.shape[-2]
     
     # B, BDST, SAMPLE_N, MASK_BK
     if ENSEMBLE_METHOD_FINAL == "voting":
-        # ensemble_method_final : voting
-        pass
+        raise Exception(f'ENSEMBLE_METHOD_FINAL : {ENSEMBLE_METHOD_FINAL}')
     if ENSEMBLE_METHOD_FINAL == "scoring":
         assert SAMPLE_METHOD == "first"
-        # ensemble_method_final : scoring
-        # topk indices updated based on the score value
-        assert PROBS.shape == SCORES_FINAL.shape
 
-        # same grid with master (BDST, B)
-        ensemble_masking_iteration_draft_cuda_argsort(
+        ensemble_masking_iteration_cuda_argsort_gather(
+            INDICES, 
+            stride_indices_b, 
+            stride_indices_bdst, 
+            stride_indices_samples_ensemble,
+            stride_indices_bk,
+            GROUP_SIZE, 
+            stride_group_size_b, 
+            stride_group_size_bdst, 
+            stride_group_size_samples_ensemble,
+            stride_group_size_bk,
+
             SCORES_FINAL,
-            stride_scores_final_b_ensemble,
-            stride_scores_final_bdst_ensemble,
+            stride_scores_final_b,
+            stride_scores_final_bdst,
             stride_scores_final_samples_ensemble,
             stride_scores_final_bk,
             
-            TOPK_IDS,
-            stride_topk_ids_b_ensemble, 
-            stride_topk_ids_bdst_ensemble, 
-            stride_topk_ids_samples_ensemble,
-            stride_topk_ids_bk,
-
-            T_GROUP_SIZE, 
-            stride_t_group_size_b, 
-            stride_t_group_size_bdst,
-            stride_t_group_size_sample_n,
-            
-            MAX_BDST,
-            
-            probs_bk_len,
             BK * G,
             1,
-            
-            pid_0=pid_0,
-            pid_1=pid_1,
+            BLOCK_BK,
+
+            ensemble_sample_per_iter_new,
+            ENSEMBLE_RET_RATIO,
+
+            pid_0=0,
+            pid_1=pid_0,
+            pid_2=pid_1
         )
-
-
+        
 
 @triton.jit
 def ensemble_make_samples_per_iter(
@@ -2309,8 +2285,7 @@ def ensemble_make_samples_per_iter(
     K, 
     stride_k_bsz, 
     stride_k_tsrc,
-    stride_k_bh, 
-    stride_k_g, 
+    stride_k_head, 
     stride_k_hid,
     POS, 
     stride_pos_tdst,
@@ -2378,7 +2353,7 @@ def ensemble_make_samples_per_iter(
     T_GROUP_SIZE, 
     stride_t_group_size_b, 
     stride_t_group_size_bdst,
-    stride_t_group_size_samples_ensemble,
+    # stride_t_group_size_samples_ensemble,
     INDICES_TDST,
     stride_indices_tdst_t,
     
@@ -2445,14 +2420,16 @@ def ensemble_make_samples_per_iter(
     ENSEMBLE_ITER_N_FACTOR : int,
     ENSEMBLE_ITER_N_JUMP : int,
     ENSEMBLE_ITER_N_TILL : int,
+    ENSEMBLE_RET_RATIO,
 
     LAYER_ID : int,
+    ensemble_sample_per_iter_new,
     max_group_size : tl.constexpr,
 ):
     idx_ensemble_sample_id = tl.program_id(0)
 
     # NOTE max_group_size is updated per samples
-    max_group_size_updated = masking_iteration_draft_cuda_fused_per_iter(
+    masking_iteration_draft_cuda_fused_per_iter(
         Q, 
         stride_q_bsz, 
         stride_q_tdst,
@@ -2462,9 +2439,8 @@ def ensemble_make_samples_per_iter(
         K, 
         stride_k_bsz, 
         stride_k_tsrc,
-        stride_k_bh, 
-        stride_k_g, 
-        stride_k_hid,
+        stride_k_head, 
+        stride_k_hid, 
         POS, 
         stride_pos_tdst,
         COS, 
@@ -2531,7 +2507,7 @@ def ensemble_make_samples_per_iter(
         T_GROUP_SIZE, 
         stride_t_group_size_b, 
         stride_t_group_size_bdst,
-        stride_t_group_size_samples_ensemble,
+        # stride_t_group_size_samples_ensemble,
         INDICES_TDST,
         stride_indices_tdst_t,
         
@@ -2598,21 +2574,12 @@ def ensemble_make_samples_per_iter(
         ENSEMBLE_ITER_N_FACTOR,
         ENSEMBLE_ITER_N_JUMP,
         ENSEMBLE_ITER_N_TILL,
+        ENSEMBLE_RET_RATIO,
 
         LAYER_ID,
         idx_ensemble_sample_id,
+        ensemble_sample_per_iter_new,
         max_group_size,
-    )
-
-
-    # store 
-    tl.store(
-        T_GROUP_SIZE +\
-            idx_b * stride_t_group_size_b +\
-            idx_bdst * stride_t_group_size_bdst +\
-            idx_ensemble_sample_id * stride_t_group_size_sample_n,
-        mask = #
-        value = max_group_size_updated
     )
 
 
@@ -2842,6 +2809,7 @@ def masking_iteration_draft_cuda_fused(
     ENSEMBLE_ITER_N_FACTOR : int,
     ENSEMBLE_ITER_N_JUMP : int,
     ENSEMBLE_ITER_N_TILL : int = None,
+    ENSEMBLE_RET_RATIO : float = 1.0,
 
     LAYER_ID : int = 0,
 ):
@@ -2906,23 +2874,10 @@ def masking_iteration_draft_cuda_fused(
         
         idx_iteration = 0
 
-        while max_group_size > 1: # per iteration operation
+        while max_group_size > 1: # per iteration operation # TODO should we diverse T_GROUP_SIZE too?
             # ensemble per iteration
             enesmble_started_per_iter = False
-            """
-            - INDICES  10553505638 [32, 1024, 256] = [B, cdiv_python(TDST, block_size_q), G * mask_block_k]
-            GROUP_SIZES  -252174336 [32, 1024, 256] = [B, cdiv_python(TDST, block_size_q), G * mask_block_k]
-            - SCORES_FINAL  38797312.0 [32, 1024, 256] = [B, cdiv_python(TDST, block_size_q), G * mask_block_k]
-            - PROBS  -3424256.0 [32, 1024, 512] = [B, BDST, G * mask_block_k * 2]
-            - IDS  259179218862864 [32, 1024, 256] = [B, BDST, G * mask_block_k]
-            - SCORES  -127926272.0 [32, 1024, 512] = [B, BDST, G * mask_block_k * 2]
-            - DUPPED_INDICES  129907109728630 [32, 1024, 512] = [B, BDST, G * mask_block_k * 2]
-            * DUPPED_GROUP_SIZED  478408894197341 [32, 1024, 512] = [B, BDST, G * mask_block_k * 2] TODO heuristic?
-            T_GROUP_SIZES  -1007232.0 [32, 1024] = [B, BDST] TODO heuristic?
 
-            IDS_TDST  0 [32768] <- idx_tdst = idx_tdst % TDST
-            KS  0 [B, cdiv_python(TDST, block_size_q)]
-            """
             if ENSEMBLE == True and ENSEMBLE_MODEL_SETTING == "random_per_iter":
                 assert SAMPLE_METHOD == 'first'
                 assert ENSEMBLE_ITER_N_MODE in ["exponent", "linear", "linear_exponent" ,"constant"]
@@ -3057,13 +3012,13 @@ def masking_iteration_draft_cuda_fused(
                         DUPPED_GROUP_SIZED.shape[-1]
                     )
 
-                    T_GROUP_SIZE = T_GROUP_SIZE.unsqueeze(2)
-                    T_GROUP_SIZE = T_GROUP_SIZE.expand(-1, -1, ensemble_sample_per_iter_new)
-                    T_GROUP_SIZE = T_GROUP_SIZE.reshape(
-                        T_GROUP_SIZE.shape[0],
-                        T_GROUP_SIZE.shape[1],
-                        ensemble_sample_per_iter_new,
-                    )
+                    # T_GROUP_SIZE = T_GROUP_SIZE.unsqueeze(2)
+                    # T_GROUP_SIZE = T_GROUP_SIZE.expand(-1, -1, ensemble_sample_per_iter_new)
+                    # T_GROUP_SIZE = T_GROUP_SIZE.reshape(
+                    #     T_GROUP_SIZE.shape[0],
+                    #     T_GROUP_SIZE.shape[1],
+                    #     ensemble_sample_per_iter_new,
+                    # )
                 elif enesmble_started_per_iter and ensemble_started_at_least_once:
                     assert INDICES.ndim == 4
                     assert GROUP_SIZE.ndim == 4
@@ -3073,7 +3028,7 @@ def masking_iteration_draft_cuda_fused(
                     assert SCORES.ndim == 4
                     assert DUPPED_INDICES.ndim == 4
                     assert DUPPED_GROUP_SIZED.ndim == 4
-                    assert T_GROUP_SIZE.ndim == 3
+                    assert T_GROUP_SIZE.ndim == 2 # NOTE this should not be modified
 
                     ensemble_prev_sample_per_iter = INDICES.shape[-2]
                     if ensemble_prev_sample_per_iter < ensemble_sample_per_iter_new:
@@ -3088,7 +3043,7 @@ def masking_iteration_draft_cuda_fused(
                         SCORES = F.pad(SCORES, (0, 0, pad_size, 0))
                         DUPPED_INDICES = F.pad(DUPPED_INDICES, (0, 0, pad_size, 0))
                         DUPPED_GROUP_SIZED = F.pad(DUPPED_GROUP_SIZED, (0, 0, pad_size, 0))
-                        T_GROUP_SIZE = F.pad(T_GROUP_SIZE, (0, 0, pad_size, 0))
+                        # T_GROUP_SIZE = F.pad(T_GROUP_SIZE, (0, 0, pad_size, 0))
                         
 
                 grid = (ensemble_sample_per_iter_new, )
@@ -3135,7 +3090,7 @@ def masking_iteration_draft_cuda_fused(
                     PROBS, *(PROBS.stride() if enesmble_started_per_iter else (stride_probs_b, stride_probs_bdst, 0, stride_probs_bk)),
                     TOPK_IDS, *(TOPK_IDS.stride() if enesmble_started_per_iter else (stride_topk_ids_b, stride_topk_ids_bdst, 0, stride_topk_ids_bk)),
                     
-                    T_GROUP_SIZE, *(T_GROUP_SIZE.stride() if enesmble_started_per_iter else (stride_t_group_size_b, stride_t_group_size_bdst, 0)),
+                    T_GROUP_SIZE, *T_GROUP_SIZE.stride(),
                     INDICES_TDST,
                     stride_indices_tdst_t,
                     
@@ -3203,8 +3158,10 @@ def masking_iteration_draft_cuda_fused(
                     ENSEMBLE_ITER_N_FACTOR,
                     ENSEMBLE_ITER_N_JUMP,
                     ENSEMBLE_ITER_N_TILL,
+                    ENSEMBLE_RET_RATIO,
 
                     LAYER_ID,
+                    ensemble_sample_per_iter_new,
                     max_group_size
                 )
 
@@ -3212,57 +3169,11 @@ def masking_iteration_draft_cuda_fused(
                 # TODO samples' hip should be all computed at this moment
 
                 ensemble_make_final_mask_per_iter(
-                    Q, 
-                    stride_q_bsz, 
-                    stride_q_tdst,
-                    stride_q_bh, 
-                    stride_q_g, 
-                    stride_q_hid,
-                    K, 
-                    stride_k_bsz, 
-                    stride_k_tsrc,
-                    stride_k_bh, 
-                    stride_k_g, 
-                    stride_k_hid,
-                    POS, 
-                    stride_pos_tdst,
-                    COS, 
-                    stride_cos_t, 
-                    stride_cos_hid,
-                    SIN, 
-                    stride_sin_t, 
-                    stride_sin_hid,
-                    KEY_ACCESS_LOG, 
-                    stride_key_access_log_b, 
-                    stride_key_access_log_bdst, 
-                    stride_key_access_log_t,
-                    KEY_ACCESS_COUNT, 
-                    stride_key_access_count_b,
-                    stride_key_access_count_bdst, 
-                    MAX_ACCESS_COUNT,
-                    
                     INDICES, *(INDICES.strid() if enesmble_started_per_iter else (stride_indices_b, stride_indices_bdst, 0, stride_indices_bk)),
-                    KS, 
-                    stride_ks_b, 
-                    stride_ks_bdst,
+                    
                     GROUP_SIZE, *(GROUP_SIZE.stride() if enesmble_started_per_iter else (stride_group_size_b, stride_group_size_bdst, 0, stride_group_size_bk)),
                     
-                    DUPPED_INDICES, *(DUPPED_INDICES.stride() if enesmble_started_per_iter else (stride_dupped_indices_b, stride_dupped_indices_bdst, 0, stride_dupped_indices_bk)),
-                    DUPPED_GROUP_SIZE, *(DUPPED_GROUP_SIZE.stride() if enesmble_started_per_iter else (stride_dupped_group_size_b, stride_dupped_group_size_bdst, 0, stride_dupped_group_size_bk)),
-                    SCORES, *(SCORES.stride() if enesmble_started_per_iter else (stride_scores_b, stride_scores_bdst, 0, stride_scores_bk)),
                     SCORES_FINAL, *(SCORES_FINAL.stride() if enesmble_started_per_iter else (stride_scores_final_b, stride_scores_final_bdst, 0, stride_scores_final_bk)),
-                    SCORES_CACHED,
-                    PROBS, *(PROBS.stride() if enesmble_started_per_iter else (stride_probs_b, stride_probs_bdst, 0, stride_probs_bk)),
-                    TOPK_IDS, *(TOPK_IDS.stride() if enesmble_started_per_iter else (stride_topk_ids_b, stride_topk_ids_bdst, 0, stride_topk_ids_bk)),
-                    
-                    T_GROUP_SIZE, *(T_GROUP_SIZE.stride() if enesmble_started_per_iter else (stride_t_group_size_b, stride_t_group_size_bdst, 0)),
-                    INDICES_TDST,
-                    stride_indices_tdst_t,
-                    
-                    mask_k,
-                    
-                    sink_token_size,
-                    sliding_window_size,
                     
                     BH,
                     G, 
@@ -3301,29 +3212,10 @@ def masking_iteration_draft_cuda_fused(
                     probs_bk_len,
 
                     # ensemble
-                    ENSEMBLE,
-                    ENSEMBLE_MODEL_SETTING,
-                    ENSEMBLE_METHOD,
                     ENSEMBLE_METHOD_FINAL,
-                    ENSEMBLE_METHOD_FINAL_INTER_THRESH,
-                    ENSEMBLE_METHOD_FINAL_BDD_MASK_K,
-                    ENSEMBLE_TIMEDIM_WD,
-                    ENSEMBLE_PER_LAYER_N,
-
-                    ENSEMBLE_PER_ATTN_ITER,
-                    MODEL_I,
-                    ENSEMBLE_PARTICULAR_LAYER,
-                    ENSEMBLE_LAYER_TILL,
-
-                    ENSEMBLE_RANDOMNESS,
-                    ENSEMBLE_ITER_START_STEP,
-                    ENSEMBLE_ITER_N_MODE,
-                    ENSEMBLE_ITER_N_START,
-                    ENSEMBLE_ITER_N_FACTOR,
-                    ENSEMBLE_ITER_N_JUMP,
-                    ENSEMBLE_ITER_N_TILL,
-
-                    LAYER_ID,
+                    
+                    ensemble_sample_per_iter_new,
+                    ENSEMBLE_RET_RATIO,
 
                     pid_0=pid_0,
                     pid_1=pid_1
@@ -3338,7 +3230,7 @@ def masking_iteration_draft_cuda_fused(
                 assert DUPPED_INDICES.ndim == 3
                 assert T_GROUP_SIZE.ndim == 2
                 
-                max_group_size = masking_iteration_draft_cuda_fused_per_iter(
+                masking_iteration_draft_cuda_fused_per_iter(
                     Q, 
                     stride_q_bsz, 
                     stride_q_tdst,
@@ -3348,9 +3240,8 @@ def masking_iteration_draft_cuda_fused(
                     K, 
                     stride_k_bsz, 
                     stride_k_tsrc,
-                    stride_k_bh, 
-                    stride_k_g, 
-                    stride_k_hid,
+                    stride_k_head, 
+                    stride_k_hid, 
                     POS, 
                     stride_pos_tdst,
                     COS, 
@@ -3417,7 +3308,6 @@ def masking_iteration_draft_cuda_fused(
                     T_GROUP_SIZE, 
                     stride_t_group_size_b, 
                     stride_t_group_size_bdst,
-                    0,
 
                     INDICES_TDST,
                     stride_indices_tdst_t,
@@ -3495,31 +3385,34 @@ def masking_iteration_draft_cuda_fused(
                 )
                 tl.debug_barrier()
 
-            idx_iteration += 1
-            """
-            - INDICES [32, 1024, 256] = [B, cdiv_python(TDST, block_size_q), sample_n, G * mask_block_k]
-            GROUP_SIZES [32, 1024, 256] = [B, cdiv_python(TDST, block_size_q), sample_n, G * mask_block_k]
-            - SCORES_FINAL [32, 1024, 256] = [B, cdiv_python(TDST, block_size_q), sample_n, G * mask_block_k]
-            - PROBS [32, 1024, 512] = [B, BDST, sample_n, G * mask_block_k * 2]
-            - IDS [32, 1024, 256] = [B, BDST, sample_n, G * mask_block_k]
-            - SCORES [32, 1024, 512] = [B, BDST, sample_n, G * mask_block_k * 2]
-            - DUPPED_INDICES [32, 1024, 512] = [B, BDST, sample_n, G * mask_block_k * 2]
-            * DUPPED_GROUP_SIZED [32, 1024, 512] = [B, BDST, sample_n, G * mask_block_k * 2]
-            T_GROUP_SIZES [32, 1024] = [B, BDST]
+            if BRANCH_METHOD == 'random':
+                max_group_size *= 0.7
+            else:
+                max_group_size *= 0.5
 
-            IDS_TDST  0 [32768] <- idx_tdst = idx_tdst % TDST
-            KS  0 [B, cdiv_python(TDST, block_size_q)]
-            """
-        if not ensemble_started_at_least_once:
-            tl.store(
-                T_GROUP_SIZE +\
-                    idx_b * stride_t_group_size_b +\
-                    idx_bdst * stride_t_group_size_bdst,
-                value=max_group_size
-            )
-        else:
-            # TODO must update for ensemble
+            idx_iteration += 1
+            
+        tl.store(
+            T_GROUP_SIZE +\
+                idx_b * stride_t_group_size_b +\
+                idx_bdst * stride_t_group_size_bdst,
+            value=max_group_size
+        )
         tl.debug_barrier()
+        """
+        - INDICES [32, 1024, 256] = [B, cdiv_python(TDST, block_size_q), sample_n, G * mask_block_k]
+        GROUP_SIZES [32, 1024, 256] = [B, cdiv_python(TDST, block_size_q), sample_n, G * mask_block_k]
+        - SCORES_FINAL [32, 1024, 256] = [B, cdiv_python(TDST, block_size_q), sample_n, G * mask_block_k]
+        - PROBS [32, 1024, 512] = [B, BDST, sample_n, G * mask_block_k * 2]
+        - IDS [32, 1024, 256] = [B, BDST, sample_n, G * mask_block_k]
+        - SCORES [32, 1024, 512] = [B, BDST, sample_n, G * mask_block_k * 2]
+        - DUPPED_INDICES [32, 1024, 512] = [B, BDST, sample_n, G * mask_block_k * 2]
+        * DUPPED_GROUP_SIZED [32, 1024, 512] = [B, BDST, sample_n, G * mask_block_k * 2]
+        T_GROUP_SIZES [32, 1024] = [B, BDST]
+
+        IDS_TDST  0 [32768] <- idx_tdst = idx_tdst % TDST
+        KS  0 [B, cdiv_python(TDST, block_size_q)]
+        """
 
 # @triton.autotune(
 #     configs=[
@@ -4001,6 +3894,7 @@ def masking_iteration_draft(
     ensemble_iter_n_factor : int = 2,
     ensemble_iter_n_jump : int = 1,
     ensemble_iter_n_till : int = 32000,
+    ensemble_ret_ratio : float = 1.0,
 
     layer_id : int = 0,
 ):
@@ -4438,6 +4332,7 @@ def masking_iteration_draft(
             ensemble_iter_n_factor,
             ensemble_iter_n_jump,
             ensemble_iter_n_till,
+            ensemble_ret_ratio,
 
             layer_id,
             
@@ -5376,6 +5271,7 @@ def masking_step_loop(
     ensemble_iter_n_factor : int = 2,
     ensemble_iter_n_jump : int = 1,
     ensemble_iter_n_till : int = 32000,
+    ensemble_ret_ratio : float = 1.0,
 
     layer_id : int = 0,
 ):
@@ -5463,6 +5359,7 @@ def masking_step_loop(
                             ensemble_iter_n_factor = ensemble_iter_n_factor,
                             ensemble_iter_n_jump = ensemble_iter_n_jump,
                             ensemble_iter_n_till = ensemble_iter_n_till,
+                            ensemble_ret_ratio = ensemble_ret_ratio,
 
                             layer_id = layer_id,
                         )
@@ -6093,6 +5990,7 @@ def hip_masking(
     ensemble_iter_n_factor : int = 2,
     ensemble_iter_n_jump : int = 1,
     ensemble_iter_n_till : int = 32000,
+    ensemble_ret_ratio : float = 1.0,
 
     layer_id : int = 0,
 ):
@@ -6200,6 +6098,7 @@ def hip_masking(
             ensemble_iter_n_factor = ensemble_iter_n_factor,
             ensemble_iter_n_jump = ensemble_iter_n_jump,
             ensemble_iter_n_till = ensemble_iter_n_till,
+            ensemble_ret_ratio=ensemble_ret_ratio,
 
             layer_id = layer_id,
         )
@@ -6647,6 +6546,7 @@ def hip_attention(
     ensemble_iter_n_factor : int = 2,
     ensemble_iter_n_jump : int = 1,
     ensemble_iter_n_till : int = 32000,
+    ensemble_ret_ratio : float = 1.0,
 
     layer_id : int = 0,
 ):
@@ -6726,6 +6626,7 @@ def hip_attention(
         ensemble_iter_n_factor = ensemble_iter_n_factor,
         ensemble_iter_n_jump = ensemble_iter_n_jump,
         ensemble_iter_n_till = ensemble_iter_n_till,
+        ensemble_ret_ratio=ensemble_ret_ratio,
 
         layer_id = layer_id,
     )
