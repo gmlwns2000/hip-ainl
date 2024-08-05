@@ -781,7 +781,7 @@ def masking_iteration_draft_cuda_dup_and_score(
     t_group_size = tl.load(
         T_GROUP_SIZE +\
             idx_b * stride_t_group_size_b +\
-            idx_bdst * stride_t_group_size_bdst
+            idx_bdst * stride_t_group_size_bdst,
             # idx_ensemble_sample_id * stride_t_group_size_sample_n,
         cache_modifier=DEFAULT_CACHE_MODIFIER,
     )
@@ -1223,7 +1223,7 @@ def masking_iteration_draft_cuda_gather(
     t_group_size = tl.load(
         T_GROUP_SIZE +\
             idx_b * stride_t_group_size_b +\
-            idx_bdst * stride_t_group_size_bdst # +\
+            idx_bdst * stride_t_group_size_bdst, # +\
             # idx_ensemble_sample_id * stride_t_group_size_sample_n,
     )
     if t_group_size <= 1.0:
@@ -1683,7 +1683,7 @@ def masking_iteration_draft_cuda_argsort(
     t_group_size = tl.load( # TODO this 
         T_GROUP_SIZES +\
             idx_b * stride_t_group_size_b +\
-            idx_bdst * stride_t_group_size_bdst
+            idx_bdst * stride_t_group_size_bdst,
             # idx_ensemble_sample_id * stride_t_group_size_sample_n,
         mask=mask_bdst,
         other=1.0,

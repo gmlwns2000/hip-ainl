@@ -600,7 +600,7 @@ class LlamaCustomAttention(LlamaAttention):
         if self.layer_idx in self.tree_high_k_layers:
             mask_k = self.tree_high_k_layers[self.layer_idx] * mask_k
 
-        attn_output, cur_cumsum, attn_sparsity_loss = custom_attention(
+        attn_output, cur_cumsum, attn_sparsity_loss, sparsity = custom_attention(
             query_states=query_states, 
             key_states=key_states, 
             value_states=value_states,
@@ -643,7 +643,34 @@ class LlamaCustomAttention(LlamaAttention):
             
             # Hyper attention states
             hyper_attention=self.hyper_attention,
+
+            # Ensemble
+            ensemble = self.ensemble,
+            ensemble_model_setting = self.ensemble_model_setting,
+            ensemble_method = self.ensemble_method,
+            ensemble_method_final = self.ensemble_method_final,
+            ensemble_method_final_inter_thresh = self.ensemble_method_final_inter_thresh,
+            ensemble_method_final_bdd_mask_k = self.ensemble_method_final_bdd_mask_k,
+            ensemble_timedim_wd= self.ensemble_timedim_wd,
+            ensemble_per_layer_n = self.ensemble_per_layer_n,
+            ensemble_per_attn_iter = self.ensemble_per_attn_iter,
+            ensemble_model_n = self.ensemble_model_n,
+            ensemble_particular_layer = self.ensemble_particular_layer,
+            ensemble_layer_till = self.ensemble_layer_till,
+            ensemble_randomness= self.ensemble_randomness,
+            ensemble_iter_start_step = self.ensemble_iter_start_step,
+            ensemble_iter_n_mode = self.ensemble_iter_n_mode,
+            ensemble_iter_n_start = self.ensemble_iter_n_start,
+            ensemble_iter_n_factor = self.ensemble_iter_n_factor,
+            ensemble_iter_n_jump = self.ensemble_iter_n_jump,
+            ensemble_iter_n_till = self.ensemble_iter_n_till,
+            ensemble_ret_ratio = self.ensemble_ret_ratio,
+
+            layer_id = self.layer_idx,
+
         )
+
+        self.sparsity_per_layer = sparsity
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
             raise ValueError(
