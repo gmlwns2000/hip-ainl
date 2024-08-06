@@ -2812,7 +2812,7 @@ def masking_iteration_draft_cuda_fused(
     ENSEMBLE_RANDOMNESS : tl.constexpr,
     ENSEMBLE_ITER_START_STEP : int,
     ENSEMBLE_ITER_N_MODE : tl.constexpr,
-    ENSEMBLE_ITER_N_START : int,
+    ENSEMBLE_ITER_N_START,
     ENSEMBLE_ITER_N_FACTOR : int,
     ENSEMBLE_ITER_N_JUMP : int,
     ENSEMBLE_ITER_N_TILL,
