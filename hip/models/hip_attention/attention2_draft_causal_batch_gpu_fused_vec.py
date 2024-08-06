@@ -2812,11 +2812,11 @@ def masking_iteration_draft_cuda_fused(
     ENSEMBLE_RANDOMNESS : tl.constexpr,
     ENSEMBLE_ITER_START_STEP : int,
     ENSEMBLE_ITER_N_MODE : tl.constexpr,
-    ENSEMBLE_ITER_N_START,
-    ENSEMBLE_ITER_N_FACTOR : int,
-    ENSEMBLE_ITER_N_JUMP : int,
-    ENSEMBLE_ITER_N_TILL,
-    ENSEMBLE_RET_RATIO,
+    ENSEMBLE_ITER_N_START: tl.constexpr,
+    ENSEMBLE_ITER_N_FACTOR : tl.constexpr,
+    ENSEMBLE_ITER_N_JUMP : tl.constexpr,
+    ENSEMBLE_ITER_N_TILL : tl.constexpr,
+    ENSEMBLE_RET_RATIO : tl.constexpr,
 
     LAYER_ID,
 ):
@@ -2880,153 +2880,150 @@ def masking_iteration_draft_cuda_fused(
         ).to(tl.float32)
         
         idx_iteration = 0
+        ensemble_step = 0
 
         while max_group_size > 1: # per iteration operation # TODO should we diverse T_GROUP_SIZE too?
             # ensemble per iteration
             enesmble_started_per_iter = False
+            ensemble_sample_per_iter_new = 1
+            # tl.static_print("START ", ensemble_sample_per_iter_new)
+            # tl.static_print("START ", 1)
 
             if ENSEMBLE == True and ENSEMBLE_MODEL_SETTING == "random_per_iter":
                 assert SAMPLE_METHOD == 'first'
-                assert ENSEMBLE_ITER_N_MODE in ["exponent", "linear", "linear_exponent" ,"constant"]
-                # NOTE assert ENSEMBLE_ITER_N_JUMP <= N_ITERATION
+                assert ENSEMBLE_ITER_N_MODE in ["inc_exp", "inc_linear", "inc_linear_exp" ,"constant", "dec_exp", "dec_linear", "dec_linear_exp"]
+                # NOTE assert ENSEMBLE_ITER_N_JUMP <= N_ITERATION                  
 
-                if idx_iteration == ENSEMBLE_ITER_START_STEP:
-                    enesmble_started_per_iter = True
-                    ensemble_started_at_least_once = True
+                if (idx_iteration >= ENSEMBLE_ITER_START_STEP) and (idx_iteration <= ENSEMBLE_ITER_N_TILL):
+                    if (idx_iteration - ENSEMBLE_ITER_START_STEP) % ENSEMBLE_ITER_N_JUMP == 0:
+                        enesmble_started_per_iter = True
+                        ensemble_step += 1
+                        # TODO add when idx_iteration is in the middle or at the end
+                        # ensemble_sample_per_iter_old = ensemble_sample_per_iter_new
 
-                    # ensemble_sample_per_iter_old = 1 # TODO : differ for idx_iteration == 0?
-                    ensemble_sample_per_iter_new = ENSEMBLE_ITER_N_START
-                    # ensemble_total_samples_curr = ENSEMBLE_ITER_N_START                    
-
-                elif (idx_iteration > ENSEMBLE_ITER_START_STEP) and (idx_iteration <= ENSEMBLE_ITER_N_TILL) and ((idx_iteration - ENSEMBLE_ITER_START_STEP) % ENSEMBLE_ITER_N_JUMP == 0):
-                    enesmble_started_per_iter = True
-                    # TODO add when idx_iteration is in the middle or at the end
-                    # ensemble_sample_per_iter_old = ensemble_sample_per_iter_new
-
-                    if not ensemble_started_at_least_once:
-                        ensemble_sample_per_iter_new = ENSEMBLE_ITER_N_START
-                        ensemble_started_at_least_once = True
-                    else:
-                        if ENSEMBLE_ITER_N_MODE == "constant":
-                            # NOTE ensemble_sample_per_iter_new should be already defined
-                            pass
+                        if ensemble_step == 1:
+                            ensemble_sample_per_iter_new = ENSEMBLE_ITER_N_START
                         else:
-                            ensemble_step = (idx_iteration - ENSEMBLE_ITER_START_STEP) // ENSEMBLE_ITER_N_JUMP  
-                            if ENSEMBLE_ITER_N_MODE == "exponent":
-                                ensemble_sample_per_iter_new = max(round(ensemble_sample_per_iter_new * (ENSEMBLE_ITER_N_FACTOR ** ensemble_step)), 1)
-                            elif ENSEMBLE_ITER_N_MODE == "linear":
-                                ensemble_sample_per_iter_new = max(round(ensemble_sample_per_iter_new + (ENSEMBLE_ITER_N_FACTOR * ensemble_step)), 1)
-                            elif ENSEMBLE_ITER_N_MODE ==  "linear_exponent":
-                                ensemble_sample_per_iter_new = max(round(ensemble_sample_per_iter_new + (ENSEMBLE_ITER_N_FACTOR ** ensemble_step)), 1)
+                            if ENSEMBLE_ITER_N_MODE == "constant":
+                                ensemble_sample_per_iter_new = ENSEMBLE_ITER_N_START
+
+                            # TODO check whether ensemble_sample_per_iter_ne contains prev iteration's value (seems to work tho)
+                            elif ENSEMBLE_ITER_N_MODE == "inc_exp":
+                                ensemble_sample_per_iter_new = max((ENSEMBLE_ITER_N_START * (ENSEMBLE_ITER_N_FACTOR ** (ensemble_step - 1))), 1)
+                            elif ENSEMBLE_ITER_N_MODE == "inc_linear":
+                                ensemble_sample_per_iter_new = max((ENSEMBLE_ITER_N_START + (ENSEMBLE_ITER_N_FACTOR * (ensemble_step - 1))), 1)
+                            elif ENSEMBLE_ITER_N_MODE ==  "inc_linear_exp":
+                                ensemble_sample_per_iter_new = max((ENSEMBLE_ITER_N_START + (ENSEMBLE_ITER_N_FACTOR ** (ensemble_step - 1))), 1)
                             # ensemble_total_samples_curr = ensemble_total_samples_curr * ensemble_sample_per_iter_new
+                            elif ENSEMBLE_ITER_N_MODE == "dec_exp":
+                                ensemble_sample_per_iter_new = max(ENSEMBLE_ITER_N_START // (ENSEMBLE_ITER_N_FACTOR ** (ensemble_step - 1)) , 1)
+                            elif ENSEMBLE_ITER_N_MODE == "dec_linear":
+                                ensemble_sample_per_iter_new = max((ENSEMBLE_ITER_N_START - (ENSEMBLE_ITER_N_FACTOR * (ensemble_step - 1))), 1)
+                            elif ENSEMBLE_ITER_N_MODE == "dec_linear_exp":
+                                ensemble_sample_per_iter_new = max(ENSEMBLE_ITER_N_START - (ENSEMBLE_ITER_N_FACTOR ** (ensemble_step - 1)), 1)
+                
+                idx_bk = tl.arange(0, G * BK)
+                idx_bk_dup = tl.arange(0, G * BK * 2)
 
-                            # ensemble
-                            # NOTE method 1: simply ensemble at the final iteration step
-                            # NOTE method 2: ensemble per some iteration steps (internal guiding)
-                            
-                            # NOTE not true
-                            #                     
-                else:# don't make samples in this iteration step
-                    # NOTE don't set ensemble_sample_per_iter_new = 1. just send the sample # as 1.
-                    # TODO check : `ensemble_total_samples_curr` should be same as the previous iteration's value
-                    # size of MASK should be same as before
-                    if not enesmble_started_per_iter:
-                        # ensemble_total_sample_curr = 1
-                        ensemble_sample_per_iter_new = 1
+                indices = tl.load(
+                    INDICES +\
+                        idx_b * stride_indices_b +\
+                        idx_bdst * stride_indices_bdst +\
+                        idx_bk * stride_indices_bk,
+                    cache_modifier = DEFAULT_CACHE_MODIFIER
+                )
+                group_sizes = tl.load(
+                    GROUP_SIZE +\
+                        idx_b * stride_group_size_b +\
+                        idx_bdst * stride_group_size_bdst +\
+                        idx_bk * stride_indices_bk,
+                    cache_modifier = DEFAULT_CACHE_MODIFIER
+                )
+                dupped_indices = tl.load(
+                    DUPPED_INDICES +\
+                        idx_b * stride_dupped_indices_b +\
+                        idx_bdst * stride_dupped_indices_bdst +\
+                        idx_bk_dup * stride_dupped_indices_bk,
+                    cache_modifier = DEFAULT_CACHE_MODIFIER
+                )
+                dupped_group_size = tl.load(
+                    DUPPED_GROUP_SIZE +\
+                        idx_b * stride_dupped_group_size_b +\
+                        idx_bdst * stride_dupped_group_size_bdst +\
+                        idx_bk_dup * stride_dupped_group_size_bk,
+                    cache_modifier = DEFAULT_CACHE_MODIFIER
+                )
+                scores = tl.load(
+                    SCORES +\
+                        idx_b * stride_scores_b +\
+                        idx_bdst * stride_scores_bdst +\
+                        idx_bk_dup * stride_scores_bk
+                )
+                scores_final = tl.load(
+                    SCORES_FINAL +\
+                        idx_b * stride_scores_final_b +\
+                        idx_bdst * stride_scores_final_bdst +\
+                        idx_bk * stride_scores_final_bk,
+                    cache_modifier = DEFAULT_CACHE_MODIFIER
+                )
+                probs = tl.load(
+                    PROBS +\
+                        idx_b * stride_probs_b +\
+                        idx_bdst * stride_probs_bdst +\
+                        idx_bk_dup * stride_probs_bk,
+                    cache_modifier = DEFAULT_CACHE_MODIFIER
+                )
+                topk_ids = tl.load(
+                    TOPK_IDS +\
+                        idx_b * stride_topk_ids_b +\
+                        idx_bdst * stride_topk_ids_bdst +\
+                        idx_bk * stride_topk_ids_bk,
+                    cache_modifier = DEFAULT_CACHE_MODIFIER
+                )
+                
 
-                # stride_mask_src_grid_ensemble = stride_mask_src_grid * ensemble_total_samples_curr
-                if enesmble_started_per_iter and not ensemble_started_at_least_once:
-                    assert INDICES.ndim == 3
-                    assert GROUP_SIZE.ndim == 3
-                    assert SCORES_FINAL.ndim == 3
-                    assert PROBS.ndim == 3
-                    assert TOPK_IDS.ndim == 3
-                    assert SCORES.ndim == 3
-                    assert DUPPED_INDICES.ndim == 3
-                    assert DUPPED_GROUP_SIZED.ndim == 3
-                    assert T_GROUP_SIZE.ndim == 2
-
-                    INDICES = INDICES.unsqueeze(2)
-                    INDICES = INDICES.expand(-1, -1, ensemble_sample_per_iter_new, -1)
-                    INDICES = INDICES.reshape(
-                        INDICES.shape[0],
-                        INDICES.shape[1],
-                        ensemble_sample_per_iter_new,
-                        INDICES.shape[-1]
+                if enesmble_started_per_iter and (ensemble_step == 1):
+                    """
+                    cuda_fused grid
+                    grid = (
+                        GROUP_BH * triton.cdiv(BDST, GROUP_BDST),
+                        BH // GROUP_BH,
+                        BSZ
                     )
+                    """
+                    # assert group_sizes.ndim == 3
+                    # assert scores_final.ndim == 3
+                    # assert probs.ndim == 3
+                    # assert topk_ids.ndim == 3
+                    # assert scores.ndim == 3
+                    # assert dupped_indices.ndim == 3
+                    # assert dupped_group_size.ndim == 3
+                    
+                    # assert INDICES.shape == GROUP_SIZE.shape
+                    # tl.device_assert(ENSEMBLE_RET_RATIO == 1.0)
+                    # tl.static_print(tl.view(indices, (1, G * BK)))
 
-                    GROUP_SIZE = GROUP_SIZE.unsqueeze(2)
-                    GROUP_SIZE = GROUP_SIZE.expand(-1, -1, ensemble_sample_per_iter_new, -1)
-                    GROUP_SIZE = GROUP_SIZE.reshape(
-                        GROUP_SIZE.shape[0],
-                        GROUP_SIZE.shape[1],
-                        ensemble_sample_per_iter_new,
-                        GROUP_SIZE.shape[-1]
-                    )
+                    # tl.static_print(indices.shape)
+                    # indices = tl.expand_dims(indices, 0)
+                    # tl.static_print(indices.shape)
+                    # indices = indices[None, :]
+                    # tl.static_print("sample_per_iter ", ensemble_sample_per_iter_new)
+                    # tl.static_print("sample_per_iter ", ensemble_sample_per_iter_new.shape)
+                    # tl.static_print("sample_per_iter ", ENSEMBLE_ITER_N_START)
+                    # tl.static_print("sample_per_iter ", ENSEMBLE_ITER_N_START)
+                    # tl.static_print("indices.shape ", indices.shape)
+                    # indices = tl.broadcast_to(indices, (ensemble_sample_per_iter_new, G * BK))
+                    indices = tl.broadcast_to(indices[None, :], (ensemble_sample_per_iter_new, indices.shape[-1]))
+                    
+                    group_sizes = tl.broadcast_to(tl.reshape(group_sizes, (1, G * BK)).to(tl.constexpr), (ensemble_sample_per_iter_new, G * BK))
+                    scores_final = tl.broadcast_to(tl.reshape(scores_final, (1, G * BK)).to(tl.constexpr), (ensemble_sample_per_iter_new, G * BK))
+                    probs = tl.broadcast_to(tl.reshape(probs, (1, G * BK)).to(tl.constexpr), (ensemble_sample_per_iter_new, 2 * G * BK))
+                    topk_ids = tl.broadcast_to(tl.reshape(topk_ids, (1, G * BK)).to(tl.constexpr), (ensemble_sample_per_iter_new, G * BK))
+                    scores = tl.broadcast_to(tl.reshape(scores, (1, G * BK)).to(tl.constexpr), (ensemble_sample_per_iter_new, 2 * G * BK))
+                    dupped_indices = tl.broadcast_to(tl.reshape(dupped_indices, (1, G * BK)).to(tl.constexpr), (ensemble_sample_per_iter_new, 2 * G * BK))
+                    dupped_group_size = tl.broadcast_to(tl.reshape(dupped_group_size, (1, G * BK)).to(tl.constexpr), (ensemble_sample_per_iter_new, 2 * G * BK))
 
-                    SCORES_FINAL = SCORES_FINAL.unsqueeze(2)
-                    SCORES_FINAL = SCORES_FINAL.expand(-1, -1, ensemble_sample_per_iter_new, -1)
-                    SCORES_FINAL = SCORES_FINAL.reshape(
-                        SCORES_FINAL.shape[0],
-                        SCORES_FINAL.shape[1],
-                        ensemble_sample_per_iter_new,
-                        SCORES_FINAL.shape[-1],
-                    )
-
-                    PROBS = PROBS.unsqueeze(2)
-                    PROBS = PROBS.expand(-1, -1, ensemble_sample_per_iter_new, -1)
-                    PROBS = PROBS.reshape(
-                        PROBS.shape[0],
-                        PROBS.shape[1],
-                        ensemble_sample_per_iter_new,
-                        PROBS.shape[-1]
-                    )
-
-                    TOPK_IDS = TOPK_IDS.unsqueeze(2)
-                    TOPK_IDS = TOPK_IDS.expand(-1, -1, ensemble_sample_per_iter_new, -1)
-                    TOPK_IDS = TOPK_IDS.reshape(
-                        TOPK_IDS.shape[0],
-                        TOPK_IDS.shape[1],
-                        ensemble_sample_per_iter_new,
-                        TOPK_IDS.shape[-1],
-                    )
-
-                    # TODO no??
-                    SCORES = SCORES.unsqueeze(2)
-                    SCORES = SCORES.expand(-1, -1, ensemble_sample_per_iter_new, -1)
-                    SCORES = SCORES.reshape(
-                        SCORES.shape[0],
-                        SCORES.shape[1],
-                        ensemble_sample_per_iter_new,
-                        SCORES.shape[-1]
-                    )
-
-                    DUPPED_INDICES = DUPPED_INDICES.unsqueeze(2)
-                    DUPPED_INDICES = DUPPED_INDICES.expand(-1, -1, ensemble_sample_per_iter_new, -1)
-                    DUPPED_INDICES = DUPPED_INDICES.reshape(
-                        DUPPED_INDICES.shape[0],
-                        DUPPED_INDICES.shape[1],
-                        ensemble_sample_per_iter_new,
-                        DUPPED_INDICES.shape[-1]
-                    )
-
-                    DUPPED_GROUP_SIZED = DUPPED_GROUP_SIZED.unsqueeze(2)
-                    DUPPED_GROUP_SIZED = DUPPED_GROUP_SIZED.expand(-1, -1, ensemble_sample_per_iter_new, -1)
-                    DUPPED_GROUP_SIZED = DUPPED_GROUP_SIZED.reshape(
-                        DUPPED_GROUP_SIZED.shape[0],
-                        DUPPED_GROUP_SIZED.shape[1],
-                        ensemble_sample_per_iter_new, # NOTE same copies are made
-                        DUPPED_GROUP_SIZED.shape[-1]
-                    )
-
-                    # T_GROUP_SIZE = T_GROUP_SIZE.unsqueeze(2)
-                    # T_GROUP_SIZE = T_GROUP_SIZE.expand(-1, -1, ensemble_sample_per_iter_new)
-                    # T_GROUP_SIZE = T_GROUP_SIZE.reshape(
-                    #     T_GROUP_SIZE.shape[0],
-                    #     T_GROUP_SIZE.shape[1],
-                    #     ensemble_sample_per_iter_new,
-                    # )
-                elif enesmble_started_per_iter and ensemble_started_at_least_once:
+                elif enesmble_started_per_iter and (ensemble_step > 1):
                     assert INDICES.ndim == 4
                     assert GROUP_SIZE.ndim == 4
                     assert SCORES_FINAL.ndim == 4
@@ -3050,38 +3047,47 @@ def masking_iteration_draft_cuda_fused(
                         DUPPED_GROUP_SIZED = tl.cat(DUPPED_GROUP_SIZED, DUPPED_GROUP_SIZED[:, :, :pad_size, :])
 
                     # TODO if ensemble_sample_per_iter_new < .shape[-2], better to not duplicate for not accessed ones for efficiency?
-                    INDICES = INDICES[:, :, 0, :].unsqueeze(-2).expand(INDICES.shape[0],
-                                                                       INDICES.shape[1], 
-                                                                       INDICES.shape[-2], 
-                                                                       INDICES.shape[-1])
-                    GROUP_SIZE = GROUP_SIZE[:, :, 0, :].unsqueeze(-2).expand(GROUP_SIZE.shape[0],
+                    assert ENSEMBLE_RET_RATIO == 1.0 
+                    INDICES = tl.broadcast_to(INDICES[:, :, 0, :], (INDICES.shape[0], 
+                                                                    INDICES.shape[1], 
+                                                                    INDICES.shape[2], 
+                                                                    INDICES.shape[-1]))
+                    GROUP_SIZE = tl.broadcast_to(GROUP_SIZE[:, :, 0, :], (GROUP_SIZE.shape[0], 
                                                                        GROUP_SIZE.shape[1], 
-                                                                       GROUP_SIZE.shape[-2], 
-                                                                       GROUP_SIZE.shape[-1])
-                    SCORES_FINAL = SCORES_FINAL[:, :, 0, :].unsqueeze(-2).expand(SCORES_FINAL.shape[0],
+                                                                       GROUP_SIZE.shape[2], 
+                                                                       GROUP_SIZE.shape[-1]))
+
+
+                    SCORES_FINAL = tl.broadcast_to(SCORES_FINAL[:, :, 0, :], (SCORES_FINAL.shape[0], 
                                                                        SCORES_FINAL.shape[1], 
                                                                        SCORES_FINAL.shape[-2], 
-                                                                       SCORES_FINAL.shape[-1])
-                    PROBS = PROBS[:, :, 0, :].unsqueeze(-2).expand(PROBS.shape[0],
+                                                                       SCORES_FINAL.shape[-1]))
+
+                    PROBS = tl.broadcast_to(PROBS[:, :, 0, :], (PROBS.shape[0], 
                                                                     PROBS.shape[1], 
                                                                     PROBS.shape[-2], 
-                                                                    PROBS.shape[-1])
-                    TOPK_IDS = TOPK_IDS[:, :, 0, :].unsqueeze(-2).expand(TOPK_IDS.shape[0],
+                                                                    PROBS.shape[-1]))
+
+                    TOPK_IDS = tl.broadcast_to(TOPK_IDS[:, :, 0, :], (TOPK_IDS.shape[0], 
                                                                     TOPK_IDS.shape[1], 
                                                                     TOPK_IDS.shape[-2], 
-                                                                    TOPK_IDS.shape[-1])
-                    SCORES = SCORES[:, :, 0, :].unsqueeze(-2).expand(SCORES.shape[0],
+                                                                    TOPK_IDS.shape[-1]))
+
+                    # TODO no??
+                    SCORES = tl.broadcast_to(SCORES[:, :, 0, :], (SCORES.shape[0], 
                                                                     SCORES.shape[1], 
                                                                     SCORES.shape[-2], 
-                                                                    SCORES.shape[-1])
-                    DUPPED_INDICES = DUPPED_INDICES[:, :, 0, :].unsqueeze(-2).expand(DUPPED_INDICES.shape[0],
+                                                                    SCORES.shape[-1]))
+
+                    DUPPED_INDICES = tl.broadcast_to(DUPPED_INDICES[:, :, 0, :], (DUPPED_INDICES.shape[0], 
                                                                     DUPPED_INDICES.shape[1], 
                                                                     DUPPED_INDICES.shape[-2], 
-                                                                    DUPPED_INDICES.shape[-1])
-                    DUPPED_GROUP_SIZED = DUPPED_GROUP_SIZED[:, :, 0, :].unsqueeze(-2).expand(DUPPED_GROUP_SIZED.shape[0],
-                                                                                            DUPPED_GROUP_SIZED.shape[1], 
-                                                                                            DUPPED_GROUP_SIZED.shape[2], 
-                                                                                            DUPPED_GROUP_SIZED.shape[-1])
+                                                                    DUPPED_INDICES.shape[-1]))
+
+                    DUPPED_GROUP_SIZED = tl.broadcast_to(DUPPED_GROUP_SIZED[:, :, 0, :], (DUPPED_GROUP_SIZED.shape[0], 
+                                                                    DUPPED_GROUP_SIZED.shape[1], 
+                                                                    DUPPED_GROUP_SIZED.shape[-2], 
+                                                                    DUPPED_GROUP_SIZED.shape[-1]))
 
                 grid = (ensemble_sample_per_iter_new, )
                 ensemble_make_samples_per_iter[grid](
