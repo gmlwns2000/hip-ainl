@@ -2631,46 +2631,46 @@ def masking_iteration_draft_python_epilog(
     
     return ks_count, ks_start_end
 
-def get_masking_iteration_draft_cuda_fused_configs():
-    warnings.warn('triton autotune will slow down startup!')
-    configs = []
-    for num_warps in [2, 4, 8]:
-    # for num_warps in [4,]:
-        for num_stages in [2,]:
-        # for num_stages in [2]:
-            for num_regs in [64, 128, 256]:
-            # for num_regs in [256]:
-                configs.append(triton.Config(
-                    {}, 
-                    num_warps=num_warps, 
-                    num_stages=num_stages,
-                    maxnreg=num_regs,
-                ))
-    return configs
+# def get_masking_iteration_draft_cuda_fused_configs():
+#     warnings.warn('triton autotune will slow down startup!')
+#     configs = []
+#     for num_warps in [2, 4, 8]:
+#     # for num_warps in [4,]:
+#         for num_stages in [2,]:
+#         # for num_stages in [2]:
+#             for num_regs in [64, 128, 256]:
+#             # for num_regs in [256]:
+#                 configs.append(triton.Config(
+#                     {}, 
+#                     num_warps=num_warps, 
+#                     num_stages=num_stages,
+#                     maxnreg=num_regs,
+#                 ))
+#     return configs
 
-@triton.autotune(
-    configs=get_masking_iteration_draft_cuda_fused_configs(),
-    key=[
-        'BLOCK_BK',
-        'BLOCK_SIZE_K', 
-        'BLOCK_SIZE_Q', 
-        'HID'
-    ],
-    restore_value=[
-        'KEY_ACCESS_LOG',
-        'KEY_ACCESS_COUNT',
-        'INDICES',
-        'KS',
-        'GROUP_SIZE',
-        'DUPPED_INDICES',
-        'DUPPED_GROUP_SIZE',
-        'SCORES', 
-        'SCORES_FINAL',
-        'PROBS',
-        'TOPK_IDS',
-        'T_GROUP_SIZE',
-    ]
-)
+# @triton.autotune(
+#     configs=get_masking_iteration_draft_cuda_fused_configs(),
+#     key=[
+#         'BLOCK_BK',
+#         'BLOCK_SIZE_K', 
+#         'BLOCK_SIZE_Q', 
+#         'HID'
+#     ],
+#     restore_value=[
+#         'KEY_ACCESS_LOG',
+#         'KEY_ACCESS_COUNT',
+#         'INDICES',
+#         'KS',
+#         'GROUP_SIZE',
+#         'DUPPED_INDICES',
+#         'DUPPED_GROUP_SIZE',
+#         'SCORES', 
+#         'SCORES_FINAL',
+#         'PROBS',
+#         'TOPK_IDS',
+#         'T_GROUP_SIZE',
+#     ]
+# )
 @triton.jit
 def masking_iteration_draft_cuda_fused(
     Q, 
@@ -3008,7 +3008,7 @@ def masking_iteration_draft_cuda_fused(
                     DUPPED_GROUP_SIZED = DUPPED_GROUP_SIZED.reshape(
                         DUPPED_GROUP_SIZED.shape[0],
                         DUPPED_GROUP_SIZED.shape[1],
-                        ensemble_sample_per_iter_new,
+                        ensemble_sample_per_iter_new, # NOTE same copies are made
                         DUPPED_GROUP_SIZED.shape[-1]
                     )
 
@@ -3032,19 +3032,49 @@ def masking_iteration_draft_cuda_fused(
 
                     ensemble_prev_sample_per_iter = INDICES.shape[-2]
                     if ensemble_prev_sample_per_iter < ensemble_sample_per_iter_new:
-                        import torch.nn.functional as F
-                        # need to expand
                         pad_size = ensemble_sample_per_iter_new - ensemble_prev_sample_per_iter
-                        INDICES = F.pad(INDICES, (0, 0, pad_size, 0))
-                        GROUP_SIZE = F.pad(GROUP_SIZE, (0, 0, pad_size, 0))
-                        SCORES_FINAL = F.pad(SCORES_FINAL, (0, 0, pad_size, 0))
-                        PROBS = F.pad(PROBS, (0, 0, pad_size, 0))
-                        TOPK_IDS = F.pad(TOPK_IDS, (0, 0, pad_size, 0))
-                        SCORES = F.pad(SCORES, (0, 0, pad_size, 0))
-                        DUPPED_INDICES = F.pad(DUPPED_INDICES, (0, 0, pad_size, 0))
-                        DUPPED_GROUP_SIZED = F.pad(DUPPED_GROUP_SIZED, (0, 0, pad_size, 0))
-                        # T_GROUP_SIZE = F.pad(T_GROUP_SIZE, (0, 0, pad_size, 0))
-                        
+                        INDICES = tl.cat(INDICES, INDICES[:, :, :pad_size, :])
+                        GROUP_SIZE = tl.cat(GROUP_SIZE, GROUP_SIZE[:, :, :pad_size, :])
+                        SCORES_FINAL = tl.cat(SCORES_FINAL, SCORES_FINAL[:, :, :pad_size, :])
+                        PROBS = tl.cat(PROBS, PROBS[:, :, :pad_size, :])
+                        TOPK_IDS = tl.cat(TOPK_IDS, TOPK_IDS[:, :, :pad_size, :])
+                        SCORES = tl.cat(SCORES, SCORES[:, :, :pad_size, :])
+                        DUPPED_INDICES = tl.cat(DUPPED_INDICES, DUPPED_INDICES[:, :, :pad_size, :])
+                        DUPPED_GROUP_SIZED = tl.cat(DUPPED_GROUP_SIZED, DUPPED_GROUP_SIZED[:, :, :pad_size, :])
+
+                    # TODO if ensemble_sample_per_iter_new < .shape[-2], better to not duplicate for not accessed ones for efficiency?
+                    INDICES = INDICES[:, :, 0, :].unsqueeze(-2).expand(INDICES.shape[0],
+                                                                       INDICES.shape[1], 
+                                                                       INDICES.shape[-2], 
+                                                                       INDICES.shape[-1])
+                    GROUP_SIZE = GROUP_SIZE[:, :, 0, :].unsqueeze(-2).expand(GROUP_SIZE.shape[0],
+                                                                       GROUP_SIZE.shape[1], 
+                                                                       GROUP_SIZE.shape[-2], 
+                                                                       GROUP_SIZE.shape[-1])
+                    SCORES_FINAL = SCORES_FINAL[:, :, 0, :].unsqueeze(-2).expand(SCORES_FINAL.shape[0],
+                                                                       SCORES_FINAL.shape[1], 
+                                                                       SCORES_FINAL.shape[-2], 
+                                                                       SCORES_FINAL.shape[-1])
+                    PROBS = PROBS[:, :, 0, :].unsqueeze(-2).expand(PROBS.shape[0],
+                                                                    PROBS.shape[1], 
+                                                                    PROBS.shape[-2], 
+                                                                    PROBS.shape[-1])
+                    TOPK_IDS = TOPK_IDS[:, :, 0, :].unsqueeze(-2).expand(TOPK_IDS.shape[0],
+                                                                    TOPK_IDS.shape[1], 
+                                                                    TOPK_IDS.shape[-2], 
+                                                                    TOPK_IDS.shape[-1])
+                    SCORES = SCORES[:, :, 0, :].unsqueeze(-2).expand(SCORES.shape[0],
+                                                                    SCORES.shape[1], 
+                                                                    SCORES.shape[-2], 
+                                                                    SCORES.shape[-1])
+                    DUPPED_INDICES = DUPPED_INDICES[:, :, 0, :].unsqueeze(-2).expand(DUPPED_INDICES.shape[0],
+                                                                    DUPPED_INDICES.shape[1], 
+                                                                    DUPPED_INDICES.shape[-2], 
+                                                                    DUPPED_INDICES.shape[-1])
+                    DUPPED_GROUP_SIZED = DUPPED_GROUP_SIZED[:, :, 0, :].unsqueeze(-2).expand(DUPPED_GROUP_SIZED.shape[0],
+                                                                                            DUPPED_GROUP_SIZED.shape[1], 
+                                                                                            DUPPED_GROUP_SIZED.shape[2], 
+                                                                                            DUPPED_GROUP_SIZED.shape[-1])
 
                 grid = (ensemble_sample_per_iter_new, )
                 ensemble_make_samples_per_iter[grid](
