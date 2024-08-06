@@ -709,7 +709,7 @@ def masking_iteration_draft_cuda_dup_and_score(
     i_iteration, # just for autotune
 
     # ensemble
-    idx_ensemble_sample_id : int,
+    idx_ensemble_sample_id=None,
     
     pid_0=None,
     pid_1=None,
@@ -793,7 +793,7 @@ def masking_iteration_draft_cuda_dup_and_score(
         INDICES +\
             idx_b * stride_indices_b +\
             idx_bdst * stride_indices_bdst +\
-            idx_ensemble_sample_id * stride_indices_sample_n +\
+            idx_ensemble_sample_id.to(tl.int32) * stride_indices_sample_n +\
             idx_bk * stride_indices_bk,
         mask=mask_bk,
         other=0,
@@ -805,7 +805,7 @@ def masking_iteration_draft_cuda_dup_and_score(
         GROUP_SIZE +\
             idx_b * stride_group_size_b +\
             idx_bdst * stride_group_size_bdst +\
-            idx_ensemble_sample_id * stride_group_size_sample_n +\
+            idx_ensemble_sample_id.to(tl.int32) * stride_group_size_sample_n +\
             idx_bk * stride_group_size_bk,
         mask=mask_bk,
         other=0,
@@ -966,7 +966,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             SCORES_FINAL +\
                 idx_b * stride_scores_final_b+\
                 idx_bdst * stride_scores_final_bdst+\
-                idx_ensemble_sample_id * stride_scores_final_sample_n +\
+                idx_ensemble_sample_id.to(tl.int32) * stride_scores_final_sample_n +\
                 idx_bk * stride_scores_final_bk,
             mask = mask_bk,
             cache_modifier=DEFAULT_CACHE_MODIFIER,
@@ -1113,7 +1113,7 @@ def masking_iteration_draft_cuda_dup_and_score(
         SCORES +\
             idx_b * stride_scores_b +\
             idx_bdst * stride_scores_bdst +\
-            idx_ensemble_sample_id * stride_scores_sample_n +\
+            idx_ensemble_sample_id.to(tl.int32) * stride_scores_sample_n +\
             idx_bk_dup * stride_scores_bk,
         value=scores,
         mask=mask_bk_dup,
@@ -1123,7 +1123,7 @@ def masking_iteration_draft_cuda_dup_and_score(
         DUPPED_INDICES +\
             idx_b * stride_dupped_indices_b +\
             idx_bdst * stride_dupped_indices_bdst +\
-            idx_ensemble_sample_id * stride_dupped_indices_sample_n +\
+            idx_ensemble_sample_id.to(tl.int32) * stride_dupped_indices_sample_n +\
             idx_bk_dup * stride_dupped_indices_bk,
         value=dupped_indices,
         mask=mask_bk_dup,
@@ -1133,7 +1133,7 @@ def masking_iteration_draft_cuda_dup_and_score(
         DUPPED_GROUP_SIZE +\
             idx_b * stride_dupped_group_size_b +\
             idx_bdst * stride_dupped_group_size_bdst +\
-            idx_ensemble_sample_id * stride_dupped_group_size_sample_n +\
+            idx_ensemble_sample_id.to(tl.int32) * stride_dupped_group_size_sample_n +\
             idx_bk_dup * stride_dupped_group_size_bk,
         value=dupped_group_sizes,
         mask=mask_bk_dup,
@@ -1233,7 +1233,7 @@ def masking_iteration_draft_cuda_gather(
         TOPK_INDICES +\
             idx_b * stride_topk_indices_b +\
             idx_bdst * stride_topk_indices_bdst +\
-            idx_ensemble_sample_id * stride_topk_ids_sample_n +\
+            idx_ensemble_sample_id.to(tl.int32) * stride_topk_ids_sample_n +\
             idx_bk * stride_topk_indices_bk,
         mask=mask_bk,
         cache_modifier=DEFAULT_CACHE_MODIFIER,
@@ -1243,7 +1243,7 @@ def masking_iteration_draft_cuda_gather(
         DUPPED_INDICES +\
             idx_b * stride_dupped_indices_b +\
             idx_bdst * stride_dupped_indices_bdst +\
-            idx_ensemble_sample_id * stride_dupped_indices_sample_n +\
+            idx_ensemble_sample_id.to(tl.int32) * stride_dupped_indices_sample_n +\
             topk_indices * stride_dupped_indices_bk,
         mask=mask_bk,
         cache_modifier=DEFAULT_CACHE_MODIFIER,
@@ -1252,7 +1252,7 @@ def masking_iteration_draft_cuda_gather(
         DUPPED_GROUP_SIZE +\
             idx_b * stride_dupped_group_size_b +\
             idx_bdst * stride_dupped_group_size_bdst +\
-            idx_ensemble_sample_id * stride_group_size_sample_n +\
+            idx_ensemble_sample_id.to(tl.int32) * stride_group_size_sample_n +\
             topk_indices * stride_dupped_group_size_bk,
         mask=mask_bk,
         cache_modifier=DEFAULT_CACHE_MODIFIER,
@@ -1261,7 +1261,7 @@ def masking_iteration_draft_cuda_gather(
         SCORES +\
             idx_b * stride_scores_b +\
             idx_bdst * stride_scores_bdst +\
-            idx_ensemble_sample_id * stride_scores_sample_n +\
+            idx_ensemble_sample_id.to(tl.int32) * stride_scores_sample_n +\
             topk_indices * stride_scores_bk,
         mask=mask_bk,
         cache_modifier=DEFAULT_CACHE_MODIFIER,
@@ -1271,7 +1271,7 @@ def masking_iteration_draft_cuda_gather(
         INDICES +\
             idx_b * stride_indices_b +\
             idx_bdst * stride_indices_bdst +\
-            idx_ensemble_sample_id * stride_indices_sample_n +\
+            idx_ensemble_sample_id.to(tl.int32) * stride_indices_sample_n +\
             idx_bk * stride_indices_bk,
         value=dupped_indices,
         mask=mask_bk,
@@ -1281,7 +1281,7 @@ def masking_iteration_draft_cuda_gather(
         GROUP_SIZES +\
             idx_b * stride_group_sizes_b +\
             idx_bdst * stride_group_sizes_bdst +\
-            idx_ensemble_sample_id * stride_group_size_sample_n +\
+            idx_ensemble_sample_id.to(tl.int32) * stride_group_size_sample_n +\
             idx_bk * stride_group_sizes_bk,
         value=dupped_group_size,
         mask=mask_bk,
@@ -1291,7 +1291,7 @@ def masking_iteration_draft_cuda_gather(
         SCORES_FINAL +\
             idx_b * stride_scores_final_b +\
             idx_bdst * stride_scores_final_bdst +\
-            idx_ensemble_sample_id * stride_scores_final_sample_n +\
+            idx_ensemble_sample_id.to(tl.int32) * stride_scores_final_sample_n +\
             idx_bk * stride_scores_final_bk,
         value=scores,
         mask=mask_bk,
@@ -1425,7 +1425,7 @@ def masking_iteration_draft_cuda_partial_softmax(
         DUPPED_INDICES +\
             idx_b * stride_dupped_indices_b +\
             idx_bdst * stride_dupped_indices_bdst +\
-            idx_ensemble_sample_id * stride_dupped_indices_sample_n +\
+            idx_ensemble_sample_id.to(tl.int32) * stride_dupped_indices_sample_n +\
             idx_bk * stride_dupped_indices_bk,
         mask=mask_bk,
         other=MAX_BSRC * G,
@@ -1435,7 +1435,7 @@ def masking_iteration_draft_cuda_partial_softmax(
         DUPPED_GROUP_SIZES +\
             idx_b * stride_dupped_group_sizes_b +\
             idx_bdst * stride_dupped_group_sizes_bdst +\
-            idx_ensemble_sample_id * stride_dupped_group_size_sample_n +\
+            idx_ensemble_sample_id.to(tl.int32) * stride_dupped_group_size_sample_n +\
             idx_bk * stride_dupped_group_sizes_bk,
         mask=mask_bk,
         other=MAX_BSRC * G,
@@ -1446,7 +1446,7 @@ def masking_iteration_draft_cuda_partial_softmax(
         SCORES +\
             idx_b * stride_scores_b +\
             idx_bdst * stride_scores_bdst +\
-            idx_ensemble_sample_id * stride_scores_sample_n +\
+            idx_ensemble_sample_id.to(tl.int32) * stride_scores_sample_n +\
             idx_bk * stride_scores_bk,
         mask=mask_bk,
         other=float('-inf'),
@@ -1474,7 +1474,7 @@ def masking_iteration_draft_cuda_partial_softmax(
         PROBS +\
             idx_b * stride_scores_b +\
             idx_bdst * stride_scores_bdst +\
-            idx_ensemble_sample_id * stride_scores_sample_n +\
+            idx_ensemble_sample_id.to(tl.int32) * stride_scores_sample_n +\
             idx_bk * stride_scores_bk,
         value=scores,
         mask=mask_bk,
@@ -1696,7 +1696,7 @@ def masking_iteration_draft_cuda_argsort(
         PROBS +\
             idx_b * stride_probs_b +\
             idx_bdst[:, None] * stride_probs_bdst +\
-            idx_ensemble_sample_id * stride_probs_sample_n +\
+            idx_ensemble_sample_id.to(tl.int32) * stride_probs_sample_n +\
             idx_bk[None, :] * stride_probs_bk,
         mask=mask_bdst[:, None],
         cache_modifier=DEFAULT_CACHE_MODIFIER,
@@ -1728,7 +1728,7 @@ def masking_iteration_draft_cuda_argsort(
         IDS +\
             idx_b * stride_ids_b +\
             idx_bdst[:, None] * stride_ids_bdst +\
-            idx_ensemble_sample_id * stride_topk_ids_sample_n +\
+            idx_ensemble_sample_id.to(tl.int32) * stride_topk_ids_sample_n +\
             idx_bk[None, :] * stride_ids_bk,
         value=ids,
         mask=(idx_bk < TOP_BK)[None, :] & mask_bdst[:, None],
@@ -1835,6 +1835,7 @@ def masking_iteration_draft_cuda_fused_per_iter(
     RAND_SEED,
     SAMPLE_METHOD: tl.constexpr,
     BRANCH_METHOD: tl.constexpr,
+    KV_HEAD_REPEAT: tl.constexpr,
     
     USING_EXTEND: tl.constexpr,
     extend_window_size,
@@ -1885,9 +1886,8 @@ def masking_iteration_draft_cuda_fused_per_iter(
     ENSEMBLE_RET_RATIO : tl.constexpr,
 
     LAYER_ID : tl.constexpr,
-    idx_ensemble_sample_id : tl.constexpr,
-    ensemble_sample_per_iter_new,
-    max_group_size : tl.constexpr,
+    idx_ensemble_sample_id=None,
+    max_group_size=None,
 
     pid_0=None,
     pid_1=None,
@@ -1981,6 +1981,7 @@ def masking_iteration_draft_cuda_fused_per_iter(
             RAND_SEED,
             SAMPLE_METHOD,
             BRANCH_METHOD,
+            KV_HEAD_REPEAT,
             
             USING_EXTEND,
             extend_window_size,
@@ -2131,8 +2132,7 @@ def masking_iteration_draft_cuda_fused_per_iter(
         G, BK, 
         
         indices_bk_len,
-        ensemble_sample_per_iter_new,
-        ENSEMBLE_RET_RATIO,
+        idx_ensemble_sample_id,
         
         pid_0=0,
         pid_1=pid_0,
@@ -2182,6 +2182,7 @@ def ensemble_make_final_mask_per_iter(
     RAND_SEED,
     SAMPLE_METHOD: tl.constexpr,
     BRANCH_METHOD: tl.constexpr,
+    KV_HEAD_REPEAT: tl.constexpr,
     
     USING_EXTEND: tl.constexpr,
     extend_window_size,
@@ -2373,6 +2374,7 @@ def ensemble_make_samples_per_iter(
     RAND_SEED,
     SAMPLE_METHOD: tl.constexpr,
     BRANCH_METHOD: tl.constexpr,
+    KV_HEAD_REPEAT : tl.constexpr,
     
     USING_EXTEND: tl.constexpr,
     extend_window_size,
@@ -2423,8 +2425,10 @@ def ensemble_make_samples_per_iter(
     ENSEMBLE_RET_RATIO,
 
     LAYER_ID : int,
-    ensemble_sample_per_iter_new,
     max_group_size : tl.constexpr,
+
+    pid_0=None,
+    pid_1=None,
 ):
     idx_ensemble_sample_id = tl.program_id(0)
 
@@ -2527,6 +2531,7 @@ def ensemble_make_samples_per_iter(
         RAND_SEED,
         SAMPLE_METHOD,
         BRANCH_METHOD,
+        KV_HEAD_REPEAT,
         
         USING_EXTEND,
         extend_window_size,
@@ -2578,8 +2583,10 @@ def ensemble_make_samples_per_iter(
 
         LAYER_ID,
         idx_ensemble_sample_id,
-        ensemble_sample_per_iter_new,
         max_group_size,
+
+        pid_0=pid_0,
+        pid_1=pid_1,
     )
 
 
@@ -2808,10 +2815,10 @@ def masking_iteration_draft_cuda_fused(
     ENSEMBLE_ITER_N_START : int,
     ENSEMBLE_ITER_N_FACTOR : int,
     ENSEMBLE_ITER_N_JUMP : int,
-    ENSEMBLE_ITER_N_TILL : int = None,
-    ENSEMBLE_RET_RATIO : float = 1.0,
+    ENSEMBLE_ITER_N_TILL,
+    ENSEMBLE_RET_RATIO,
 
-    LAYER_ID : int = 0,
+    LAYER_ID,
 ):
     """
     grid = (
@@ -3191,8 +3198,10 @@ def masking_iteration_draft_cuda_fused(
                     ENSEMBLE_RET_RATIO,
 
                     LAYER_ID,
-                    ensemble_sample_per_iter_new,
-                    max_group_size
+                    max_group_size,
+
+                    pid_0=pid_0,
+                    pid_1=pid_1
                 )
 
                 # NOTE max_group_size is updated per samples -> need to load to get it
@@ -3216,6 +3225,7 @@ def masking_iteration_draft_cuda_fused(
                     RAND_SEED,
                     SAMPLE_METHOD,
                     BRANCH_METHOD,
+                    KV_HEAD_REPEAT,
                     
                     USING_EXTEND,
                     extend_window_size,
@@ -3358,6 +3368,7 @@ def masking_iteration_draft_cuda_fused(
                     RAND_SEED,
                     SAMPLE_METHOD,
                     BRANCH_METHOD,
+                    KV_HEAD_REPEAT,
                     
                     USING_EXTEND,
                     extend_window_size,
@@ -3405,13 +3416,14 @@ def masking_iteration_draft_cuda_fused(
                     ENSEMBLE_ITER_N_FACTOR,
                     ENSEMBLE_ITER_N_JUMP,
                     ENSEMBLE_ITER_N_TILL,
+                    ENSEMBLE_RET_RATIO,
 
                     LAYER_ID,
                     0,
                     max_group_size,
 
-                    pid_0,
-                    pid_1,
+                    pid_0=pid_0,
+                    pid_1=pid_1,
                 )
                 tl.debug_barrier()
 
