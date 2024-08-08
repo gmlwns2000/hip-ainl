@@ -709,7 +709,7 @@ def masking_iteration_draft_cuda_dup_and_score(
     i_iteration, # just for autotune
 
     # ensemble
-    idx_ensemble_sample_id=None,
+    idx_ensemble_sample_id=0, # None
     
     pid_0=None,
     pid_1=None,
@@ -3653,6 +3653,7 @@ def masking_iteration_draft_per_iteration(
         
         max_group_size,
         i_iteration,
+        0,
         
         num_warps=(2 if scores_cached else 4) * G,
         num_stages=max(1, 4 // G),
@@ -3673,6 +3674,7 @@ def masking_iteration_draft_per_iteration(
         G, scores.shape[-1], BSRC, block_size_k,
         
         BLOCK_SCORE,
+        0,
         
         num_warps=min(32, BLOCK_SCORE//32),
     )
@@ -3701,6 +3703,7 @@ def masking_iteration_draft_per_iteration(
         probs.shape[-1],
         mask_block_k * G,
         BLOCK_BDST,
+        0,
         
         num_warps=min(32, max(1, (probs.shape[-1] * BLOCK_BDST) // 256)),
         num_stages=8,
@@ -3722,6 +3725,7 @@ def masking_iteration_draft_per_iteration(
         t_group_sizes, *t_group_sizes.stride(),
         
         G, mask_block_k, 
+        0,
         
         BLOCK_BK,
     )
@@ -4347,7 +4351,7 @@ def masking_iteration_draft(
                 print("KS ", torch.sum(ks-ks_bef).item())
 
     else:
-        raise NotImplementedError()
+        # raise NotImplementedError()
         i_iteration = 0
         while max_group_size > 1:
             if os.getenv('HIP_PER_ITER_CHANGE', '0') == '1':
