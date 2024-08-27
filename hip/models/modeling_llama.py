@@ -449,7 +449,8 @@ class LlamaCustomAttention(LlamaAttention):
         self.ensemble_per_layer_n = 1
         self.ensemble_per_attn_iter = False
         self.ensemble_model_n = 5
-        self.ensemble_particular_layer = None
+        self.ensemble_layer_start = None
+        self.ensemble_particular_layer = 0
         self.ensemble_layer_till = 6
         self.sparsity_per_layer = None
         self.ensemble_randomneses = 5.0
@@ -460,6 +461,7 @@ class LlamaCustomAttention(LlamaAttention):
         self.ensemble_iter_n_jump = 1
         self.ensemble_iter_n_till = 32000
         self.ensemble_ret_ratio = 1.0
+        self.ensemble_multi_branch_ratio = 2
 
         self.tree_reformer = self.tree_performer = None
 
@@ -655,6 +657,7 @@ class LlamaCustomAttention(LlamaAttention):
             ensemble_per_layer_n = self.ensemble_per_layer_n,
             ensemble_per_attn_iter = self.ensemble_per_attn_iter,
             ensemble_model_n = self.ensemble_model_n,
+            ensemble_layer_start = self.ensemble_layer_start,
             ensemble_particular_layer = self.ensemble_particular_layer,
             ensemble_layer_till = self.ensemble_layer_till,
             ensemble_randomness= self.ensemble_randomness,
@@ -665,6 +668,7 @@ class LlamaCustomAttention(LlamaAttention):
             ensemble_iter_n_jump = self.ensemble_iter_n_jump,
             ensemble_iter_n_till = self.ensemble_iter_n_till,
             ensemble_ret_ratio = self.ensemble_ret_ratio,
+            ensemble_multi_branch_ratio=self.ensemble_multi_branch_ratio
 
             layer_id = self.layer_idx,
 
@@ -822,7 +826,7 @@ class LlamaCustomAttention(LlamaAttention):
         #     'ensemble_per_layer_n': self.ensemble_per_layer_n,
         #     'ensemble_per_attn_iter': self.ensemble_per_attn_iter,
         #     'ensemble_model_n': self.ensemble_model_n,
-        #     'ensemble_particular_layer': self.ensemble_particular_layer,
+        #     'ensemble_layer_start': self.ensemble_layer_start,
         #     'ensemble_layer_till': self.ensemble_layer_till,
         #     'ensemble_randomness': self.ensemble_randomness,
 
@@ -883,6 +887,7 @@ class LlamaCustomAttention(LlamaAttention):
             ensemble_per_layer_n = self.ensemble_per_layer_n,
             ensemble_per_attn_iter = self.ensemble_per_attn_iter,
             ensemble_model_n = self.ensemble_model_n,
+            ensemble_layer_start = self.ensemble_layer_start,
             ensemble_particular_layer = self.ensemble_particular_layer,
             ensemble_layer_till = self.ensemble_layer_till,
             ensemble_randomness= self.ensemble_randomness,
@@ -893,6 +898,7 @@ class LlamaCustomAttention(LlamaAttention):
             ensemble_iter_n_jump = self.ensemble_iter_n_jump,
             ensemble_iter_n_till = self.ensemble_iter_n_till,
             ensemble_ret_ratio = self.ensemble_ret_ratio,
+            ensemble_multi_branch_ratio=self.ensemble_multi_branch_ratio
 
             layer_id = self.layer_idx,
 

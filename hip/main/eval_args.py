@@ -25,14 +25,16 @@ class ArgsType:
     ensemble_method_final_inter_thresh : int = None
     ensemble_method_final_bdd_mask_k : int = 0
     ensemble_timedim_wd : int = 3
-    ensemble_per_layer_n : int = 1
+    ensemble_per_layer_n : int = None
     ensemble_per_attn_iter : bool = False
     ensemble_model_n : int = 5
 
-    ensemble_particular_layer : int = None
+    ensemble_layer_start : int = None
+    ensemble_particular_layer : int = 0
     ensemble_layer_till : int = None
     ensemble_randomness : float = 0.5
     ensemble_ret_ratio : float = 1.0
+    ensemble_multi_branch_ratio : int = 2
 
 
 
@@ -70,10 +72,11 @@ def eval_args(
     parser.add_argument('--ensemble-method-final-bdd-mask-k', type=int, default=0)
     parser.add_argument('--ensemble-timedim-wd', type=int, default=3)
 
-    parser.add_argument('--ensemble-per-layer-n', type=int, default=1)
+    parser.add_argument('--ensemble-per-layer-n', type=int, default=None)
     parser.add_argument('--ensemble-per-attn-iter', type=bool, default=False)
     parser.add_argument('--ensemble-model-n', type=int, default=20)
-    parser.add_argument('--ensemble-particular-layer', type=int, default=None)
+    parser.add_argument('--ensemble-layer-start', type=int, default=None)
+    parser.add_argument('--ensemble-particular-layer', type=int, default=0)
     parser.add_argument('--ensemble-layer-till', type=int, default=None)
     parser.add_argument('--ensemble-randomness', type=float, default=5.0)
     parser.add_argument('--ensemble-iter-start-step', type=int, default=0)
@@ -83,6 +86,7 @@ def eval_args(
     parser.add_argument('--ensemble-iter-n-jump', type=int, default=1)
     parser.add_argument('--ensemble-iter-n-till', type=int, default=32000)
     parser.add_argument('--ensemble-ret-ratio', type=float, default=1.0)
+    parser.add_argument('--ensemble-multi-branch-ratio', type=int, default=2)
 
     parser.add_argument('--visualize', action='store_true')
 
