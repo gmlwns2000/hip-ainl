@@ -61,7 +61,8 @@ def custom_attention(
     ensemble_per_layer_n = 1,
     ensemble_per_attn_iter = False,
     ensemble_model_n = 5,
-    ensemble_particular_layer = None,
+    ensemble_layer_start = None,
+    ensemble_particular_layer = 0,
     ensemble_layer_till = 6,
     ensemble_randomness = 5.0,
     ensemble_iter_start_step = 1,
@@ -71,6 +72,7 @@ def custom_attention(
     ensemble_iter_n_jump = 1,
     ensemble_iter_n_till = 32000,
     ensemble_ret_ratio = 1.0,
+    ensemble_multi_branch_ratio = 2,
 
     tree_stride = -1,
 
@@ -128,7 +130,7 @@ def custom_attention(
     #     'ensemble_per_layer_n': ensemble_per_layer_n,
     #     'ensemble_per_attn_iter': ensemble_per_attn_iter,
     #     'ensemble_model_n': ensemble_model_n,
-    #     'ensemble_particular_layer': ensemble_particular_layer,
+    #     'ensemble_layer_start': ensemble_layer_start,
     #     'ensemble_layer_till': ensemble_layer_till,
     #     'ensemble_randomness': ensemble_randomness,
 
@@ -346,6 +348,7 @@ def custom_attention(
                     ensemble_per_layer_n = ensemble_per_layer_n,
                     ensemble_per_attn_iter = ensemble_per_attn_iter,
                     ensemble_model_n = ensemble_model_n,
+                    ensemble_layer_start = ensemble_layer_start,
                     ensemble_particular_layer = ensemble_particular_layer,
                     ensemble_layer_till = ensemble_layer_till,
                     ensemble_randomness = ensemble_randomness,
@@ -455,6 +458,7 @@ def custom_attention(
                     ensemble_per_layer_n = ensemble_per_layer_n,
                     ensemble_per_attn_iter = ensemble_per_attn_iter,
                     ensemble_model_n = ensemble_model_n,
+                    ensemble_layer_start = ensemble_layer_start,
                     ensemble_particular_layer = ensemble_particular_layer,
                     ensemble_layer_till = ensemble_layer_till,
                     ensemble_randomness = ensemble_randomness,
@@ -465,6 +469,7 @@ def custom_attention(
                     ensemble_iter_n_jump = ensemble_iter_n_jump,
                     ensemble_iter_n_till = ensemble_iter_n_till,
                     ensemble_ret_ratio=ensemble_ret_ratio,
+                    ensemble_multi_branch_ratio=ensemble_multi_branch_ratio,
 
                     layer_id = layer_id,
                 )
@@ -555,6 +560,7 @@ def custom_attention(
                     'ensemble_per_layer_n' : ensemble_per_layer_n,
                     'ensemble_per_attn_iter' : ensemble_per_attn_iter,
                     'ensemble_model_n' : ensemble_model_n,
+                    'ensemble_layer_start' : ensemble_layer_start,
                     'ensemble_particular_layer' : ensemble_particular_layer,
                     'ensemble_layer_till' : ensemble_layer_till,
                     'ensemble_randomness' : ensemble_randomness,
