@@ -72,7 +72,16 @@ def custom_attention(
     ensemble_iter_n_jump = 1,
     ensemble_iter_n_till = 32000,
     ensemble_ret_ratio = 1.0,
-    ensemble_multi_branch_ratio = 2,
+
+    multi_branch_ratio = 2,
+    multi_branch_particular_layer = None,
+    multi_branch_layer_start = None,
+    multi_branch_layer_till = None,
+    multi_branch_layer_all = False,
+    multi_branch_per_layer = 1,
+    multi_branch_true_iteration = 0,
+
+    k_ret_ratio = 1.0,
 
     tree_stride = -1,
 
@@ -469,7 +478,15 @@ def custom_attention(
                     ensemble_iter_n_jump = ensemble_iter_n_jump,
                     ensemble_iter_n_till = ensemble_iter_n_till,
                     ensemble_ret_ratio=ensemble_ret_ratio,
-                    ensemble_multi_branch_ratio=ensemble_multi_branch_ratio,
+                    multi_branch_ratio=multi_branch_ratio,
+                    multi_branch_particular_layer=multi_branch_particular_layer,
+                    multi_branch_layer_start = multi_branch_layer_start,
+                    multi_branch_layer_till = multi_branch_layer_till,
+                    multi_branch_layer_all = multi_branch_layer_all,
+                    multi_branch_per_layer=multi_branch_per_layer,
+                    multi_branch_true_iteration = multi_branch_true_iteration,
+
+                    k_ret_ratio = k_ret_ratio,
 
                     layer_id = layer_id,
                 )

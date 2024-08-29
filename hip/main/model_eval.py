@@ -211,7 +211,16 @@ def load_model(args):
             m.ensemble_iter_n_jump = args.ensemble_iter_n_jump
             m.ensemble_iter_n_till = args.ensemble_iter_n_till
             m.ensemble_ret_ratio = args.ensemble_ret_ratio
-            m.ensemble_multi_branch_ratio = args.ensemble_multi_branch_ratio
+
+            m.multi_branch_ratio = args.multi_branch_ratio
+            m.multi_branch_particular_layer = args.multi_branch_particular_layer
+            m.multi_branch_layer_start = args.multi_branch_layer_start
+            m.multi_branch_layer_till = args.multi_branch_layer_till
+            m.multi_branch_layer_all = args.multi_branch_layer_all
+            m.multi_branch_per_layer = args.multi_branch_per_layer
+            m.multi_branch_true_iteration = args.multi_branch_true_iteration
+
+            m.k_ret_ratio = args.k_ret_ratio
 
             m.tree_dense_layers = list(range(args.dense_layers))
             m.tree_rope_method = args.rope_method

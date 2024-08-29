@@ -34,8 +34,16 @@ class ArgsType:
     ensemble_layer_till : int = None
     ensemble_randomness : float = 0.5
     ensemble_ret_ratio : float = 1.0
-    ensemble_multi_branch_ratio : int = 2
 
+    multi_branch_ratio : int = 2
+    multi_branch_particular_layer : int = None
+    multi_branch_layer_start : int = None
+    multi_branch_layer_till : int = None
+    multi_branch_layer_all : bool = False
+    multi_branch_per_layer : int = 1
+    multi_branch_true_iteration : int = 0
+
+    k_ret_ratio : float = 1.0
 
 
 def eval_args(
@@ -86,7 +94,16 @@ def eval_args(
     parser.add_argument('--ensemble-iter-n-jump', type=int, default=1)
     parser.add_argument('--ensemble-iter-n-till', type=int, default=32000)
     parser.add_argument('--ensemble-ret-ratio', type=float, default=1.0)
-    parser.add_argument('--ensemble-multi-branch-ratio', type=int, default=2)
+    
+    parser.add_argument('--multi-branch-ratio', type=int, default=2)
+    parser.add_argument('--multi-branch-particular-layer', type=int, default=None)
+    parser.add_argument('--multi-branch-layer-start', type=int, default=None)
+    parser.add_argument('--multi-branch-layer-till', type=int, default=None)
+    parser.add_argument('--multi-branch-layer-all', default=False, action='store_true')
+    parser.add_argument('--multi-branch-per-layer', type=int, default=1)
+    parser.add_argument('--multi-branch-true-iteration', type=int, default=0)
+
+    parser.add_argument('--k-ret-ratio', type=float, default=1.0)
 
     parser.add_argument('--visualize', action='store_true')
 

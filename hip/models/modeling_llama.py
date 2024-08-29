@@ -461,7 +461,16 @@ class LlamaCustomAttention(LlamaAttention):
         self.ensemble_iter_n_jump = 1
         self.ensemble_iter_n_till = 32000
         self.ensemble_ret_ratio = 1.0
-        self.ensemble_multi_branch_ratio = 2
+
+        self.multi_branch_ratio = 2
+        self.multi_branch_particular_layer = None
+        self.multi_branch_layer_start = None
+        self.multi_branch_layer_till = None
+        self.multi_branch_layer_all = False
+        self.multi_branch_per_layer = 1
+        self.multi_branch_true_iteration = 0
+
+        self.k_ret_ratio = 1.0
 
         self.tree_reformer = self.tree_performer = None
 
@@ -668,7 +677,16 @@ class LlamaCustomAttention(LlamaAttention):
             ensemble_iter_n_jump = self.ensemble_iter_n_jump,
             ensemble_iter_n_till = self.ensemble_iter_n_till,
             ensemble_ret_ratio = self.ensemble_ret_ratio,
-            ensemble_multi_branch_ratio=self.ensemble_multi_branch_ratio
+            
+            multi_branch_ratio=self.multi_branch_ratio,
+            multi_branch_particular_layer=self.multi_branch_particular_layer,
+            multi_branch_layer_start = self.multi_branch_layer_start,
+            multi_branch_layer_till = self.multi_branch_layer_till,
+            multi_branch_layer_all = self.multi_branch_layer_all,
+            multi_branch_per_layer = self.multi_branch_per_layer,
+            multi_branch_true_iteration = self.multi_branch_true_iteration,
+
+            k_ret_ratio = self.k_ret_ratio,
 
             layer_id = self.layer_idx,
 
@@ -898,7 +916,16 @@ class LlamaCustomAttention(LlamaAttention):
             ensemble_iter_n_jump = self.ensemble_iter_n_jump,
             ensemble_iter_n_till = self.ensemble_iter_n_till,
             ensemble_ret_ratio = self.ensemble_ret_ratio,
-            ensemble_multi_branch_ratio=self.ensemble_multi_branch_ratio
+
+            multi_branch_ratio=self.multi_branch_ratio,
+            multi_branch_particular_layer=self.multi_branch_particular_layer,
+            multi_branch_layer_start = self.multi_branch_layer_start,
+            multi_branch_layer_till = self.multi_branch_layer_till,
+            multi_branch_layer_all = self.multi_branch_layer_all,
+            multi_branch_per_layer = self.multi_branch_per_layer,
+            multi_branch_true_iteration = self.multi_branch_true_iteration,
+
+            k_ret_ratio = self.k_ret_ratio,
 
             layer_id = self.layer_idx,
 
