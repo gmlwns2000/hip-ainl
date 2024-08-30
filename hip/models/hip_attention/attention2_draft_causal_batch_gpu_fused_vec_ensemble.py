@@ -754,7 +754,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
 # )
 
 @triton.jit
-def get_multi_branch_dupped_indices(
+def multi_branch_dupped_indices_cal(
     INDICES, stride_indices_b, stride_indices_bdst, stride_indices_bk,
     GROUP_SIZE, stride_group_size_b, stride_group_size_bdst, stride_group_size_bk,
 
@@ -1121,7 +1121,7 @@ def masking_iteration_draft_cuda_dup_and_score(
         if BRANCH_METHOD == 'random_diff' or BRANCH_METHOD == 'random_same':
             grid = (ENSEMBLE_ITER_N_START - 1, )         
 
-            get_multi_branch_dupped_indices[grid](
+            multi_branch_dupped_indices_cal[grid](
                 INDICES, stride_indices_b, stride_indices_bdst, stride_indices_bk,
                 GROUP_SIZE, stride_group_size_b, stride_group_size_bdst, stride_group_size_bk,
 

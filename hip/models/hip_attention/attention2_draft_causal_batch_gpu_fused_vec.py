@@ -282,7 +282,7 @@ def adjust_rope(
 
 @triton.jit
 def masking_iteration_draft_cuda_dup_and_score_calc_score(
-    dupped_indices_for_keys,
+    dupped_indices_for_keys, # 2 * multi_branch_ration - 1, 1, 2
     KEY_DUP: tl.constexpr,
     
     Q, stride_q_bsz, stride_q_tdst, stride_q_bh, stride_q_g, stride_q_hid,
@@ -297,6 +297,21 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     stride_key_access_count_b,
     stride_key_access_count_bdst, 
     MAX_ACCESS_COUNT,
+
+    DUPPED_INDICES,
+    stride_dupped_indices_b,
+    stride_dupped_indices_bdst,
+    stride_dupped_indices_bk,
+
+    DUPPED_GROUP_SIZE,
+    stride_dupped_group_size_b,
+    stride_dupped_group_size_bdst,
+    stride_dupped_group_size_bk,
+
+    SCORES,
+    stride_scores_b,
+    stride_scores_bdst,
+    stride_scores_bk,
     
     idx_b, 
     idx_bdst,
@@ -304,6 +319,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     dupped_mask,
     
     BH: tl.constexpr,
+    BK: tl.constexpr,
     G: tl.constexpr, 
     MAX_TSRC, 
     HID: tl.constexpr,
@@ -323,23 +339,105 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     BLOCK_STRIDE_K: tl.constexpr,
     BLOCK_BK: tl.constexpr,
     REDUCE_METHOD: tl.constexpr,
+
+    # multi branch
+    multi_branch_on_layer: tl.constexpr,
+    multi_branch_ratio: tl.constexpr,
+    idx_iteration,
+    multi_branch_true_iteration: tl.constexpr,
     
     NUM_CALIB: tl.constexpr = 32
 ):
+    if multi_branch_on_layer and idx_iteration >= multi_branch_true_iteration:
+        idx_multi_branch = tl.program_id(0) + 1 # 1 ~ 2 * multi_branch_ratio
+        # manage same indices for each block
+        idx_dupped_indices_bk = tl.aranage(0, BLOCK_BK) * (2 * multi_branch_ratio) + idx_multi_branch # [BLOCK_BK]
+        mask_bk_dup = idx_dupped_indices_bk < (BK * 2 * G)
+
+        dupped_indices_for_keys = tl.load( # [BLOCK_BK]
+            DUPPED_INDICES +\
+                idx_b * stride_dupped_indices_b +\
+                idx_bdst * stride_dupped_indices_bdst +\
+                idx_dupped_indices_bk * stride_dupped_indices_bk,
+            mask = mask_bk_dup,
+            cache_modifier = DEFAULT_CACHE_MODIFIER,
+        )
+
+        dupped_group_size = tl.load( # [BLOCK_BK]
+            DUPPED_GROUP_SIZE +\
+                idx_b * stride_dupped_group_size_b +\
+                idx_bdst * stride_dupped_group_size_bdst +\
+                idx_dupped_indices_bk * stride_dupped_group_size_bk,
+            mask = mask_bk_dup,
+            cache_modifier=DEFAULT_CACHE_MODIFIER,
+        )
+
+        dupped_mask = (dupped_group_size > 0) & mask_bk_dup # [BLOCK_BK]
+    
     idx_tsrc = (
         (dupped_indices_for_keys * BLOCK_SIZE_K)[:, None]\
         + tl.arange(0, BLOCK_SIZE_K // BLOCK_STRIDE_K)[None, :] * BLOCK_STRIDE_K + BLOCK_STRIDE_K - 1
-    )
-    idx_tsrc = tl.ravel(idx_tsrc)
+    ) # [BLOCK_BK * KEY_DUP, BLOCK_SIZE_K // BLOCK_STRIDE_K]
+    idx_tsrc = tl.ravel(idx_tsrc) # (BLOCK_BK * KEY_DUP) * (BLOCK_SIZE_K // BLOCK_STRIDE_K)
     idx_tsrc_grouped = idx_tsrc
     idx_group = idx_tsrc // MAX_TSRC
     idx_tsrc = idx_tsrc % MAX_TSRC
     idx_bsz = idx_b // BH
     idx_bh = idx_b % BH
     
+    """
+    if max_group_size_seed is None:
+        max_group_strategy = 'worst'
+        
+        if indices_seed is None:
+            # always chunks are evenly distributed. fastest.
+            max_group_strategy = 'best'
+        
+        if max_group_strategy == 'oracle':
+            # > oracle      5.1117  18.4503 sec
+            max_group_size = torch.max(t_group_sizes).item()
+        elif max_group_strategy == 'best':
+            # > best case   5.1218  10.3745 sec
+            #   (not complete search if you gave seed)
+            max_group_size = triton.cdiv(BSRC, mask_block_k)
+        elif max_group_strategy == 'worst':
+            # > worst case  5.1097  17.6545 sec
+            #   (always complete search)
+            max_group_size = triton.cdiv(BSRC, block_size_k)
+        elif max_group_strategy == 'greedy':
+            # > greedy      5.1202  11.4861 sec
+            #   (slightly generous then best stratgy)
+            max_group_size = triton.cdiv(BSRC, mask_block_k) * 2 # TODO should I add multi_branch_ratio_?
+        elif max_group_strategy == 'constant':
+            # TODO: test this
+            max_group_size = min(triton.cdiv(BSRC, block_size_k), 8)
+        else:
+            raise Exception()
+    else:
+        max_group_size = max_group_size_seed
+
+        
+    KEY_ACCESS_LEN = mask_k * math.ceil(math.log(max_group_size, 2 * multi_branch_ratio_))
+    if output_key_access_log:
+        key_access_log = torch.empty(
+            (B, BDST, KEY_ACCESS_LEN,), dtype=torch.int32, 
+            # fill_value=torch.iinfo(torch.int32).max,
+            device=q.device,
+        )
+        key_access_count = torch.zeros(
+            (B, BDST, ), 
+            dtype=torch.long,
+            device=q.device,
+        )
+    else:
+        key_access_log = None
+        key_access_count = None
+    """
+
     if KEY_ACCESS_LOG is not None:
-        mask_access = tl.ravel(tl.broadcast_to(
-            dupped_mask[:, None], 
+        raise Exception() # TODO I saw this but let's come back - used for debugging?
+        mask_access = tl.ravel(tl.broadcast_to( # [BLOCK_BK, BLOCK_SIZE_K // BLOCK_STRIDE_K]
+            dupped_mask[:, None], # [BLOCK_BK, KEY_DUP] ~ (dupped_group_size > 0) & mask_bk_dup
             BLOCK_BK * KEY_DUP, BLOCK_SIZE_K // BLOCK_STRIDE_K
         ))
         len_access = tl.sum(mask_access.to(tl.int32))
@@ -368,7 +466,10 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     ), dtype=tl.float32)
     idx_hid = tl.arange(0, HID)
     for i_group in tl.range(0, G):
-        queries = tl.load(
+        """
+        idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // BLOCK_STRIDE_Q) * BLOCK_STRIDE_Q
+        """
+        queries = tl.load( # [BLOCK_SIZE_Q // BLOCK_STRIDE_Q, HID]
             Q +\
                 idx_bsz.to(tl.int64) * stride_q_bsz +\
                 idx_tdst[:, None].to(tl.int64) * stride_q_tdst +\
@@ -384,13 +485,13 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
         
         if queries.dtype == tl.uint8:
             queries = queries.to(tl.float8e5, bitcast=True).to(tl.float16)
-        if G == 1:
+        if G == 1: # G = topk_head_group_size = 1
             mask_keys = tl.broadcast_to(
-                dupped_mask[:, None],
+                dupped_mask[:, None], # BLOCK_BK * KEY_DUP(1)
                 BLOCK_BK * KEY_DUP, 
                 BLOCK_SIZE_K // BLOCK_STRIDE_K
             )
-            mask_keys = tl.ravel(mask_keys)[None, :]
+            mask_keys = tl.ravel(mask_keys)[None, :] # (BLOCK_BK * KEY_DUP)* (BLOCK_SIZE_K // BLOCK_STRIDE_K) 
             mask_keys = mask_keys & (idx_tsrc_grouped < MAX_TSRC)
         else:
             mask_keys = (
@@ -403,7 +504,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
             mask_keys = tl.ravel(mask_keys)[None, :]
         idx_head = idx_bh.to(tl.int64) * G + idx_group[None, :].to(tl.int64)
         idx_kv_head = idx_head // KV_HEAD_REPEAT
-        keys = tl.load(
+        keys = tl.load( # (((BLOCK_BK * KEY_DUP) * (BLOCK_SIZE_K // BLOCK_STRIDE_K)), HID)
             K +\
                 idx_bsz.to(tl.int64) * stride_k_bsz +\
                 idx_tsrc[None, :].to(tl.int64) * stride_k_tsrc +\
@@ -417,7 +518,9 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
         if keys.dtype == tl.uint8:
             keys = keys.to(tl.float8e5, bitcast=True).to(tl.float16)
         
+        # TODO check all raise Exception I made
         if USING_EXTEND:
+            raise Exception(USING_EXTEND)
             if tl.min(pos_tdst) > (extend_window_size + NUM_CALIB // 2):
                 assert COS is not None
                 assert SIN is not None
@@ -527,6 +630,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                     out_dtype=tl.float16,
                 )
             else:
+                raise Exception()
                 idx_sparq_hid = tl.arange(0, SPARQ_HID)
                 
                 idx_sparq_hid = tl.load(
@@ -562,6 +666,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                     q_sparq, 
                     k_sparq,
                 ).to(tl.float32)
+        # acc : [BLOCK_SIZE_Q // BLOCK_STRIDE_Q, BLOCK_BK * KEY_DUP * BLOCK_SIZE_K // BLOCK_STRIDE_K]
         acc += t.to(acc.dtype)
         # acc += tl.sum(queries)
         # acc += tl.sum(keys)
@@ -571,7 +676,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
             (idx_tsrc[None, :] > pos_tdst[:, None]) |
             False
         ), 
-        -32000.0 if REDUCE_METHOD == 'max' else 32000.0, 
+        -32000.0 if REDUCE_METHOD == 'max' else 32000.0, # TODO ask - no???
         acc
     )
     scores = tl.reshape(
@@ -603,10 +708,22 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
         raise Exception()
     scores = tl.where(dupped_mask, scores, float('-inf'))
     
+    # TODO no need if we manage all together -> also check multi_branch_dupped_group_sizes_and_sampling_method_cal
+    # TODO - Question; can it load / store in parallel? when accessing different indx in the pointer?
+    if multi_branch_on_layer and idx_iteration >= multi_branch_true_iteration:
+        tl.store(
+            SCORES +\
+                idx_b * stride_scores_b +\
+                idx_bdst * stride_scores_bdst +\
+                idx_dupped_indices_bk * stride_scores_bk,
+            value=scores,
+            mask=mask_bk_dup,
+            cache_modifier=DEFAULT_CACHE_MODIFIER,
+        )
     return scores
 
 @triton.jit
-def get_multi_branch_dupped_group_sizes(
+def multi_branch_dupped_group_sizes_and_sampling_method_cal(
     DUPPED_INDICES, 
     stride_dupped_indices_b, 
     stride_dupped_indices_bdst, 
@@ -621,7 +738,7 @@ def get_multi_branch_dupped_group_sizes(
     G,
     RAND_SEED,
 
-    BRANCH_METHOD,
+    SAMPLE_METHOD,
 
     # multi_branch
     multi_branch_ratio,
@@ -637,6 +754,7 @@ def get_multi_branch_dupped_group_sizes(
     pid_1=None,
     pid_2=None,
 ):
+    # calculate branch_location's group_size and apply sampling_method
     branch_location = tl.program_id(0)
     # idx_bk_dup : idx_bk_dup = pid_bbk * BLOCK_BK * 2 * multi_branch_ratio + tl.arange(0, BLOCK_BK * 2 * multi_branch_ratio)
     
@@ -664,29 +782,211 @@ def get_multi_branch_dupped_group_sizes(
             mask = idx_bk_dup_bl_1 < (BK * 2 * G * multi_branch_ratio),
             cache_modifier=DEFAULT_CACHE_MODIFIER,
         )
-        tl.store(
-            DUPPED_GROUP_SIZE +\
-                idx_b * stride_dupped_group_size_b +\
-                idx_bdst * stride_dupped_group_size_bdst +\
-                idx_bk_dup_bl * stride_dupped_group_size_bk,
-            value = dupped_indices_bl_1 - dupped_indices_bl,
-            mask = idx_bk_dup_bl < (BK * 2 * G * multi_branch_ratio),
-            cache_modifier=DEFAULT_CACHE_MODIFIER,
-        )
+        
+        dupped_group_sizes_temp = dupped_indices_bl_1 - dupped_indices_bl # BLOCK_BK
+        # TODO NOTE : not using dupped_mask here; but original HiP needs dupped_mask when SAMPLING_METHOD == oracle
+        dupped_indices_for_keys_bl = dupped_indices_bl
+
+        # TODO random_per_iter
+        if SAMPLE_METHOD == 'random': # TODO check pid_0, pid_1, pid_2
+            offsets = tl.where(
+                dupped_group_sizes_temp > 4,
+                0,
+                (
+                    tl.randint(
+                        RAND_SEED, 
+                        dupped_indices_bl + \
+                            pid_0 * 31 + \
+                            pid_1 * 7 + \
+                            pid_2 * 1371
+                        ) % dupped_group_sizes_temp.to(tl.uint32)
+                ).to(tl.int32)
+            )
+            dupped_indices_for_keys_bl += offsets
+        elif SAMPLE_METHOD == 'last':
+            dupped_indices_for_keys_bl = dupped_indices_bl + tl.where(
+                dupped_group_sizes_temp == 0,
+                0,
+                dupped_group_sizes_temp - 1,
+            )
+        elif SAMPLE_METHOD == 'center':
+            dupped_indices_for_keys_bl = dupped_indices_bl + tl.maximum(
+                0, dupped_group_sizes_temp // 2
+            )
+        elif SAMPLE_METHOD == 'oracle':
+            # NOTE: perform linear scan inside of the chunk, this will cost O(T^2)
+            raise Exception(SAMPLE_METHOD)
+            dupped_indices_for_keys_start = dupped_indices_for_keys
+            dupped_indices_for_keys_end = dupped_indices_for_keys + tl.maximum(dupped_group_sizes - 1, 0)
+            max_scores = tl.zeros((BLOCK_BK * 2, ), dtype=tl.float32) - 32000.0
+            for i_shift in range(0, tl.cdiv(BSRC, mask_block_k)):
+                t_dupped_indices_for_keys = tl.where(
+                    i_shift < dupped_group_sizes,
+                    dupped_indices_for_keys_start + i_shift,
+                    dupped_indices_for_keys_end
+                ).to(tl.int32)
+                t_scores = masking_iteration_draft_cuda_dup_and_score_calc_score(
+                    t_dupped_indices_for_keys,
+                    
+                    Q, stride_q_bsz, stride_q_tdst, stride_q_bh, stride_q_g, stride_q_hid,
+                    K, stride_k_bsz, stride_k_tsrc, stride_k_head, stride_k_hid,
+                    COS, stride_cos_t, stride_cos_hid,
+                    SIN, stride_sin_t, stride_sin_hid,
+                    KEY_ACCESS_LOG, 
+                    stride_key_access_log_b, 
+                    stride_key_access_log_bdst, 
+                    stride_key_access_log_t,
+                    KEY_ACCESS_COUNT,
+                    stride_key_access_count_b,
+                    stride_key_access_count_bdst,
+                    MAX_ACCESS_COUNT,
+                    
+                    idx_b, 
+                    idx_bdst,
+                    idx_tdst, mask_tdst, pos_tdst,
+                    dupped_mask,
+                    
+                    BH, G, MAX_TSRC, HID, KV_HEAD_REPEAT,
+                    
+                    USING_EXTEND,
+                    extend_window_size,
+                    extend_group_size,
+                    
+                    USING_SPARQ,
+                    SPARQ_HID,
+                    Q_IND, stride_q_ind_b, stride_q_ind_g, stride_q_ind_bdst, stride_q_ind_k,
+                    
+                    BLOCK_SIZE_Q,
+                    BLOCK_STRIDE_Q,
+                    BLOCK_SIZE_K,
+                    BLOCK_STRIDE_K,
+                    BLOCK_BK,
+                    'max',
+                )
+                dupped_indices_for_keys = tl.where(
+                    t_scores > max_scores,
+                    t_dupped_indices_for_keys,
+                    dupped_indices_for_keys,
+                )
+                max_scores = tl.minimum(max_scores, t_scores)
+        else:
+            # this should be first
+            assert SAMPLE_METHOD == 'first'
+
     else:
-        tl.store(
-            DUPPED_GROUP_SIZE +\
-                idx_b * stride_dupped_group_size_b +\
-                idx_bdst * stride_dupped_group_size_bdst +\
-                idx_bk_dup_bl * stride_dupped_group_size_bk,
-            value = tl.full((BLOCK_BK, ), 2 * multi_branch_ratio, dupped_indices_bl.dtype) - dupped_indices_bl,
-            mask = idx_bk_dup_bl < (BK * 2 * G * multi_branch_ratio),
-            cache_modifier=DEFAULT_CACHE_MODIFIER,
-        )
+        dupped_group_sizes_temp = tl.full((BLOCK_BK, ), 2 * multi_branch_ratio, dupped_indices_bl.dtype) - dupped_indices_bl
+
+        dupped_indices_for_keys_bl = dupped_indices_bl
+
+        # TODO random_per_iter
+        if SAMPLE_METHOD == 'random': # TODO check pid_0, pid_1, pid_2
+            offsets = tl.where(
+                dupped_group_sizes_temp > 4,
+                0,
+                (
+                    tl.randint(
+                        RAND_SEED, 
+                        dupped_indices_bl + \
+                            pid_0 * 31 + \
+                            pid_1 * 7 + \
+                            pid_2 * 1371
+                        ) % dupped_group_sizes_temp.to(tl.uint32)
+                ).to(tl.int32)
+            )
+            dupped_indices_for_keys_bl += offsets
+        elif SAMPLE_METHOD == 'last':
+            dupped_indices_for_keys_bl = dupped_indices_bl + tl.where(
+                dupped_group_sizes_temp == 0,
+                0,
+                dupped_group_sizes_temp - 1,
+            )
+        elif SAMPLE_METHOD == 'center':
+            dupped_indices_for_keys_bl = dupped_indices_bl + tl.maximum(
+                0, dupped_group_sizes_temp // 2
+            )
+        elif SAMPLE_METHOD == 'oracle':
+            # NOTE: perform linear scan inside of the chunk, this will cost O(T^2)
+            raise Exception(SAMPLE_METHOD)
+            dupped_indices_for_keys_start = dupped_indices_for_keys
+            dupped_indices_for_keys_end = dupped_indices_for_keys + tl.maximum(dupped_group_sizes - 1, 0)
+            max_scores = tl.zeros((BLOCK_BK * 2, ), dtype=tl.float32) - 32000.0
+            for i_shift in range(0, tl.cdiv(BSRC, mask_block_k)):
+                t_dupped_indices_for_keys = tl.where(
+                    i_shift < dupped_group_sizes,
+                    dupped_indices_for_keys_start + i_shift,
+                    dupped_indices_for_keys_end
+                ).to(tl.int32)
+                t_scores = masking_iteration_draft_cuda_dup_and_score_calc_score(
+                    t_dupped_indices_for_keys,
+                    
+                    Q, stride_q_bsz, stride_q_tdst, stride_q_bh, stride_q_g, stride_q_hid,
+                    K, stride_k_bsz, stride_k_tsrc, stride_k_head, stride_k_hid,
+                    COS, stride_cos_t, stride_cos_hid,
+                    SIN, stride_sin_t, stride_sin_hid,
+                    KEY_ACCESS_LOG, 
+                    stride_key_access_log_b, 
+                    stride_key_access_log_bdst, 
+                    stride_key_access_log_t,
+                    KEY_ACCESS_COUNT,
+                    stride_key_access_count_b,
+                    stride_key_access_count_bdst,
+                    MAX_ACCESS_COUNT,
+                    
+                    idx_b, 
+                    idx_bdst,
+                    idx_tdst, mask_tdst, pos_tdst,
+                    dupped_mask,
+                    
+                    BH, G, MAX_TSRC, HID, KV_HEAD_REPEAT,
+                    
+                    USING_EXTEND,
+                    extend_window_size,
+                    extend_group_size,
+                    
+                    USING_SPARQ,
+                    SPARQ_HID,
+                    Q_IND, stride_q_ind_b, stride_q_ind_g, stride_q_ind_bdst, stride_q_ind_k,
+                    
+                    BLOCK_SIZE_Q,
+                    BLOCK_STRIDE_Q,
+                    BLOCK_SIZE_K,
+                    BLOCK_STRIDE_K,
+                    BLOCK_BK,
+                    'max',
+                )
+                dupped_indices_for_keys = tl.where(
+                    t_scores > max_scores,
+                    t_dupped_indices_for_keys,
+                    dupped_indices_for_keys,
+                )
+                max_scores = tl.minimum(max_scores, t_scores)
+        else:
+            # this should be first
+            assert SAMPLE_METHOD == 'first'
+
+    tl.store(
+        DUPPED_INDICES +\
+            idx_b * stride_dupped_group_size_b +\
+            idx_bdst * stride_dupped_group_size_bdst +\
+            idx_bk_dup_bl * stride_dupped_indices_bk,
+        value = dupped_indices_for_keys_bl,
+        mask = idx_bk_dup_bl < (BK * 2 * G * multi_branch_ratio),
+        cache_modifier=DEFAULT_CACHE_MODIFIER,
+    )
+
+    tl.store(
+        DUPPED_GROUP_SIZE +\
+            idx_b * stride_dupped_group_size_b +\
+            idx_bdst * stride_dupped_group_size_bdst +\
+            idx_bk_dup_bl * stride_dupped_group_size_bk,
+        value = dupped_group_sizes_temp,
+        mask = idx_bk_dup_bl < (BK * 2 * G * multi_branch_ratio),
+        cache_modifier=DEFAULT_CACHE_MODIFIER,
+    )
 
 
 @triton.jit
-def get_multi_branch_dupped_indices(
+def multi_branch_dupped_indices_cal(
     DUPPED_INDICES, 
     stride_dupped_indices_b, 
     stride_dupped_indices_bdst, 
@@ -1048,129 +1348,113 @@ def masking_iteration_draft_cuda_dup_and_score(
         cache_modifier=DEFAULT_CACHE_MODIFIER,
     )
     
-    if multi_branch_on_layer:
+    if multi_branch_on_layer and idx_iteration == multi_branch_true_iteration:
         # TODO NOTE current implementation doesn't support multi multi_branching
-        if idx_iteration == multi_branch_true_iteration:# MULTI BRANCH
-            # duplicate (2 * multi_branch_ratio) times -> broadcast
-            # TODO NOTE!!! check if tl.trans works well
-            # [BLOCK_BK] -> [BLOCK_BK * 2 * multi_branch_ratio]
-            indices_ = tl.broadcast_to(indices, (2 * multi_branch_ratio, BLOCK_BK))
-            group_sizes_ = tl.broadcast_to(group_sizes, (2 * multi_branch_ratio, BLOCK_BK))
 
-            dupped_indices = tl.reshape(
-                tl.trans(indices_), # BLOCK_BK x (2 * multi_branch_ratio)
-                (BLOCK_BK * 2 * multi_branch_ratio,),
-            )
-            dupped_group_sizes = tl.reshape(
-                tl.trans(group_sizes_),
-                (BLOCK_BK * 2 * multi_branch_ratio,)
-            )
+        # duplicate (2 * multi_branch_ratio) times -> broadcast
+        # TODO NOTE!!! check if tl.trans works well
+        # [BLOCK_BK] -> [BLOCK_BK * 2 * multi_branch_ratio]
+        indices_ = tl.broadcast_to(indices, (2 * multi_branch_ratio, BLOCK_BK))
+        group_sizes_ = tl.broadcast_to(group_sizes, (2 * multi_branch_ratio, BLOCK_BK))
 
-            # TODO can we discard these??
-            tl.store(
-                DUPPED_INDICES +\
-                    idx_b * stride_dupped_indices_b +\
-                    idx_bdst * stride_dupped_indices_bdst +\
-                    idx_bk_dup * stride_dupped_indices_bk,
-                value=dupped_indices,
-                mask=mask_bk_dup,
-                cache_modifier=DEFAULT_CACHE_MODIFIER,
-            )
-            tl.store(
-                DUPPED_GROUP_SIZE +\
-                    idx_b * stride_dupped_group_size_b +\
-                    idx_bdst * stride_dupped_group_size_bdst +\
-                    idx_bk_dup * stride_dupped_group_size_bk,
-                value=dupped_group_sizes,
-                mask=mask_bk_dup,
-                cache_modifier=DEFAULT_CACHE_MODIFIER,
-            )
-            
-            grid = (2 * multi_branch_ratio - 1) # 0th index should not be changed
-            get_multi_branch_dupped_indices[grid](
-                DUPPED_INDICES, 
-                stride_dupped_indices_b, 
-                stride_dupped_indices_bdst, 
-                stride_dupped_indices_bk,
-                DUPPED_GROUP_SIZE, 
-                stride_dupped_group_size_b, 
-                stride_dupped_group_size_bdst, 
-                stride_dupped_group_size_bk,
+        dupped_indices = tl.reshape(
+            tl.trans(indices_), # BLOCK_BK x (2 * multi_branch_ratio)
+            (BLOCK_BK * 2 * multi_branch_ratio,),
+        )
+        dupped_group_sizes = tl.reshape(
+            tl.trans(group_sizes_),
+            (BLOCK_BK * 2 * multi_branch_ratio,)
+        )
 
-                BLOCK_BK,
-                BK,
-                G,
-                RAND_SEED,
+        # TODO can we discard these??
+        tl.store(
+            DUPPED_INDICES +\
+                idx_b * stride_dupped_indices_b +\
+                idx_bdst * stride_dupped_indices_bdst +\
+                idx_bk_dup * stride_dupped_indices_bk,
+            value=dupped_indices,
+            mask=mask_bk_dup,
+            cache_modifier=DEFAULT_CACHE_MODIFIER,
+        )
+        tl.store(
+            DUPPED_GROUP_SIZE +\
+                idx_b * stride_dupped_group_size_b +\
+                idx_bdst * stride_dupped_group_size_bdst +\
+                idx_bk_dup * stride_dupped_group_size_bk,
+            value=dupped_group_sizes,
+            mask=mask_bk_dup,
+            cache_modifier=DEFAULT_CACHE_MODIFIER,
+        )
+        
+        grid = (2 * multi_branch_ratio - 1) # 0th index should not be changed
+        multi_branch_dupped_indices_cal[grid](
+            DUPPED_INDICES, 
+            stride_dupped_indices_b, 
+            stride_dupped_indices_bdst, 
+            stride_dupped_indices_bk,
+            DUPPED_GROUP_SIZE, 
+            stride_dupped_group_size_b, 
+            stride_dupped_group_size_bdst, 
+            stride_dupped_group_size_bk,
 
-                BRANCH_METHOD,
+            BLOCK_BK,
+            BK,
+            G,
+            RAND_SEED,
 
-                # multi_branch
-                multi_branch_ratio,
+            BRANCH_METHOD,
 
-                idx_b,
-                idx_bdst,
-                # pid_bbk,
-                idx_bk_dup, # TODO check : can we send tensor?
-                mask_bk_dup,
-                idx_iteration,
+            # multi_branch
+            multi_branch_ratio,
 
-                pid_0=tl.program_id(0), # TODO !!!! tl.program_id seem to be a bug
-                pid_1=tl.program_id(1),
-                pid_2=tl.program_id(2),
-            )
+            idx_b,
+            idx_bdst,
+            # pid_bbk,
+            idx_bk_dup, # TODO check : can we send tensor?
+            mask_bk_dup,
+            idx_iteration,
 
-            # TODO more efficient???
-            grid = (2 * multi_branch_ratio, )
-            get_multi_branch_dupped_group_sizes[grid](
-                DUPPED_INDICES, 
-                stride_dupped_indices_b, 
-                stride_dupped_indices_bdst, 
-                stride_dupped_indices_bk,
-                DUPPED_GROUP_SIZE, 
-                stride_dupped_group_size_b, 
-                stride_dupped_group_size_bdst, 
-                stride_dupped_group_size_bk,
+            pid_0=tl.program_id(0), # TODO !!!! tl.program_id seem to be a bug
+            pid_1=tl.program_id(1),
+            pid_2=tl.program_id(2),
+        )
 
-                BLOCK_BK,
-                BK,
-                G,
-                RAND_SEED,
+        # TODO more efficient???
+        grid = (2 * multi_branch_ratio, )
+        multi_branch_dupped_group_sizes_and_sampling_method_cal[grid](
+            DUPPED_INDICES, 
+            stride_dupped_indices_b, 
+            stride_dupped_indices_bdst, 
+            stride_dupped_indices_bk,
+            DUPPED_GROUP_SIZE, 
+            stride_dupped_group_size_b, 
+            stride_dupped_group_size_bdst, 
+            stride_dupped_group_size_bk,
 
-                BRANCH_METHOD,
+            BLOCK_BK,
+            BK,
+            G,
+            RAND_SEED,
 
-                # multi_branch
-                multi_branch_ratio,
+            SAMPLE_METHOD,
 
-                idx_b,
-                idx_bdst,
-                # pid_bbk,
-                idx_bk_dup, # TODO check : can we send tensor?
-                mask_bk_dup,
-                idx_iteration,
+            # multi_branch
+            multi_branch_ratio,
 
-                pid_0=tl.program_id(0), # TODO !!!! tl.program_id seem to be a bug
-                pid_1=tl.program_id(1),
-                pid_2=tl.program_id(2),
-            )
+            idx_b,
+            idx_bdst,
+            # pid_bbk,
+            idx_bk_dup, # TODO check : can we send tensor?
+            mask_bk_dup,
+            idx_iteration,
 
-            dupped_indices = tl.load(
-                DUPPED_INDICES +\
-                    idx_b * stride_dupped_indices_b +\
-                    idx_bdst * stride_dupped_indices_bdst +\
-                    idx_bk_dup * stride_dupped_indices_bk,
-                mask = mask_bk_dup,
-                cache_modifier=DEFAULT_CACHE_MODIFIER,
-            )
+            pid_0=tl.program_id(0), # TODO !!!! tl.program_id seem to be a bug
+            pid_1=tl.program_id(1),
+            pid_2=tl.program_id(2),
+        )
 
-            dupped_group_sizes = tl.load(
-                DUPPED_GROUP_SIZE +\
-                    idx_b * stride_dupped_indices_b +\
-                    idx_bdst * stride_dupped_indices_bdst +\
-                    idx_bk_dup * stride_dupped_indices_bk,
-                mask = mask_bk_dup,
-                cache_modifier=DEFAULT_CACHE_MODIFIER,
-            )
-        else:# SINGLE BRANCH
+    else:
+        if multi_branch_on_layer: # SINGLE BRANCH
             # duplicate 2 times -> join
             # idx_iteration < multi_branch_true_iteration : multi_branch_ratio == 1
             # idx_iteration > multi_branch_true_iteration : multi_branch_ratio > 1
@@ -1255,126 +1539,204 @@ def masking_iteration_draft_cuda_dup_and_score(
                 (tl.arange(0, BLOCK_BK * 2 * multi_branch_ratio) % 2) == 0,
                 flipped_dupped_indices - dupped_indices,
                 flipped_dupped_indices + dupped_group_sizes - dupped_indices,
-            )
-    else:
-        dupped_indices = tl.reshape(
-            tl.join(indices, indices),
-            (BLOCK_BK * 2, ),
-        )
-        dupped_group_sizes = tl.reshape(
-            tl.join(group_sizes, group_sizes),
-            (BLOCK_BK * 2, ),
-        )
+            )            
 
-        if BRANCH_METHOD == 'half' or BRANCH_METHOD == 'equal_size':
-            dupped_indices = tl.where(
-                (tl.arange(0, BLOCK_BK * 2) % 2) == 0,
-                dupped_indices,
-                (dupped_indices + dupped_group_sizes * 0.5).to(tl.int32)
+        else: # only single branching layer
+            dupped_indices = tl.reshape(
+                tl.join(indices, indices),
+                (BLOCK_BK * 2, ),
             )
-        elif BRANCH_METHOD == 'random':
-            dupped_indices = tl.where(
-                (tl.arange(0, BLOCK_BK * 2) % 2) == 0,
-                dupped_indices,
-                tl.where(
-                    dupped_group_sizes == 0,
+            dupped_group_sizes = tl.reshape(
+                tl.join(group_sizes, group_sizes),
+                (BLOCK_BK * 2, ),
+            )
+
+            if BRANCH_METHOD == 'half' or BRANCH_METHOD == 'equal_size':
+                dupped_indices = tl.where(
+                    (tl.arange(0, BLOCK_BK * 2) % 2) == 0,
                     dupped_indices,
-                    tl.maximum(
-                        dupped_indices + 1,
-                        dupped_indices +\
-                            dupped_group_sizes * 0.5 +\
-                            dupped_group_sizes * (0.2 * tl.random.rand(
-                                RAND_SEED, 
-                                tl.arange(0, BLOCK_BK * 2) +\
-                                    tl.program_id(0) * 7 +\
-                                    tl.program_id(1) * 53 +\
-                                    tl.program_id(2) * 157
-                                ) * 0.99 - 0.1
-                            )
-                    ).to(tl.int32)
+                    (dupped_indices + dupped_group_sizes * 0.5).to(tl.int32)
                 )
-            )
-        elif BRANCH_METHOD == 'random_diff_per_iter':
-            dupped_indices = tl.where(
-                (tl.arange(0, BLOCK_BK * 2) % 2) == 0,
-                dupped_indices,
-                tl.where(
-                    dupped_group_sizes == 0,
+            elif BRANCH_METHOD == 'random':
+                dupped_indices = tl.where(
+                    (tl.arange(0, BLOCK_BK * 2) % 2) == 0,
                     dupped_indices,
-                    tl.maximum(
-                        dupped_indices + 1,
-                        dupped_indices +\
-                            dupped_group_sizes * 0.5 +\
-                            dupped_group_sizes * (0.2 * tl.random.rand(
-                                RAND_SEED + idx_iteration, 
-                                tl.arange(0, BLOCK_BK * 2) +\
-                                    tl.program_id(0) * 7 +\
-                                    tl.program_id(1) * 53 +\
-                                    tl.program_id(2) * 157
-                                ) * 0.99 - 0.1
-                            )
-                    ).to(tl.int32)
+                    tl.where(
+                        dupped_group_sizes == 0,
+                        dupped_indices,
+                        tl.maximum(
+                            dupped_indices + 1,
+                            dupped_indices +\
+                                dupped_group_sizes * 0.5 +\
+                                dupped_group_sizes * (0.2 * tl.random.rand(
+                                    RAND_SEED, 
+                                    tl.arange(0, BLOCK_BK * 2) +\
+                                        tl.program_id(0) * 7 +\
+                                        tl.program_id(1) * 53 +\
+                                        tl.program_id(2) * 157
+                                    ) * 0.99 - 0.1
+                                )
+                        ).to(tl.int32)
+                    )
                 )
-            )
-        else:
-            raise Exception(BRANCH_METHOD)
-        flipped_dupped_indices = tl.reshape(
-            tl.flip(
-                tl.reshape(
-                    dupped_indices, 
-                    (BLOCK_BK, 2)
+            elif BRANCH_METHOD == 'random_diff_per_iter':
+                dupped_indices = tl.where(
+                    (tl.arange(0, BLOCK_BK * 2) % 2) == 0,
+                    dupped_indices,
+                    tl.where(
+                        dupped_group_sizes == 0,
+                        dupped_indices,
+                        tl.maximum(
+                            dupped_indices + 1,
+                            dupped_indices +\
+                                dupped_group_sizes * 0.5 +\
+                                dupped_group_sizes * (0.2 * tl.random.rand(
+                                    RAND_SEED + idx_iteration, 
+                                    tl.arange(0, BLOCK_BK * 2) +\
+                                        tl.program_id(0) * 7 +\
+                                        tl.program_id(1) * 53 +\
+                                        tl.program_id(2) * 157
+                                    ) * 0.99 - 0.1
+                                )
+                        ).to(tl.int32)
+                    )
+                )
+            else:
+                raise Exception(BRANCH_METHOD)
+            flipped_dupped_indices = tl.reshape(
+                tl.flip(
+                    tl.reshape(
+                        dupped_indices, 
+                        (BLOCK_BK, 2)
+                    ),
                 ),
-            ),
-            (BLOCK_BK * 2),
-        )
-        dupped_group_sizes = tl.where(
-            (tl.arange(0, BLOCK_BK * 2) % 2) == 0,
-            flipped_dupped_indices - dupped_indices,
-            flipped_dupped_indices + dupped_group_sizes - dupped_indices,
-        )
+                (BLOCK_BK * 2),
+            )
+            dupped_group_sizes = tl.where(
+                (tl.arange(0, BLOCK_BK * 2) % 2) == 0,
+                flipped_dupped_indices - dupped_indices,
+                flipped_dupped_indices + dupped_group_sizes - dupped_indices,
+            )
+
+        dupped_mask = (dupped_group_sizes > 0) & mask_bk_dup 
+        
+        dupped_indices_for_keys = dupped_indices
+        # TODO random_per_iter
+        if SAMPLE_METHOD == 'random':
+            offsets = tl.where(
+                dupped_group_sizes > 4,
+                0,
+                (
+                    tl.randint(
+                        RAND_SEED, 
+                        dupped_indices + \
+                            tl.program_id(0) * 31 + \
+                            tl.program_id(1) * 7 + \
+                            tl.program_id(2) * 1371
+                        ) % dupped_group_sizes.to(tl.uint32)
+                ).to(tl.int32)
+            )
+            dupped_indices_for_keys += offsets
+        elif SAMPLE_METHOD == 'last':
+            dupped_indices_for_keys = dupped_indices + tl.where(
+                dupped_group_sizes == 0,
+                0,
+                dupped_group_sizes - 1,
+            )
+        elif SAMPLE_METHOD == 'center':
+            dupped_indices_for_keys = dupped_indices + tl.maximum(
+                0, dupped_group_sizes // 2
+            )
+        elif SAMPLE_METHOD == 'oracle':
+            # NOTE: perform linear scan inside of the chunk, this will cost O(T^2)
+            raise Exception(SAMPLE_METHOD)
+            dupped_indices_for_keys_start = dupped_indices_for_keys
+            dupped_indices_for_keys_end = dupped_indices_for_keys + tl.maximum(dupped_group_sizes - 1, 0)
+            max_scores = tl.zeros((BLOCK_BK * 2, ), dtype=tl.float32) - 32000.0
+            for i_shift in range(0, tl.cdiv(BSRC, mask_block_k)):
+                t_dupped_indices_for_keys = tl.where(
+                    i_shift < dupped_group_sizes,
+                    dupped_indices_for_keys_start + i_shift,
+                    dupped_indices_for_keys_end
+                ).to(tl.int32)
+                t_scores = masking_iteration_draft_cuda_dup_and_score_calc_score(
+                    t_dupped_indices_for_keys,
+                    
+                    Q, stride_q_bsz, stride_q_tdst, stride_q_bh, stride_q_g, stride_q_hid,
+                    K, stride_k_bsz, stride_k_tsrc, stride_k_head, stride_k_hid,
+                    COS, stride_cos_t, stride_cos_hid,
+                    SIN, stride_sin_t, stride_sin_hid,
+                    KEY_ACCESS_LOG, 
+                    stride_key_access_log_b, 
+                    stride_key_access_log_bdst, 
+                    stride_key_access_log_t,
+                    KEY_ACCESS_COUNT,
+                    stride_key_access_count_b,
+                    stride_key_access_count_bdst,
+                    MAX_ACCESS_COUNT,
+                    
+                    idx_b, 
+                    idx_bdst,
+                    idx_tdst, mask_tdst, pos_tdst,
+                    dupped_mask,
+                    
+                    BH, G, MAX_TSRC, HID, KV_HEAD_REPEAT,
+                    
+                    USING_EXTEND,
+                    extend_window_size,
+                    extend_group_size,
+                    
+                    USING_SPARQ,
+                    SPARQ_HID,
+                    Q_IND, stride_q_ind_b, stride_q_ind_g, stride_q_ind_bdst, stride_q_ind_k,
+                    
+                    BLOCK_SIZE_Q,
+                    BLOCK_STRIDE_Q,
+                    BLOCK_SIZE_K,
+                    BLOCK_STRIDE_K,
+                    BLOCK_BK,
+                    'max',
+                )
+                dupped_indices_for_keys = tl.where(
+                    t_scores > max_scores,
+                    t_dupped_indices_for_keys,
+                    dupped_indices_for_keys,
+                )
+                max_scores = tl.minimum(max_scores, t_scores)
+        else:
+            # this should be first
+            assert SAMPLE_METHOD == 'first'
+        
+        # for dup_and_score_calc_score
+        if multi_branch_on_layer and idx_iteration > multi_branch_true_iteration:
+            tl.store(
+                DUPPED_INDICES +\
+                    idx_b * stride_dupped_indices_b +\
+                    idx_bdst * stride_dupped_indices_bdst +\
+                    idx_bk_dup * stride_dupped_indices_bk,
+                value = dupped_indices,
+                mask = mask_bk_dup,
+                cache_modifier=DEFAULT_CACHE_MODIFIER,
+            )
     
-    dupped_mask = (dupped_group_sizes > 0) & mask_bk_dup 
-    
-    dupped_indices_for_keys = dupped_indices
-    if SAMPLE_METHOD == 'random':
-        offsets = tl.where(
-            dupped_group_sizes > 4,
-            0,
-            (
-                tl.randint(
-                    RAND_SEED, 
-                    dupped_indices + \
-                        tl.program_id(0) * 31 + \
-                        tl.program_id(1) * 7 + \
-                        tl.program_id(2) * 1371
-                    ) % dupped_group_sizes.to(tl.uint32)
-            ).to(tl.int32)
+    if SCORES_CACHED:
+        cached_scores = tl.load(
+            SCORES_FINAL +\
+                idx_b * stride_scores_final_b+\
+                idx_bdst * stride_scores_final_bdst+\
+                idx_bk * stride_scores_final_bk,
+            mask = mask_bk,
+            cache_modifier=DEFAULT_CACHE_MODIFIER,
         )
-        dupped_indices_for_keys += offsets
-    elif SAMPLE_METHOD == 'last':
-        dupped_indices_for_keys = dupped_indices + tl.where(
-            dupped_group_sizes == 0,
-            0,
-            dupped_group_sizes - 1,
-        )
-    elif SAMPLE_METHOD == 'center':
-        dupped_indices_for_keys = dupped_indices + tl.maximum(
-            0, dupped_group_sizes // 2
-        )
-    elif SAMPLE_METHOD == 'oracle':
-        # NOTE: perform linear scan inside of the chunk, this will cost O(T^2)
-        raise Exception(SAMPLE_METHOD)
-        dupped_indices_for_keys_start = dupped_indices_for_keys
-        dupped_indices_for_keys_end = dupped_indices_for_keys + tl.maximum(dupped_group_sizes - 1, 0)
-        max_scores = tl.zeros((BLOCK_BK * 2, ), dtype=tl.float32) - 32000.0
-        for i_shift in range(0, tl.cdiv(BSRC, mask_block_k)):
-            t_dupped_indices_for_keys = tl.where(
-                i_shift < dupped_group_sizes,
-                dupped_indices_for_keys_start + i_shift,
-                dupped_indices_for_keys_end
-            ).to(tl.int32)
-            t_scores = masking_iteration_draft_cuda_dup_and_score_calc_score(
-                t_dupped_indices_for_keys,
+        # dupped_indices_for_keys = dupped_indices <- before applying SAMPLING_METHOD
+        if multi_branch_on_layer and idx_iteration >= multi_branch_true_iteration:
+            # dupped_indices_for_keys : BLOCK_BK * 2 * multi_branch_ratio
+            # 1, 2 * multi_branch_ratio - 1
+            # TODO can we do it all 2* multi_branch_ratio together at once? would it be better? -> can use return. if not, have to store
+            grid = (2 * multi_branch_ratio - 1) # except cached first idx
+            scores_sampled = masking_iteration_draft_cuda_dup_and_score_calc_score[grid](
+                None, # TODO check; okay to first set as None?
+                1,
                 
                 Q, stride_q_bsz, stride_q_tdst, stride_q_bh, stride_q_g, stride_q_hid,
                 K, stride_k_bsz, stride_k_tsrc, stride_k_head, stride_k_hid,
@@ -1388,13 +1750,28 @@ def masking_iteration_draft_cuda_dup_and_score(
                 stride_key_access_count_b,
                 stride_key_access_count_bdst,
                 MAX_ACCESS_COUNT,
+
+                DUPPED_INDICES,
+                stride_dupped_indices_b,
+                stride_dupped_indices_bdst,
+                stride_dupped_indices_bk,
+
+                DUPPED_GROUP_SIZE,
+                stride_dupped_group_size_b,
+                stride_dupped_group_size_bdst,
+                stride_dupped_group_size_bk,
+
+                SCORES,
+                stride_scores_b,
+                stride_scores_bdst,
+                stride_scores_bk,
                 
                 idx_b, 
                 idx_bdst,
                 idx_tdst, mask_tdst, pos_tdst,
-                dupped_mask,
+                mask_to_sample,
                 
-                BH, G, MAX_TSRC, HID, KV_HEAD_REPEAT,
+                BH, BK, G, MAX_TSRC, HID, KV_HEAD_REPEAT,
                 
                 USING_EXTEND,
                 extend_window_size,
@@ -1409,35 +1786,15 @@ def masking_iteration_draft_cuda_dup_and_score(
                 BLOCK_SIZE_K,
                 BLOCK_STRIDE_K,
                 BLOCK_BK,
+                # BLOCK_BK // 2,
                 'max',
+
+                # multi_branching
+                multi_branch_on_layer,
+                multi_branch_ratio,
+                idx_iteration,
+                multi_branch_true_iteration
             )
-            dupped_indices_for_keys = tl.where(
-                t_scores > max_scores,
-                t_dupped_indices_for_keys,
-                dupped_indices_for_keys,
-            )
-            max_scores = tl.minimum(max_scores, t_scores)
-    else:
-        # this should be first
-        assert SAMPLE_METHOD == 'first'
-    
-    if SCORES_CACHED:
-        cached_scores = tl.load(
-            SCORES_FINAL +\
-                idx_b * stride_scores_final_b+\
-                idx_bdst * stride_scores_final_bdst+\
-                idx_bk * stride_scores_final_bk,
-            mask = mask_bk,
-            cache_modifier=DEFAULT_CACHE_MODIFIER,
-        )
-        # dupped_indices_for_keys = dupped_indices <- before applying SAMPLING_METHOD
-        if multi_branch_on_layer and idx_iteration >= multi_branch_true_iteration:
-            # dupped_indices_for_keys : BLOCK_BK * 2 * multi_branch_ratio
-            if idx_iteration == multi_branch_true_iteration:
-                pass
-            # dupped_indices_for_keys : BLOCK_BK * 2 * multi_branch_ratio
-            elif idx_iteration > multi_branch_true_iteration:
-                pass
         else:
             # TODO NOTE : includes idx_iteration < multi_branch_true_iteration
             _, indices_to_sample = dupped_indices_for_keys\
@@ -1494,13 +1851,28 @@ def masking_iteration_draft_cuda_dup_and_score(
                 stride_key_access_count_b,
                 stride_key_access_count_bdst,
                 MAX_ACCESS_COUNT,
+
+                DUPPED_INDICES,
+                stride_dupped_indices_b,
+                stride_dupped_indices_bdst,
+                stride_dupped_indices_bk,
+
+                DUPPED_GROUP_SIZE,
+                stride_dupped_group_size_b,
+                stride_dupped_group_size_bdst,
+                stride_dupped_group_size_bk,
+
+                SCORES,
+                stride_scores_b,
+                stride_scores_bdst,
+                stride_scores_bk,
                 
                 idx_b, 
                 idx_bdst,
                 idx_tdst, mask_tdst, pos_tdst,
                 mask_to_sample,
                 
-                BH, G, MAX_TSRC, HID, KV_HEAD_REPEAT,
+                BH, BK, G, MAX_TSRC, HID, KV_HEAD_REPEAT,
                 
                 USING_EXTEND,
                 extend_window_size,
@@ -1517,6 +1889,11 @@ def masking_iteration_draft_cuda_dup_and_score(
                 BLOCK_BK,
                 # BLOCK_BK // 2,
                 'max',
+
+                multi_branch_on_layer,
+                multi_branch_ratio,
+                idx_iteration,
+                multi_branch_true_iteration
             )
             
             # scores_not_sampled = tl.full((BLOCK_BK // 2,), float('-inf'), dtype=scores_sampled.dtype)
@@ -1552,13 +1929,28 @@ def masking_iteration_draft_cuda_dup_and_score(
             stride_key_access_count_b,
             stride_key_access_count_bdst,
             MAX_ACCESS_COUNT,
+
+            DUPPED_INDICES,
+            stride_dupped_indices_b,
+            stride_dupped_indices_bdst,
+            stride_dupped_indices_bk,
+
+            DUPPED_GROUP_SIZE,
+            stride_dupped_group_size_b,
+            stride_dupped_group_size_bdst,
+            stride_dupped_group_size_bk,
+
+            SCORES,
+            stride_scores_b,
+            stride_scores_bdst,
+            stride_scores_bk,
             
             idx_b, 
             idx_bdst,
             idx_tdst, mask_tdst, pos_tdst,
             mask_to_sample,
             
-            BH, G, MAX_TSRC, HID, KV_HEAD_REPEAT,
+            BH, BK, G, MAX_TSRC, HID, KV_HEAD_REPEAT,
             
             USING_EXTEND,
             extend_window_size,
@@ -1574,6 +1966,11 @@ def masking_iteration_draft_cuda_dup_and_score(
             BLOCK_STRIDE_K,
             BLOCK_BK,
             'max',
+
+            multi_branch_on_layer,
+            multi_branch_ratio,
+            idx_iteration,
+            multi_branch_true_iteration
         )
         scores = scores_sampled.to(SCORES.dtype.element_ty)
     
@@ -3149,7 +3546,7 @@ def masking_iteration_draft_cuda_initialize_score(
         idx_tdst, mask_tdst, pos_tdst,
         mask_bk,
         
-        BH, G, MAX_TSRC, HID, KV_HEAD_REPEAT,
+        BH, BK, G, MAX_TSRC, HID, KV_HEAD_REPEAT,
                 
         USING_EXTEND,
         extend_window_size,
@@ -3165,6 +3562,10 @@ def masking_iteration_draft_cuda_initialize_score(
         BLOCK_STRIDE_K,
         BLOCK_BK,
         'max',
+
+        multi_branch_on_layer,
+        multi_branch_ratio,
+        
     )
     
     tl.store(
@@ -3287,6 +3688,7 @@ def masking_iteration_draft(
     BSZ, _, BH, G, HID = q.shape
     B = BSZ * BH
 
+    # TODO NOTE : multi_branch_ratio should be power of 2
     if multi_branch_layer_all or (layer_id == multi_branch_particular_layer) or (layer_id >= multi_branch_layer_start and \
                                                                                  layer_id <= multi_branch_layer_till and \
                                                                                 (layer_id - multi_branch_layer_start) % multi_branch_per_layer == 0):
@@ -3358,21 +3760,38 @@ def masking_iteration_draft(
     else:
         max_group_size = max_group_size_seed
     
-    KEY_ACCESS_LEN = mask_k * math.ceil(math.log2(max_group_size))
-    if output_key_access_log:
-        key_access_log = torch.empty(
-            (B, BDST, KEY_ACCESS_LEN,), dtype=torch.int32, 
-            # fill_value=torch.iinfo(torch.int32).max,
-            device=q.device,
-        )
-        key_access_count = torch.zeros(
-            (B, BDST, ), 
-            dtype=torch.long,
-            device=q.device,
-        )
+    if multi_branch_on_layer:
+        KEY_ACCESS_LEN = mask_k * math.ceil(math.log(max_group_size, 2 * multi_branch_ratio_))
+        if output_key_access_log:
+            key_access_log = torch.empty(
+                (B, BDST, KEY_ACCESS_LEN,), dtype=torch.int32, 
+                # fill_value=torch.iinfo(torch.int32).max,
+                device=q.device,
+            )
+            key_access_count = torch.zeros(
+                (B, BDST, ), 
+                dtype=torch.long,
+                device=q.device,
+            )
+        else:
+            key_access_log = None
+            key_access_count = None
     else:
-        key_access_log = None
-        key_access_count = None
+        KEY_ACCESS_LEN = mask_k * math.ceil(math.log2(max_group_size))
+        if output_key_access_log:
+            key_access_log = torch.empty(
+                (B, BDST, KEY_ACCESS_LEN,), dtype=torch.int32, 
+                # fill_value=torch.iinfo(torch.int32).max,
+                device=q.device,
+            )
+            key_access_count = torch.zeros(
+                (B, BDST, ), 
+                dtype=torch.long,
+                device=q.device,
+            )
+        else:
+            key_access_log = None
+            key_access_count = None
     
     if sparq_ind is None:
         using_sparq = False
