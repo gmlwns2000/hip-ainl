@@ -354,7 +354,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
         # BLOCK_BK * (2 * multi_branch_ratio - 1)
         idx_dupped_indices_bk = tl.arange(0, BLOCK_BK)[:, None] * (2 * multi_branch_ratio) + tl.arange(1, 2 * multi_branch_ratio)[None, :]
         idx_dupped_indices_bk = tl.ravel(idx_dupped_indices_bk)
-        mask_bk_dup = idx_dupped_indices_bk < (BK * 2 * G * multi_branch_ratio)
+        mask_bk_dup = idx_dupped_indices_bk < (BK * 2 * multi_branch_ratio * G)
         
         dupped_indices_for_keys = tl.load( # [(2 * multi_branch_ratio - 1) * BLOCK_BK] flatten
             DUPPED_INDICES +\
