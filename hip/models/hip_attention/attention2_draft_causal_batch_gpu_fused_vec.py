@@ -312,6 +312,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     stride_scores_b,
     stride_scores_bdst,
     stride_scores_bk,
+    SCORES_CACHED: tl.constexpr,
     
     idx_b, 
     idx_bdst,
@@ -348,22 +349,23 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     
     NUM_CALIB: tl.constexpr = 32
 ):
-    if multi_branch_on_layer and idx_iteration >= multi_branch_true_iteration:
-        idx_multi_branch = tl.program_id(0) + 1 # 1 ~ 2 * multi_branch_ratio
-        # manage same indices for each block
-        idx_dupped_indices_bk = tl.aranage(0, BLOCK_BK) * (2 * multi_branch_ratio) + idx_multi_branch # [BLOCK_BK]
-        mask_bk_dup = idx_dupped_indices_bk < (BK * 2 * G)
-
-        dupped_indices_for_keys = tl.load( # [BLOCK_BK]
+    if SCORES_CACHED and multi_branch_on_layer and idx_iteration >= multi_branch_true_iteration:
+        # TODO check - does this work? - refer to idx_tsrc, seems okay 
+        # BLOCK_BK * (2 * multi_branch_ratio - 1)
+        idx_dupped_indices_bk = tl.arange(0, BLOCK_BK)[:, None] * (2 * multi_branch_ratio) + tl.arange(1, 2 * multi_branch_ratio)[None, :]
+        idx_dupped_indices_bk = tl.ravel(idx_dupped_indices_bk)
+        mask_bk_dup = idx_dupped_indices_bk < (BK * 2 * G * multi_branch_ratio)
+        
+        dupped_indices_for_keys = tl.load( # [(2 * multi_branch_ratio - 1) * BLOCK_BK] flatten
             DUPPED_INDICES +\
                 idx_b * stride_dupped_indices_b +\
                 idx_bdst * stride_dupped_indices_bdst +\
                 idx_dupped_indices_bk * stride_dupped_indices_bk,
             mask = mask_bk_dup,
-            cache_modifier = DEFAULT_CACHE_MODIFIER,
+            cache_modifier=DEFAULT_CACHE_MODIFIER,
         )
 
-        dupped_group_size = tl.load( # [BLOCK_BK]
+        dupped_group_size = tl.load( # [(2 * multi_branch_ratio - 1) * BLOCK_BK]
             DUPPED_GROUP_SIZE +\
                 idx_b * stride_dupped_group_size_b +\
                 idx_bdst * stride_dupped_group_size_bdst +\
@@ -372,7 +374,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
             cache_modifier=DEFAULT_CACHE_MODIFIER,
         )
 
-        dupped_mask = (dupped_group_size > 0) & mask_bk_dup # [BLOCK_BK]
+        dupped_mask = (dupped_group_size > 0) & mask_bk_dup # [(2 * multi_branch_ratio - 1) * BLOCK_BK]
     
     idx_tsrc = (
         (dupped_indices_for_keys * BLOCK_SIZE_K)[:, None]\
@@ -487,7 +489,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
             queries = queries.to(tl.float8e5, bitcast=True).to(tl.float16)
         if G == 1: # G = topk_head_group_size = 1
             mask_keys = tl.broadcast_to(
-                dupped_mask[:, None], # BLOCK_BK * KEY_DUP(1)
+                dupped_mask[:, None], # BLOCK_BK * KEY_DUP
                 BLOCK_BK * KEY_DUP, 
                 BLOCK_SIZE_K // BLOCK_STRIDE_K
             )
@@ -708,9 +710,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
         raise Exception()
     scores = tl.where(dupped_mask, scores, float('-inf'))
     
-    # TODO no need if we manage all together -> also check multi_branch_dupped_group_sizes_and_sampling_method_cal
-    # TODO - Question; can it load / store in parallel? when accessing different indx in the pointer?
-    if multi_branch_on_layer and idx_iteration >= multi_branch_true_iteration:
+    if SCORES_CACHED and multi_branch_on_layer and idx_iteration >= multi_branch_true_iteration:
         tl.store(
             SCORES +\
                 idx_b * stride_scores_b +\
@@ -720,6 +720,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
             mask=mask_bk_dup,
             cache_modifier=DEFAULT_CACHE_MODIFIER,
         )
+
     return scores
 
 @triton.jit
@@ -1419,7 +1420,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             pid_2=tl.program_id(2),
         )
 
-        # TODO more efficient???
+        # TODO more efficient??? - doing load store for each grid element
         grid = (2 * multi_branch_ratio, )
         multi_branch_dupped_group_sizes_and_sampling_method_cal[grid](
             DUPPED_INDICES, 
@@ -1718,6 +1719,16 @@ def masking_iteration_draft_cuda_dup_and_score(
                 mask = mask_bk_dup,
                 cache_modifier=DEFAULT_CACHE_MODIFIER,
             )
+
+            tl.store(
+                DUPPED_GROUP_SIZE +\
+                    idx_b * stride_dupped_group_size_b +\
+                    idx_bdst * stride_dupped_group_size_bdst +\
+                    idx_bk_dup * stride_dupped_group_size_bk,
+                value = dupped_group_sizes,
+                mask = mask_bk_dup,
+                cache_modifier=DEFAULT_CACHE_MODIFIER,
+            )
     
     if SCORES_CACHED:
         cached_scores = tl.load(
@@ -1733,10 +1744,10 @@ def masking_iteration_draft_cuda_dup_and_score(
             # dupped_indices_for_keys : BLOCK_BK * 2 * multi_branch_ratio
             # 1, 2 * multi_branch_ratio - 1
             # TODO can we do it all 2* multi_branch_ratio together at once? would it be better? -> can use return. if not, have to store
-            grid = (2 * multi_branch_ratio - 1) # except cached first idx
-            scores_sampled = masking_iteration_draft_cuda_dup_and_score_calc_score[grid](
+            # TODO check all arange start, end
+            scores_sampled = masking_iteration_draft_cuda_dup_and_score_calc_score(
                 None, # TODO check; okay to first set as None?
-                1,
+                2 * multi_branch_ratio - 1,
                 
                 Q, stride_q_bsz, stride_q_tdst, stride_q_bh, stride_q_g, stride_q_hid,
                 K, stride_k_bsz, stride_k_tsrc, stride_k_head, stride_k_hid,
@@ -1765,6 +1776,7 @@ def masking_iteration_draft_cuda_dup_and_score(
                 stride_scores_b,
                 stride_scores_bdst,
                 stride_scores_bk,
+                SCORES_CACHED,
                 
                 idx_b, 
                 idx_bdst,
@@ -1795,8 +1807,21 @@ def masking_iteration_draft_cuda_dup_and_score(
                 idx_iteration,
                 multi_branch_true_iteration
             )
-        else:
-            # TODO NOTE : includes idx_iteration < multi_branch_true_iteration
+
+            idx_dup_bk_cached_score = tl.arange(0, BLOCK_BK) * (2 * multi_branch_ratio)
+            mask_dup_bk_cached_score = idx_dup_bk_cached_score < (BK * 2 * G * multi_branch_ratio)
+            # store cached_scores; non cached_scores are already stored TODO check
+            tl.store(
+                SCORES +\
+                    idx_b * stride_scores_b +\
+                    idx_bdst * stride_scores_bdst +\
+                    idx_dup_bk_cached_score * stride_scores_bk,
+                value = cached_scores,
+                mask = mask_dup_bk_cached_score,
+                cache_modifier=DEFAULT_CACHE_MODIFIER,
+            )
+
+        else: # all SINGLE BRANCHING cases (including idx_iteration < multi_branch_true_iteration)
             _, indices_to_sample = dupped_indices_for_keys\
                 .reshape(BLOCK_BK, 2)\
                 .split()
@@ -1835,6 +1860,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             # indices_to_sample = indices_to_sample_sorted
             # mask_to_sample = mask_to_sample_sorted
             
+            # TODO Question - why does caching decrease the latency? does # of accessed indices also matter?
             scores_sampled = masking_iteration_draft_cuda_dup_and_score_calc_score(
                 indices_to_sample,
                 1,
@@ -1866,6 +1892,7 @@ def masking_iteration_draft_cuda_dup_and_score(
                 stride_scores_b,
                 stride_scores_bdst,
                 stride_scores_bk,
+                SCORES_CACHED,
                 
                 idx_b, 
                 idx_bdst,
@@ -1909,13 +1936,19 @@ def masking_iteration_draft_cuda_dup_and_score(
                 cached_scores.to(SCORES.dtype.element_ty), 
                 scores_sampled.to(SCORES.dtype.element_ty)
             ).reshape(BLOCK_BK * 2)
-    else:
-        indices_to_sample = dupped_indices_for_keys
-        mask_to_sample = dupped_mask
 
+    else: # no caching
+        indices_to_sample = dupped_indices_for_keys # BLOCK_BK * 2 * multi_branch_ratio
+        mask_to_sample = dupped_mask # BLOCK_BK * 2 * multi_branch_ratio
+
+        if multi_branch_on_layer and idx_iteration >= multi_branch_true_iteration:
+            tl.device_assert(multi_branch_ratio > 1)
+        else:
+            tl.device_assert(multi_branch_ratio == 1)
+        
         scores_sampled = masking_iteration_draft_cuda_dup_and_score_calc_score(
             indices_to_sample,
-            2,
+            2 * multi_branch_ratio,
             
             Q, stride_q_bsz, stride_q_tdst, stride_q_bh, stride_q_g, stride_q_hid,
             K, stride_k_bsz, stride_k_tsrc, stride_k_head, stride_k_hid,
@@ -1944,6 +1977,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             stride_scores_b,
             stride_scores_bdst,
             stride_scores_bk,
+            SCORES_CACHED,
             
             idx_b, 
             idx_bdst,
@@ -1965,8 +1999,10 @@ def masking_iteration_draft_cuda_dup_and_score(
             BLOCK_SIZE_K,
             BLOCK_STRIDE_K,
             BLOCK_BK,
+            # BLOCK_BK // 2,
             'max',
 
+            # multi_branching
             multi_branch_on_layer,
             multi_branch_ratio,
             idx_iteration,
@@ -1974,33 +2010,45 @@ def masking_iteration_draft_cuda_dup_and_score(
         )
         scores = scores_sampled.to(SCORES.dtype.element_ty)
     
-    tl.store(
-        SCORES +\
-            idx_b * stride_scores_b +\
-            idx_bdst * stride_scores_bdst +\
-            idx_bk_dup * stride_scores_bk,
-        value=scores,
-        mask=mask_bk_dup,
-        cache_modifier=DEFAULT_CACHE_MODIFIER,
-    )
-    tl.store(
-        DUPPED_INDICES +\
-            idx_b * stride_dupped_indices_b +\
-            idx_bdst * stride_dupped_indices_bdst +\
-            idx_bk_dup * stride_dupped_indices_bk,
-        value=dupped_indices,
-        mask=mask_bk_dup,
-        cache_modifier=DEFAULT_CACHE_MODIFIER,
-    )
-    tl.store(
-        DUPPED_GROUP_SIZE +\
-            idx_b * stride_dupped_group_size_b +\
-            idx_bdst * stride_dupped_group_size_bdst +\
-            idx_bk_dup * stride_dupped_group_size_bk,
-        value=dupped_group_sizes,
-        mask=mask_bk_dup,
-        cache_modifier=DEFAULT_CACHE_MODIFIER,
-    )
+    if not (multi_branch_on_layer and idx_iteration >= multi_branch_true_iteration):
+        # store when scores_cached == False
+        tl.store(
+            SCORES +\
+                idx_b * stride_scores_b +\
+                idx_bdst * stride_scores_bdst +\
+                idx_bk_dup * stride_scores_bk,
+            value=scores,
+            mask=mask_bk_dup,
+            cache_modifier=DEFAULT_CACHE_MODIFIER,
+        )
+        tl.store(
+            DUPPED_INDICES +\
+                idx_b * stride_dupped_indices_b +\
+                idx_bdst * stride_dupped_indices_bdst +\
+                idx_bk_dup * stride_dupped_indices_bk,
+            value=dupped_indices,
+            mask=mask_bk_dup,
+            cache_modifier=DEFAULT_CACHE_MODIFIER,
+        )
+        tl.store(
+            DUPPED_GROUP_SIZE +\
+                idx_b * stride_dupped_group_size_b +\
+                idx_bdst * stride_dupped_group_size_bdst +\
+                idx_bk_dup * stride_dupped_group_size_bk,
+            value=dupped_group_sizes,
+            mask=mask_bk_dup,
+            cache_modifier=DEFAULT_CACHE_MODIFIER,
+        )
+    elif not SCORES_CACHED and (multi_branch_on_layer and idx_iteration >= multi_branch_true_iteration):
+        tl.store(
+            SCORES +\
+                idx_b * stride_scores_b +\
+                idx_bdst * stride_scores_bdst +\
+                idx_bk_dup * stride_scores_bk,
+            value=scores,
+            mask=mask_bk_dup,
+            cache_modifier=DEFAULT_CACHE_MODIFIER,
+        )
 
 @triton.jit
 def masking_iteration_draft_cuda_gather(
@@ -3524,6 +3572,7 @@ def masking_iteration_draft_cuda_initialize_score(
         other=0
     )
     
+    # TODO come back
     scores = masking_iteration_draft_cuda_dup_and_score_calc_score(
         indices,
         KEY_DUP,
