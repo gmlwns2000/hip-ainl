@@ -1430,98 +1430,108 @@ def masking_iteration_draft_cuda_dup_and_score(
             mask = mask_bk,
             cache_modifier=DEFAULT_CACHE_MODIFIER,
         )
-        _, indices_to_sample = dupped_indices_for_keys\
-            .reshape(BLOCK_BK, 2)\
-            .split()
-        _, mask_to_sample = dupped_mask\
-            .reshape(BLOCK_BK, 2)\
-            .split()
-        
-        # t1 = indices_to_sample.to(tl.uint16).to(tl.uint32)
-        # t2 = mask_to_sample.to(tl.int1)
-        # t3 = tl.arange(0, BLOCK_BK).to(tl.uint16).to(tl.uint32)
-        # # t2 (1bit) | -- t3 (15bit) -- | -- t1 (16bit) --
-        # t = (t2 << 31) | ((t3 << 17) >> 1) | t1
-        
-        # # _, indices_to_sample_sorted = tl_argsort(cached_scores, indices_to_sample, 0, False)
-        # # _, mask_to_sample_sorted = tl_argsort(cached_scores, mask_to_sample.to(tl.int32), 0, False)
-        # # _, mapping = tl_argsort(cached_scores, tl.arange(0, BLOCK_BK), 0, False)
-        
-        # _, t_sorted = tl_argsort(cached_scores, t, 0, False)
-        # mask_to_sample_sorted = (t_sorted >> 31)
-        # mapping = ((t_sorted << 1) >> 17).to(tl.int32)
-        # indices_to_sample_sorted = ((t_sorted << 16) >> 16).to(tl.int32)
-        
-        # indices_to_sample_sorted, indices_to_not_sample_sorted = \
-        #     indices_to_sample_sorted\
-        #         .reshape(2, BLOCK_BK // 2)\
-        #         .trans(1, 0)\
-        #         .split()
-        
-        # mask_to_sample_sorted, mask_to_not_sample = \
-        #     mask_to_sample_sorted\
-        #         .reshape(2, BLOCK_BK // 2)\
-        #         .trans(1, 0)\
-        #         .split()
-        # mask_to_sample_sorted = mask_to_sample_sorted.to(tl.int1)
-        
-        # indices_to_sample = indices_to_sample_sorted
-        # mask_to_sample = mask_to_sample_sorted
-        
-        scores_sampled = masking_iteration_draft_cuda_dup_and_score_calc_score(
-            indices_to_sample,
-            1,
+        # dupped_indices_for_keys = dupped_indices <- before applying SAMPLING_METHOD
+        if multi_branch_on_layer and idx_iteration >= multi_branch_true_iteration:
+            # dupped_indices_for_keys : BLOCK_BK * 2 * multi_branch_ratio
+            if idx_iteration == multi_branch_true_iteration:
+                pass
+            # dupped_indices_for_keys : BLOCK_BK * 2 * multi_branch_ratio
+            elif idx_iteration > multi_branch_true_iteration:
+                pass
+        else:
+            # TODO NOTE : includes idx_iteration < multi_branch_true_iteration
+            _, indices_to_sample = dupped_indices_for_keys\
+                .reshape(BLOCK_BK, 2)\
+                .split()
+            _, mask_to_sample = dupped_mask\
+                .reshape(BLOCK_BK, 2)\
+                .split()
             
-            Q, stride_q_bsz, stride_q_tdst, stride_q_bh, stride_q_g, stride_q_hid,
-            K, stride_k_bsz, stride_k_tsrc, stride_k_head, stride_k_hid,
-            COS, stride_cos_t, stride_cos_hid,
-            SIN, stride_sin_t, stride_sin_hid,
-            KEY_ACCESS_LOG, 
-            stride_key_access_log_b, 
-            stride_key_access_log_bdst, 
-            stride_key_access_log_t,
-            KEY_ACCESS_COUNT,
-            stride_key_access_count_b,
-            stride_key_access_count_bdst,
-            MAX_ACCESS_COUNT,
+            # t1 = indices_to_sample.to(tl.uint16).to(tl.uint32)
+            # t2 = mask_to_sample.to(tl.int1)
+            # t3 = tl.arange(0, BLOCK_BK).to(tl.uint16).to(tl.uint32)
+            # # t2 (1bit) | -- t3 (15bit) -- | -- t1 (16bit) --
+            # t = (t2 << 31) | ((t3 << 17) >> 1) | t1
             
-            idx_b, 
-            idx_bdst,
-            idx_tdst, mask_tdst, pos_tdst,
-            mask_to_sample,
+            # # _, indices_to_sample_sorted = tl_argsort(cached_scores, indices_to_sample, 0, False)
+            # # _, mask_to_sample_sorted = tl_argsort(cached_scores, mask_to_sample.to(tl.int32), 0, False)
+            # # _, mapping = tl_argsort(cached_scores, tl.arange(0, BLOCK_BK), 0, False)
             
-            BH, G, MAX_TSRC, HID, KV_HEAD_REPEAT,
+            # _, t_sorted = tl_argsort(cached_scores, t, 0, False)
+            # mask_to_sample_sorted = (t_sorted >> 31)
+            # mapping = ((t_sorted << 1) >> 17).to(tl.int32)
+            # indices_to_sample_sorted = ((t_sorted << 16) >> 16).to(tl.int32)
             
-            USING_EXTEND,
-            extend_window_size,
-            extend_group_size,
+            # indices_to_sample_sorted, indices_to_not_sample_sorted = \
+            #     indices_to_sample_sorted\
+            #         .reshape(2, BLOCK_BK // 2)\
+            #         .trans(1, 0)\
+            #         .split()
             
-            USING_SPARQ,
-            SPARQ_HID,
-            Q_IND, stride_q_ind_b, stride_q_ind_g, stride_q_ind_bdst, stride_q_ind_k,
+            # mask_to_sample_sorted, mask_to_not_sample = \
+            #     mask_to_sample_sorted\
+            #         .reshape(2, BLOCK_BK // 2)\
+            #         .trans(1, 0)\
+            #         .split()
+            # mask_to_sample_sorted = mask_to_sample_sorted.to(tl.int1)
             
-            BLOCK_SIZE_Q,
-            BLOCK_STRIDE_Q,
-            BLOCK_SIZE_K,
-            BLOCK_STRIDE_K,
-            BLOCK_BK,
-            # BLOCK_BK // 2,
-            'max',
-        )
-        
-        # scores_not_sampled = tl.full((BLOCK_BK // 2,), float('-inf'), dtype=scores_sampled.dtype)
-        
-        # scores_sorted = tl.join(scores_sampled, scores_not_sampled)\
-        #     .trans(1, 0)\
-        #     .reshape(BLOCK_BK)
-        
-        # _, scores_sampled = tl_argsort(mapping, scores_sorted.to(tl.float32).to(tl.int32, bitcast=True), 0, False)
-        # scores_sampled = scores_sampled.to(tl.float32, bitcast=True)
-        
-        scores = tl.join(
-            cached_scores.to(SCORES.dtype.element_ty), 
-            scores_sampled.to(SCORES.dtype.element_ty)
-        ).reshape(BLOCK_BK * 2)
+            # indices_to_sample = indices_to_sample_sorted
+            # mask_to_sample = mask_to_sample_sorted
+            
+            scores_sampled = masking_iteration_draft_cuda_dup_and_score_calc_score(
+                indices_to_sample,
+                1,
+                
+                Q, stride_q_bsz, stride_q_tdst, stride_q_bh, stride_q_g, stride_q_hid,
+                K, stride_k_bsz, stride_k_tsrc, stride_k_head, stride_k_hid,
+                COS, stride_cos_t, stride_cos_hid,
+                SIN, stride_sin_t, stride_sin_hid,
+                KEY_ACCESS_LOG, 
+                stride_key_access_log_b, 
+                stride_key_access_log_bdst, 
+                stride_key_access_log_t,
+                KEY_ACCESS_COUNT,
+                stride_key_access_count_b,
+                stride_key_access_count_bdst,
+                MAX_ACCESS_COUNT,
+                
+                idx_b, 
+                idx_bdst,
+                idx_tdst, mask_tdst, pos_tdst,
+                mask_to_sample,
+                
+                BH, G, MAX_TSRC, HID, KV_HEAD_REPEAT,
+                
+                USING_EXTEND,
+                extend_window_size,
+                extend_group_size,
+                
+                USING_SPARQ,
+                SPARQ_HID,
+                Q_IND, stride_q_ind_b, stride_q_ind_g, stride_q_ind_bdst, stride_q_ind_k,
+                
+                BLOCK_SIZE_Q,
+                BLOCK_STRIDE_Q,
+                BLOCK_SIZE_K,
+                BLOCK_STRIDE_K,
+                BLOCK_BK,
+                # BLOCK_BK // 2,
+                'max',
+            )
+            
+            # scores_not_sampled = tl.full((BLOCK_BK // 2,), float('-inf'), dtype=scores_sampled.dtype)
+            
+            # scores_sorted = tl.join(scores_sampled, scores_not_sampled)\
+            #     .trans(1, 0)\
+            #     .reshape(BLOCK_BK)
+            
+            # _, scores_sampled = tl_argsort(mapping, scores_sorted.to(tl.float32).to(tl.int32, bitcast=True), 0, False)
+            # scores_sampled = scores_sampled.to(tl.float32, bitcast=True)
+            
+            scores = tl.join(
+                cached_scores.to(SCORES.dtype.element_ty), 
+                scores_sampled.to(SCORES.dtype.element_ty)
+            ).reshape(BLOCK_BK * 2)
     else:
         indices_to_sample = dupped_indices_for_keys
         mask_to_sample = dupped_mask
