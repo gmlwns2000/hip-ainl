@@ -219,6 +219,7 @@ def load_model(args):
             m.multi_branch_layer_all = args.multi_branch_layer_all
             m.multi_branch_per_layer = args.multi_branch_per_layer
             m.multi_branch_true_iteration = args.multi_branch_true_iteration
+            m.multi_branch_ret_ratio = args.multi_branch_ret_ratio
 
             m.k_ret_ratio = args.k_ret_ratio
 

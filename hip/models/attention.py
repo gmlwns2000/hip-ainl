@@ -80,6 +80,7 @@ def custom_attention(
     multi_branch_layer_all = False,
     multi_branch_per_layer = 1,
     multi_branch_true_iteration = 0,
+    multi_branch_ret_ratio: float = 1.0,
 
     k_ret_ratio = 1.0,
 
@@ -456,28 +457,7 @@ def custom_attention(
                     q_quant=q_quant,
                     k_quant=k_quant,
 
-                    # Ensemble
-                    ensemble = ensemble,
-                    ensemble_model_setting = ensemble_model_setting,
-                    ensemble_method = ensemble_method,
-                    ensemble_method_final = ensemble_method_final,
-                    ensemble_method_final_inter_thresh = ensemble_method_final_inter_thresh,
-                    ensemble_method_final_bdd_mask_k = ensemble_method_final_bdd_mask_k,
-                    ensemble_timedim_wd = ensemble_timedim_wd,
-                    ensemble_per_layer_n = ensemble_per_layer_n,
-                    ensemble_per_attn_iter = ensemble_per_attn_iter,
-                    ensemble_model_n = ensemble_model_n,
-                    ensemble_layer_start = ensemble_layer_start,
-                    ensemble_particular_layer = ensemble_particular_layer,
-                    ensemble_layer_till = ensemble_layer_till,
-                    ensemble_randomness = ensemble_randomness,
-                    ensemble_iter_start_step = ensemble_iter_start_step,
-                    ensemble_iter_n_mode = ensemble_iter_n_mode,
-                    ensemble_iter_n_start = ensemble_iter_n_start,
-                    ensemble_iter_n_factor = ensemble_iter_n_factor,
-                    ensemble_iter_n_jump = ensemble_iter_n_jump,
-                    ensemble_iter_n_till = ensemble_iter_n_till,
-                    ensemble_ret_ratio=ensemble_ret_ratio,
+                    # multi_branch
                     multi_branch_ratio=multi_branch_ratio,
                     multi_branch_particular_layer=multi_branch_particular_layer,
                     multi_branch_layer_start = multi_branch_layer_start,
@@ -485,6 +465,7 @@ def custom_attention(
                     multi_branch_layer_all = multi_branch_layer_all,
                     multi_branch_per_layer=multi_branch_per_layer,
                     multi_branch_true_iteration = multi_branch_true_iteration,
+                    multi_branch_ret_ratio = multi_branch_ret_ratio,
 
                     k_ret_ratio = k_ret_ratio,
 
