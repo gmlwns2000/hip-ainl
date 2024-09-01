@@ -465,6 +465,7 @@ class LlamaCustomAttention(LlamaAttention):
 
         self.multi_branch_ratio = 2
         self.multi_branch_particular_layer = None
+        self.multi_branch_layer_list = None
         self.multi_branch_layer_start = None
         self.multi_branch_layer_till = None
         self.multi_branch_layer_all = False
@@ -684,6 +685,7 @@ class LlamaCustomAttention(LlamaAttention):
             
             multi_branch_ratio=self.multi_branch_ratio,
             multi_branch_particular_layer=self.multi_branch_particular_layer,
+            multi_branch_layer_list=self.multi_branch_layer_list,
             multi_branch_layer_start = self.multi_branch_layer_start,
             multi_branch_layer_till = self.multi_branch_layer_till,
             multi_branch_layer_all = self.multi_branch_layer_all,
@@ -926,6 +928,7 @@ class LlamaCustomAttention(LlamaAttention):
 
             multi_branch_ratio=self.multi_branch_ratio,
             multi_branch_particular_layer=self.multi_branch_particular_layer,
+            multi_branch_layer_list=self.multi_branch_layer_list,
             multi_branch_layer_start = self.multi_branch_layer_start,
             multi_branch_layer_till = self.multi_branch_layer_till,
             multi_branch_layer_all = self.multi_branch_layer_all,

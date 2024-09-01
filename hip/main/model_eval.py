@@ -212,6 +212,7 @@ def load_model(args):
 
             m.multi_branch_ratio = args.multi_branch_ratio
             m.multi_branch_particular_layer = args.multi_branch_particular_layer
+            m.multi_branch_layer_list = args.multi_branch_layer_list
             m.multi_branch_layer_start = args.multi_branch_layer_start
             m.multi_branch_layer_till = args.multi_branch_layer_till
             m.multi_branch_layer_all = args.multi_branch_layer_all
@@ -228,7 +229,7 @@ def load_model(args):
             m.tree_enable_flash = not args.disable_flash
             m.tree_use_sliding_window = not args.disable_sliding_window
             m.tree_sampling_method = args.sampling_method
-            m.tree_branching_method = args.branch_method
+            m.tree_branching_method = args.branching_method
 
     if args.method != 'none' and args.checkpoint is not None:
         if pathlib.Path(args.checkpoint).is_dir():

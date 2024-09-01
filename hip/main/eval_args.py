@@ -40,6 +40,7 @@ class ArgsType:
 
     multi_branch_ratio : int = 2
     multi_branch_particular_layer : int = None
+    multi_branch_layer_list : str = None
     multi_branch_layer_start : int = None
     multi_branch_layer_till : int = None
     multi_branch_layer_all : bool = False
@@ -102,6 +103,7 @@ def eval_args(
     
     parser.add_argument('--multi-branch-ratio', type=int, default=2)
     parser.add_argument('--multi-branch-particular-layer', type=int, default=None)
+    parser.add_argument('--multi-branch-layer-list', type=str, default=None)
     parser.add_argument('--multi-branch-layer-start', type=int, default=None)
     parser.add_argument('--multi-branch-layer-till', type=int, default=None)
     parser.add_argument('--multi-branch-layer-all', default=False, action='store_true')

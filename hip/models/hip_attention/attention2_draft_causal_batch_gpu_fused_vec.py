@@ -1219,6 +1219,7 @@ def masking_iteration_draft_cuda_dup_and_score(
     # multi_branching
     multi_branch_ratio_per_iter: tl.constexpr,
     multi_branch_particular_layer,
+    multi_branch_layer_list,
     multi_branch_layer_start,
     multi_branch_layer_till,
     multi_branch_layer_all: tl.constexpr,
@@ -2660,6 +2661,7 @@ def masking_iteration_draft_cuda_fused_per_iter(
     # multi_branching
     multi_branch_ratio_per_iter: tl.constexpr,
     multi_branch_particular_layer,
+    multi_branch_layer_list,
     multi_branch_layer_start,
     multi_branch_layer_till,
     multi_branch_layer_all: tl.constexpr,
@@ -2802,6 +2804,7 @@ def masking_iteration_draft_cuda_fused_per_iter(
             # multi_branching
             multi_branch_ratio_per_iter,
             multi_branch_particular_layer,
+            multi_branch_layer_list,
             multi_branch_layer_start,
             multi_branch_layer_till,
             multi_branch_layer_all,
@@ -3056,6 +3059,7 @@ def masking_iteration_draft_cuda_fused(
     # multi_branching
     multi_branch_ratio_per_layer,
     multi_branch_particular_layer,
+    multi_branch_layer_list,
     multi_branch_layer_start,
     multi_branch_layer_till,
     multi_branch_layer_all,
@@ -3247,6 +3251,7 @@ def masking_iteration_draft_cuda_fused(
                 # multi_branching
                 multi_branch_ratio_per_iter,
                 multi_branch_particular_layer,
+                multi_branch_layer_list,
                 multi_branch_layer_start,
                 multi_branch_layer_till,
                 multi_branch_layer_all,
@@ -3578,6 +3583,7 @@ def masking_iteration_draft(
     # multi_branch
     multi_branch_ratio : int = 2,
     multi_branch_particular_layer : int = None,
+    multi_branch_layer_list : str = None,
     multi_branch_layer_start : int = None,
     multi_branch_layer_till : int = None,
     multi_branch_layer_all : int = False,
@@ -3629,8 +3635,13 @@ def masking_iteration_draft(
     BSZ, _, BH, G, HID = q.shape
     B = BSZ * BH
 
+    if multi_branch_layer_list is not None and layer_id in multi_branch_layer_list:
+        multi_branch_on_layer = True
+        assert multi_branch_ratio > 1
+        multi_branch_ratio_per_layer = multi_branch_ratio
     # TODO NOTE : multi_branch_ratio should be power of 2
-    if multi_branch_layer_all or (layer_id == multi_branch_particular_layer) or (layer_id >= multi_branch_layer_start and \
+    # TODO why are these cancelled out
+    elif multi_branch_layer_all or (layer_id == multi_branch_particular_layer) or (layer_id >= multi_branch_layer_start and \
                                                                                  layer_id <= multi_branch_layer_till and \
                                                                                 (layer_id - multi_branch_layer_start) % multi_branch_per_layer == 0):
         multi_branch_on_layer = True
@@ -4020,6 +4031,7 @@ def masking_iteration_draft(
             # multi-branching
             multi_branch_ratio_per_layer,
             multi_branch_particular_layer,
+            multi_branch_layer_list,
             multi_branch_layer_start,
             multi_branch_layer_till,
             multi_branch_layer_all,
@@ -4785,6 +4797,7 @@ def masking_step_loop(
     # multi_branch
     multi_branch_ratio : int = 2,
     multi_branch_particular_layer : int = None,
+    multi_branch_layer_list : str = None,
     multi_branch_layer_start : int = None,
     multi_branch_layer_till : int = None,
     multi_branch_layer_all : int = False,
@@ -4864,6 +4877,7 @@ def masking_step_loop(
                             # multi_branch
                             multi_branch_ratio=multi_branch_ratio,
                             multi_branch_particular_layer=multi_branch_particular_layer,
+                            multi_branch_layer_list=multi_branch_layer_list,
                             multi_branch_layer_start=multi_branch_layer_start,
                             multi_branch_layer_till=multi_branch_layer_till,
                             multi_branch_layer_all=multi_branch_layer_all,
@@ -4963,6 +4977,7 @@ def masking_step_loop(
                                 # multi_branch
                                 multi_branch_ratio=multi_branch_ratio,
                                 multi_branch_particular_layer=multi_branch_particular_layer,
+                                multi_branch_layer_list=multi_branch_layer_list,
                                 multi_branch_layer_start=multi_branch_layer_start,
                                 multi_branch_layer_till=multi_branch_layer_till,
                                 multi_branch_layer_all=multi_branch_layer_all,
@@ -5105,6 +5120,7 @@ def masking_step_loop(
                                     # multi_branch
                                     multi_branch_ratio=multi_branch_ratio,
                                     multi_branch_particular_layer=multi_branch_particular_layer,
+                                    multi_branch_layer_list=multi_branch_layer_list,
                                     multi_branch_layer_start=multi_branch_layer_start,
                                     multi_branch_layer_till=multi_branch_layer_till,
                                     multi_branch_layer_all=multi_branch_layer_all,
@@ -5464,6 +5480,7 @@ def hip_masking(
     # multi_branch
     multi_branch_ratio : int = 2,
     multi_branch_particular_layer : int = None,
+    multi_branch_layer_list : str = None,
     multi_branch_layer_start : int = None,
     multi_branch_layer_till : int = None,
     multi_branch_layer_all : int = False,
@@ -5563,6 +5580,7 @@ def hip_masking(
             # multi_branch
             multi_branch_ratio=multi_branch_ratio,
             multi_branch_particular_layer=multi_branch_particular_layer,
+            multi_branch_layer_list=multi_branch_layer_list,
             multi_branch_layer_start=multi_branch_layer_start,
             multi_branch_layer_till=multi_branch_layer_till,
             multi_branch_layer_all=multi_branch_layer_all,
@@ -6000,6 +6018,7 @@ def hip_attention(
     # multi_branch
     multi_branch_ratio : int = 2,
     multi_branch_particular_layer : int = None,
+    multi_branch_layer_list : str = None,
     multi_branch_layer_start : int = None,
     multi_branch_layer_till : int = None,
     multi_branch_layer_all : int = False,
@@ -6071,6 +6090,7 @@ def hip_attention(
         # multi_branch
         multi_branch_ratio=multi_branch_ratio,
         multi_branch_particular_layer=multi_branch_particular_layer,
+        multi_branch_layer_list=multi_branch_layer_list,
         multi_branch_layer_start=multi_branch_layer_start,
         multi_branch_layer_till=multi_branch_layer_till,
         multi_branch_layer_all=multi_branch_layer_all,

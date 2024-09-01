@@ -76,6 +76,7 @@ def custom_attention(
 
     multi_branch_ratio = 2,
     multi_branch_particular_layer = None,
+    multi_branch_layer_list = None,
     multi_branch_layer_start = None,
     multi_branch_layer_till = None,
     multi_branch_layer_all = False,
@@ -415,6 +416,9 @@ def custom_attention(
                     q_quant = q
                     k_quant = k
                 
+                if multi_branch_layer_list is not None: # TODO should not use list?
+                    multi_branch_layer_list = torch.tensor(multi_branch_layer_list.replace(" ", "").split(","))
+
                 attn_output_hip, _ = hip_attention_draft(
                     q, k, v,
                     
@@ -462,6 +466,8 @@ def custom_attention(
                     # multi_branch
                     multi_branch_ratio=multi_branch_ratio,
                     multi_branch_particular_layer=multi_branch_particular_layer,
+                    multi_branch_layer_list=multi_branch_layer_list,
+                    multi_branch_layer_list=multi_branch_layer_list,
                     multi_branch_layer_start = multi_branch_layer_start,
                     multi_branch_layer_till = multi_branch_layer_till,
                     multi_branch_layer_all = multi_branch_layer_all,
