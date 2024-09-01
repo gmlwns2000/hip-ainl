@@ -25,6 +25,7 @@ def custom_attention(
     tree_dense_queries=0, 
     tree_last_dense_queries=0,
     tree_sampling_method='first',
+    tree_branching_method='half',
 
     # Latency optimization tweaks
     tree_enable_flash=False, 
@@ -81,6 +82,7 @@ def custom_attention(
     multi_branch_per_layer = 1,
     multi_branch_true_iteration = 0,
     multi_branch_ret_ratio: float = 1.0,
+    multi_branch_ret_ratio_select_all : bool = False,
 
     k_ret_ratio = 1.0,
 
@@ -435,8 +437,8 @@ def custom_attention(
                     self_extend_group_size=4,
                     
                     topk_head_group_size=1,
-                    sample_method=os.getenv('HIP_DRAFT_SAMPLING_METHOD', 'first'),
-                    branch_method=os.getenv('HIP_DRAFT_BRANCH_METHOD', 'half'),
+                    sample_method=tree_sampling_method, # os.getenv('HIP_DRAFT_SAMPLING_METHOD', 'first'),
+                    branch_method=tree_branching_method,# os.getenv('HIP_DRAFT_BRANCH_METHOD', 'half'),
                     
                     # this may good or not, but definatly great with self-extend
                     traverse_from_last_step=False,
@@ -466,6 +468,7 @@ def custom_attention(
                     multi_branch_per_layer=multi_branch_per_layer,
                     multi_branch_true_iteration = multi_branch_true_iteration,
                     multi_branch_ret_ratio = multi_branch_ret_ratio,
+                    multi_branch_ret_ratio_select_all = multi_branch_ret_ratio_select_all,
 
                     k_ret_ratio = k_ret_ratio,
 

@@ -186,8 +186,6 @@ def load_model(args):
             m.tree_dense_queries = args.dense_queries
             # m.tree_stride = args.stride
 
-            # m.sampling_method = args.sampling_method
-
             ### ensemble # NOTE check: right place? -  working though
             m.ensemble = args.ensemble
             m.ensemble_model_setting = args.ensemble_model_setting
@@ -220,6 +218,7 @@ def load_model(args):
             m.multi_branch_per_layer = args.multi_branch_per_layer
             m.multi_branch_true_iteration = args.multi_branch_true_iteration
             m.multi_branch_ret_ratio = args.multi_branch_ret_ratio
+            m.multi_branch_ret_ratio_select_all = args.multi_branch_ret_ratio_select_all
 
             m.k_ret_ratio = args.k_ret_ratio
 
@@ -229,6 +228,7 @@ def load_model(args):
             m.tree_enable_flash = not args.disable_flash
             m.tree_use_sliding_window = not args.disable_sliding_window
             m.tree_sampling_method = args.sampling_method
+            m.tree_branching_method = args.branch_method
 
     if args.method != 'none' and args.checkpoint is not None:
         if pathlib.Path(args.checkpoint).is_dir():

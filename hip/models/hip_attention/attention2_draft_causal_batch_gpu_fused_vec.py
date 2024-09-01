@@ -59,6 +59,7 @@ def masking_iteration_draft_cuda_initialize(
     POS, stride_pos_tdst,
     
     # out
+    # B, cdiv_python(TDST, block_size_q), G * mask_block_k * multi_branch_ratio_per_layer
     INDICES, stride_indices_b, stride_indices_bdst, stride_indices_bk,
     KS, stride_ks_b, stride_ks_bdst,
     GROUP_SIZE, stride_group_size_b, stride_group_size_bdst, stride_group_size_bk,
@@ -76,6 +77,9 @@ def masking_iteration_draft_cuda_initialize(
     G, MAX_TDST, MAX_TSRC, 
     
     BLOCK_MASK_BLOCK_K: tl.constexpr,
+    
+    # multi_branch
+    multi_branch_ratio_per_layer: tl.constexpr,
 ):
     idx_b = tl.program_id(0)
     idx_bdst = tl.program_id(1)
@@ -96,6 +100,7 @@ def masking_iteration_draft_cuda_initialize(
     BSRC = tl.cdiv(TSRC, block_size_k)
     MAX_BSRC = tl.cdiv(MAX_TSRC, block_size_k)
     
+    # TODO NOTE - not considering this bc multi_branching prevents this by assertion
     if TSRC <= mask_k:
         idx_bk = tl.arange(0, BLOCK_MASK_BLOCK_K)
         mask_bk = idx_bk < BSRC
@@ -117,9 +122,9 @@ def masking_iteration_draft_cuda_initialize(
                         idx_bdst * stride_ks_bdst,
                     value = BSRC * G
                 )
-    else:
-        idx_bk = tl.arange(0, BLOCK_MASK_BLOCK_K)
-        mask_bk = idx_bk < mask_block_k
+    else: # INDICES : B, cdiv_python(TDST, block_size_q), G * mask_block_k * multi_branch_ratio_per_layer
+        idx_bk_origin = tl.arange(0, BLOCK_MASK_BLOCK_K) # triton.next_power_of_2(mask_block_k)
+        mask_bk_origin = idx_bk_origin < mask_block_k * G
         
         ks = 0
         if KS_SEED is not None:
@@ -129,32 +134,34 @@ def masking_iteration_draft_cuda_initialize(
                     idx_bdst * stride_ks_seed_bdst,
             ).to(tl.int32)
         
-        indices = (MAX_BSRC * idx_group + (BSRC / mask_block_k * idx_bk)).to(tl.int32)
+        indices = (MAX_BSRC * idx_group + (BSRC / mask_block_k * idx_bk_origin)).to(tl.int32)
+        
         group_sizes = tl.minimum(
             BSRC, 
             (
-                BSRC / mask_block_k * (idx_bk + 1).to(tl.int32) -\
-                (BSRC / mask_block_k * idx_bk).to(tl.int32)
+                BSRC / mask_block_k * (idx_bk_origin + 1).to(tl.int32) -\
+                (BSRC / mask_block_k * idx_bk_origin).to(tl.int32)
             )
         ).to(tl.int32)
+
         if INDICES_SEED is not None:
             if ks == (mask_block_k * G):
-                indices = tl.load(
+                indices = tl.load( # [G * mask_block_k]
                     INDICES_SEED +\
                         idx_b * stride_indices_seed_b +\
                         idx_bdst * stride_indices_seed_bdst +\
-                        (idx_group * mask_block_k + idx_bk) * stride_indices_seed_bk,
-                    mask=mask_bk,
+                        (idx_group * mask_block_k + idx_bk_origin) * stride_indices_seed_bk,
+                    mask=mask_bk_origin,
                     other=idx_group * MAX_BSRC,
                 ).to(tl.int32)
                 indices_next = tl.load(
                     INDICES_SEED +\
                         idx_b * stride_indices_seed_b +\
                         idx_bdst * stride_indices_seed_bdst +\
-                        (idx_group * mask_block_k + idx_bk + 1) * stride_indices_seed_bk,
+                        (idx_group * mask_block_k + idx_bk_origin + 1) * stride_indices_seed_bk,
                     mask=(
-                        mask_bk &
-                        ((idx_group * mask_block_k + idx_bk + 1) < (BLOCK_MASK_BLOCK_K * G))
+                        mask_bk_origin &
+                        ((idx_group * mask_block_k + idx_bk_origin + 1) < (BLOCK_MASK_BLOCK_K * G))
                     ),
                     other=G * MAX_BSRC,
                 ).to(tl.int32)
@@ -166,25 +173,7 @@ def masking_iteration_draft_cuda_initialize(
                     indices_group_id * MAX_BSRC + BSRC - indices,
                 ).to(tl.int32)
         
-        if INDICES is not None:
-            tl.store(
-                INDICES +\
-                    idx_b * stride_indices_b +\
-                    idx_bdst * stride_indices_bdst +\
-                    (idx_group * mask_block_k + idx_bk) * stride_indices_bk,
-                value=indices,
-                mask=mask_bk,
-            )
-        if GROUP_SIZE is not None:
-            tl.store(
-                GROUP_SIZE +\
-                    idx_b * stride_group_size_b +\
-                    idx_bdst * stride_group_size_bdst +\
-                    (idx_group * mask_block_k + idx_bk) * stride_group_size_bk,
-                value=group_sizes,
-                mask=mask_bk,
-            )
-        
+        # NOTE T_GROUP_SIZE must be placed here, before broadcast
         if T_GROUP_SIZE is not None:
             tl.atomic_max(
                 T_GROUP_SIZE +\
@@ -202,6 +191,34 @@ def masking_iteration_draft_cuda_initialize(
                     idx_b * stride_ks_b +\
                     idx_bdst * stride_ks_bdst,
                 val = mask_block_k
+            )
+
+        indices = tl.broadcast_to(indices, (multi_branch_ratio_per_layer, BLOCK_MASK_BLOCK_K))
+        indices = tl.ravel(tl.trans(indices))
+
+        group_sizes = tl.broadcast_to(group_sizes, (multi_branch_ratio_per_layer, BLOCK_MASK_BLOCK_K))
+        group_sizes = tl.ravel(tl.trans(group_sizes))
+
+        idx_bk = tl.arange(0, BLOCK_MASK_BLOCK_K * multi_branch_ratio_per_layer) # triton.next_power_of_2(mask_block_k)
+        mask_bk = idx_bk < mask_block_k * G * multi_branch_ratio_per_layer
+
+        if INDICES is not None:
+            tl.store(
+                INDICES +\
+                    idx_b * stride_indices_b +\
+                    idx_bdst * stride_indices_bdst +\
+                    (idx_group * mask_block_k + idx_bk) * stride_indices_bk,
+                value=indices,
+                mask=mask_bk,
+            )
+        if GROUP_SIZE is not None:
+            tl.store(
+                GROUP_SIZE +\
+                    idx_b * stride_group_size_b +\
+                    idx_bdst * stride_group_size_bdst +\
+                    (idx_group * mask_block_k + idx_bk) * stride_group_size_bk,
+                value=group_sizes,
+                mask=mask_bk,
             )
 
 @triton.jit
@@ -342,19 +359,19 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     REDUCE_METHOD: tl.constexpr,
 
     # multi branch
-    multi_branch_on_layer: tl.constexpr,
-    multi_branch_ratio: tl.constexpr,
+    multi_branch_ratio_per_iter: tl.constexpr,
     idx_iteration,
     multi_branch_true_iteration: tl.constexpr,
+    multi_branch_on_layer: tl.constexpr,
     
     NUM_CALIB: tl.constexpr = 32
 ):
-    if SCORES_CACHED and multi_branch_on_layer and idx_iteration >= multi_branch_true_iteration:
+    if idx_iteration >= 0 and SCORES_CACHED and multi_branch_on_layer and idx_iteration >= multi_branch_true_iteration:
         # TODO check - does this work? - refer to idx_tsrc, seems okay 
         # BLOCK_BK * (2 * multi_branch_ratio - 1)
-        idx_dupped_indices_bk = tl.arange(0, BLOCK_BK)[:, None] * (2 * multi_branch_ratio) + tl.arange(1, 2 * multi_branch_ratio)[None, :]
+        idx_dupped_indices_bk = tl.arange(0, BLOCK_BK)[:, None] * (2 * multi_branch_ratio_per_iter) + tl.arange(1, 2 * multi_branch_ratio_per_iter)[None, :]
         idx_dupped_indices_bk = tl.ravel(idx_dupped_indices_bk)
-        mask_bk_dup = idx_dupped_indices_bk < (BK * 2 * multi_branch_ratio * G)
+        mask_bk_dup = idx_dupped_indices_bk < (BK * 2 * multi_branch_ratio_per_iter * G)
         
         dupped_indices_for_keys = tl.load( # [(2 * multi_branch_ratio - 1) * BLOCK_BK] flatten
             DUPPED_INDICES +\
@@ -493,7 +510,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 BLOCK_BK * KEY_DUP, 
                 BLOCK_SIZE_K // BLOCK_STRIDE_K
             )
-            mask_keys = tl.ravel(mask_keys)[None, :] # (BLOCK_BK * KEY_DUP)* (BLOCK_SIZE_K // BLOCK_STRIDE_K) 
+            mask_keys = tl.ravel(mask_keys)[None, :] # (BLOCK_BK * KEY_DUP)* (BLOCK_SIZE_K // BLOCK_STRIDE_K)[None, :]
             mask_keys = mask_keys & (idx_tsrc_grouped < MAX_TSRC)
         else:
             mask_keys = (
@@ -710,7 +727,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
         raise Exception()
     scores = tl.where(dupped_mask, scores, float('-inf'))
     
-    if SCORES_CACHED and multi_branch_on_layer and idx_iteration >= multi_branch_true_iteration:
+    if idx_iteration >= 0 and SCORES_CACHED and multi_branch_on_layer and idx_iteration >= multi_branch_true_iteration:
         tl.store(
             SCORES +\
                 idx_b * stride_scores_b +\
@@ -1070,7 +1087,7 @@ def multi_branch_dupped_indices_cal(
             dupped_indices
         )
 
-    elif branch_location != 0 and BRANCH_METHOD == 'random_diff_per_iter':
+    elif branch_location != 0 and BRANCH_METHOD == 'random_per_iter':
         dupped_indices = tl.where(
             (tl.arange(0, BLOCK_BK * 2 * multi_branch_ratio) % (2 * multi_branch_ratio)) == branch_location,
             tl.where(
@@ -1502,7 +1519,7 @@ def masking_iteration_draft_cuda_dup_and_score(
                         ).to(tl.int32)
                     )
                 )
-            elif BRANCH_METHOD == 'random_diff_per_iter':
+            elif BRANCH_METHOD == 'random_per_iter':
                 dupped_indices = tl.where(
                     (tl.arange(0, BLOCK_BK * 2 * multi_branch_ratio_per_iter) % 2) == 0,
                     dupped_indices,
@@ -1580,7 +1597,7 @@ def masking_iteration_draft_cuda_dup_and_score(
                         ).to(tl.int32)
                     )
                 )
-            elif BRANCH_METHOD == 'random_diff_per_iter':
+            elif BRANCH_METHOD == 'random_per_iter':
                 dupped_indices = tl.where(
                     (tl.arange(0, BLOCK_BK * 2) % 2) == 0,
                     dupped_indices,
@@ -1803,10 +1820,10 @@ def masking_iteration_draft_cuda_dup_and_score(
                 'max',
 
                 # multi_branching
-                multi_branch_on_layer,
                 multi_branch_ratio_per_iter,
                 idx_iteration,
-                multi_branch_true_iteration
+                multi_branch_true_iteration,
+                multi_branch_on_layer,
             )
 
             idx_dup_bk_cached_score = tl.arange(0, BLOCK_BK) * (2 * multi_branch_ratio_per_iter)
@@ -1918,10 +1935,11 @@ def masking_iteration_draft_cuda_dup_and_score(
                 # BLOCK_BK // 2,
                 'max',
 
-                multi_branch_on_layer,
+                # multi_branch
                 multi_branch_ratio_per_iter,
                 idx_iteration,
-                multi_branch_true_iteration
+                multi_branch_true_iteration,
+                multi_branch_on_layer,
             )
             
             # scores_not_sampled = tl.full((BLOCK_BK // 2,), float('-inf'), dtype=scores_sampled.dtype)
@@ -2004,10 +2022,10 @@ def masking_iteration_draft_cuda_dup_and_score(
             'max',
 
             # multi_branching
-            multi_branch_on_layer,
             multi_branch_ratio_per_iter,
             idx_iteration,
-            multi_branch_true_iteration
+            multi_branch_true_iteration,
+            multi_branch_on_layer,
         )
         scores = scores_sampled.to(SCORES.dtype.element_ty)
     
@@ -3045,10 +3063,6 @@ def masking_iteration_draft_cuda_fused(
     multi_branch_true_iteration,
     multi_branch_ret_ratio,
     multi_branch_on_layer,
-
-    indices_bk_len: tl.constexpr,
-    probs_bk_len: tl.constexpr,
-
 ):
     """
     grid = (
@@ -3251,14 +3265,14 @@ def masking_iteration_draft_cuda_fused(
             tl.debug_barrier()
             
             if multi_branch_on_layer: # TODO do we need ceiling etc?
-                if BRANCH_METHOD == 'random' or BRANCH_METHOD == 'random_diff_per_iter':
+                if BRANCH_METHOD == 'random' or BRANCH_METHOD == 'random_per_iter':
                     max_group_size *= 1.4 * (1/(2 * multi_branch_ratio_per_iter))
                 elif BRANCH_METHOD == 'half' or BRANCH_METHOD == 'equal_size':
                     max_group_size *= (1/(2 * multi_branch_ratio_per_iter))
                 else:
                     raise Exception(BRANCH_METHOD)
             else:
-                if BRANCH_METHOD == 'random' or BRANCH_METHOD == 'random_diff_per_iter':
+                if BRANCH_METHOD == 'random' or BRANCH_METHOD == 'random_per_iter':
                     max_group_size *= 0.7
                 elif BRANCH_METHOD == 'half' or BRANCH_METHOD == 'equal_size':
                     max_group_size *= 0.5
@@ -3341,11 +3355,26 @@ def masking_iteration_draft_cuda_initialize_score(
     stride_indices_b, 
     stride_indices_bdst, 
     stride_indices_bk,
+
+    DUPPED_INDICES,
+    stride_dupped_indices_b,
+    stride_dupped_indices_bdst,
+    stride_dupped_indices_bk,
+
+    DUPPED_GROUP_SIZE,
+    stride_dupped_group_size_b,
+    stride_dupped_group_size_bdst,
+    stride_dupped_group_size_bk,
     
     SCORES,
     stride_scores_b,
     stride_scores_bdst,
     stride_scores_bk,
+
+    SCORES_FINAL,
+    stride_scores_final_b,
+    stride_scores_final_bdst,
+    stride_scores_final_bk,
     
     T_GROUP_SIZE, 
     stride_t_group_size_b, 
@@ -3356,6 +3385,7 @@ def masking_iteration_draft_cuda_initialize_score(
     sliding_window_size,
     indices_bk_len,
     BH: tl.constexpr, 
+    BK: tl.constexpr,
     G: tl.constexpr, 
     MAX_TDST, 
     MAX_TSRC, 
@@ -3379,6 +3409,10 @@ def masking_iteration_draft_cuda_initialize_score(
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_STRIDE_K: tl.constexpr,
     BLOCK_BK: tl.constexpr,
+
+    # multi_branch
+    multi_branch_ratio_per_layer,
+    multi_branch_on_layer,
     
     KEY_DUP: tl.constexpr = 1,
 ):
@@ -3388,12 +3422,12 @@ def masking_iteration_draft_cuda_initialize_score(
     grid_bk = tl.cdiv(indices_bk_len, BLOCK_BK)
     grid_bdst = tl.cdiv(MAX_TDST, BLOCK_SIZE_Q)
     
-    pid_bh = tl.program_id(0) % BH
-    pid_bk = tl.program_id(0) // BH
+    pid_bh = tl.program_id(0) % BH # 0 ~ BH - 1
+    pid_bk = tl.program_id(0) // BH # 0
     pid_bdst = tl.program_id(1)
     pid_bsz = tl.program_id(2)
     
-    idx_bk = pid_bk * BLOCK_BK + tl.arange(0, BLOCK_BK)
+    idx_bk = pid_bk * BLOCK_BK + tl.arange(0, BLOCK_BK * multi_branch_ratio_per_layer) # BLOCK_BK = mask_k // block_size_k * G
     mask_bk = idx_bk < indices_bk_len
     idx_bdst = pid_bdst
     idx_b = pid_bsz * BH + pid_bh
@@ -3406,7 +3440,6 @@ def masking_iteration_draft_cuda_initialize_score(
     if t_group_size <= 1.0:
         return
 
-    
     idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // BLOCK_STRIDE_Q) * BLOCK_STRIDE_Q
     idx_tdst_no_proj = idx_tdst
     mask_tdst = idx_tdst < MAX_TDST
@@ -3424,10 +3457,10 @@ def masking_iteration_draft_cuda_initialize_score(
         mask=mask_tdst
     )
     TSRC = tl.max(pos_tdst)
-    TSRC = tl.maximum(0, TSRC - sliding_window_size)
+    TSRC = tl.maximum(0, TSRC - sliding_window_size) # TODO what's sliding_window_size ?
     BSRC = tl.cdiv(TSRC, BLOCK_SIZE_K)
     
-    indices = tl.load(
+    indices = tl.load( # [BLOCK_BK * multi_branch_ratio_per_layer]
         INDICES +\
             idx_b * stride_indices_b +\
             idx_bdst * stride_indices_bdst +\
@@ -3436,10 +3469,9 @@ def masking_iteration_draft_cuda_initialize_score(
         other=0
     )
     
-    # TODO come back
     scores = masking_iteration_draft_cuda_dup_and_score_calc_score(
         indices,
-        KEY_DUP,
+        KEY_DUP, # multi_branch_ratio_per_layer
         
         Q, stride_q_bsz, stride_q_tdst, stride_q_bh, stride_q_g, stride_q_hid,
         K, stride_k_bsz, stride_k_tsrc, stride_k_head, stride_k_hid,
@@ -3453,11 +3485,27 @@ def masking_iteration_draft_cuda_initialize_score(
         stride_key_access_count_b,
         stride_key_access_count_bdst,
         MAX_ACCESS_COUNT,
+
+        DUPPED_INDICES,
+        stride_dupped_indices_b,
+        stride_dupped_indices_bdst,
+        stride_dupped_indices_bk,
+
+        DUPPED_GROUP_SIZE,
+        stride_dupped_group_size_b,
+        stride_dupped_group_size_bdst,
+        stride_dupped_group_size_bk,
+
+        SCORES,
+        stride_scores_b,
+        stride_scores_bdst,
+        stride_scores_bk,
+        False, # score_cached
         
         idx_b,
         idx_bdst,
         idx_tdst, mask_tdst, pos_tdst,
-        mask_bk,
+        mask_bk, # this goes into dupped_mask
         
         BH, BK, G, MAX_TSRC, HID, KV_HEAD_REPEAT,
                 
@@ -3475,17 +3523,19 @@ def masking_iteration_draft_cuda_initialize_score(
         BLOCK_STRIDE_K,
         BLOCK_BK,
         'max',
-
-        multi_branch_on_layer,
-        multi_branch_ratio,
         
+        # multi_branch
+        multi_branch_ratio_per_layer,
+        idx_iteration=-1,
+        multi_branch_true_iteration=None,
+        multi_branch_on_layer=multi_branch_on_layer
     )
     
     tl.store(
-        SCORES +\
-            idx_b * stride_scores_b +\
-            idx_bdst * stride_scores_bdst +\
-            idx_bk * stride_scores_bk,
+        SCORES_FINAL +\
+            idx_b * stride_scores_final_b +\
+            idx_bdst * stride_scores_final_bdst +\
+            idx_bk * stride_scores_final_bk,
         mask=mask_bk,
         value=scores,
     )
@@ -3534,6 +3584,7 @@ def masking_iteration_draft(
     multi_branch_per_layer : int = 1,
     multi_branch_true_iteration : int = 0,
     multi_branch_ret_ratio: float = 1.0,
+    multi_branch_ret_ratio_select_all: bool = False,
 
     k_ret_ratio : float = 1.0,
 
@@ -3653,7 +3704,7 @@ def masking_iteration_draft(
         max_group_size = max_group_size_seed
     
     if multi_branch_on_layer:
-        KEY_ACCESS_LEN = mask_k * math.ceil(math.log(max_group_size, 2 * multi_branch_ratio_per_layer))
+        KEY_ACCESS_LEN = mask_k * math.ceil(math.log2(max_group_size)) # log w 2 * multi_branch_ratio_per_layer might be not enough if idx_iteration != 0
         if output_key_access_log:
             key_access_log = torch.empty(
                 (B, BDST, KEY_ACCESS_LEN,), dtype=torch.int32, 
@@ -3710,13 +3761,14 @@ def masking_iteration_draft(
         assert len(rope_sin.stride()) == 2, rope_cos.shape
     
     assert sample_method in ['first', 'last', 'random', 'oracle', 'center']
+    assert branch_method in ['half', 'equal_size', 'random', 'random_per_iter']
     assert position_ids.ndim == 1
     
     # launch kernels
     # print('init in', indices[0, -1, :10])
     # if indices_seed is not None:
     #     print('init ins', indices_seed[0, -1, :10])
-    BLOCK_MASK_BLOCK_K = triton.next_power_of_2(mask_block_k)
+    BLOCK_MASK_BLOCK_K = triton.next_power_of_2(mask_block_k) # TODO mask_block_k * G ?
     
     if group_size_seed is None:
         grid = (B, BDST, G)
@@ -3741,6 +3793,9 @@ def masking_iteration_draft(
             G, TDST, TSRC, 
             
             BLOCK_MASK_BLOCK_K,
+
+            # multi_branch
+            multi_branch_ratio_per_layer,
             
             # num_warps=min(max(cdiv_python(BLOCK_MASK_BLOCK_K, 32), 1), 32),
             num_warps=1,
@@ -3783,7 +3838,8 @@ def masking_iteration_draft(
         
         assert B == BSZ * BH
         grid = (
-            BH * triton.cdiv(indices.shape[-1], BLOCK_BK),
+            # BH * triton.cdiv(indices.shape[-1], BLOCK_BK), # G * mask_block_k * multi_branch_ratio_per_layer // BLOCK_BK == multi_branch_ratio_per_layer
+            BH * triton.cdiv(indices.shape[-1], BLOCK_BK * multi_branch_ratio_per_layer), # BH
             BDST, 
             BSZ,
         )
@@ -3801,7 +3857,13 @@ def masking_iteration_draft(
             KEY_ACCESS_LEN,
             
             indices, *indices.stride(),
+
+            dupped_indices, *dupped_indices.stride(),
+
+            dupped_group_sizes, *dupped_group_sizes.stride(),
             
+            scores, *scores.stride(),
+
             scores_final, *scores_final.stride(),
             
             t_group_sizes, *t_group_sizes.stride(),
@@ -3809,7 +3871,7 @@ def masking_iteration_draft(
             
             sliding_window_size,
             indices.shape[-1],
-            BH, G, TDST, TSRC, HID, KV_HEAD_REPEAT,
+            BH, mask_block_k, G, TDST, TSRC, HID, KV_HEAD_REPEAT,
             
             using_extend,
             self_extend_neighboor_window,
@@ -3824,6 +3886,12 @@ def masking_iteration_draft(
             block_size_k,
             block_stride_k,
             BLOCK_BK,
+
+            # multi_branch
+            multi_branch_ratio_per_layer,
+            multi_branch_on_layer,
+
+            KEY_DUP=multi_branch_ratio_per_layer,
             
             num_warps=2,
             num_stages=1,
@@ -3850,7 +3918,7 @@ def masking_iteration_draft(
     # max_group_size = max_group_size
     
     topk_indices = torch.empty(
-        (probs.shape[0], probs.shape[1], mask_block_k * G * multi_branch_ratio_per_layer),
+        (probs.shape[0], probs.shape[1], G * mask_block_k * multi_branch_ratio_per_layer),
         device=probs.device,
         dtype=torch.int32,
     )
@@ -3959,9 +4027,6 @@ def masking_iteration_draft(
             multi_branch_true_iteration,
             multi_branch_ret_ratio,
             multi_branch_on_layer,
-
-            indices_bk_len=indices.shape[-1],
-            probs_bk_len=probs.shape[-1],
             
             # num_warps=4,
             # num_stages=2,
@@ -4117,12 +4182,15 @@ def masking_iteration_draft(
     # TODO NOTE!!! include masks that assures * multi_branch_ratio < BSRC
     # TODO also include device_assert for this
     if multi_branch_on_layer:
-        assert multi_branch_ret_ratio <= multi_branch_ratio_per_layer
-        assert multi_branch_ratio_per_layer > 1
-        if multi_branch_ret_ratio == 1:
-            indices = indices[:mask_block_k * G]
-        elif multi_branch_ret_ratio < multi_branch_ratio_per_layer: # if same, no change in indices
-            indices = indices[:math.ceil(mask_block_k * multi_branch_ret_ratio * G)]
+        if multi_branch_ret_ratio_select_all:
+            multi_branch_ret_ratio = multi_branch_ratio_per_layer
+        else:
+            assert multi_branch_ret_ratio <= multi_branch_ratio_per_layer
+            assert multi_branch_ratio_per_layer > 1
+            if multi_branch_ret_ratio == 1:
+                indices = indices[:mask_block_k * G]
+            elif multi_branch_ret_ratio < multi_branch_ratio_per_layer: # if same, no change in indices
+                indices = indices[:math.ceil(mask_block_k * multi_branch_ret_ratio * G)]
 
     indices.mul_(block_size_k)
     
@@ -4723,6 +4791,7 @@ def masking_step_loop(
     multi_branch_per_layer : int = 1,
     multi_branch_true_iteration : int = 0,
     multi_branch_ret_ratio: float = 1.0,
+    multi_branch_ret_ratio_select_all: bool = False,
 
     k_ret_ratio : float = 1.0,
     
@@ -4801,6 +4870,7 @@ def masking_step_loop(
                             multi_branch_per_layer=multi_branch_per_layer,
                             multi_branch_true_iteration=multi_branch_true_iteration,
                             multi_branch_ret_ratio=multi_branch_ret_ratio,
+                            multi_branch_ret_ratio_select_all=multi_branch_ret_ratio_select_all,
                             k_ret_ratio=k_ret_ratio,
                             layer_id=layer_id
                         )
@@ -4899,6 +4969,7 @@ def masking_step_loop(
                                 multi_branch_per_layer=multi_branch_per_layer,
                                 multi_branch_true_iteration=multi_branch_true_iteration,
                                 multi_branch_ret_ratio=multi_branch_ret_ratio,
+                                multi_branch_ret_ratio_select_all=multi_branch_ret_ratio_select_all,
                                 k_ret_ratio=k_ret_ratio,
                                 layer_id=layer_id
                             )
@@ -5040,6 +5111,7 @@ def masking_step_loop(
                                     multi_branch_per_layer=multi_branch_per_layer,
                                     multi_branch_true_iteration=multi_branch_true_iteration,
                                     multi_branch_ret_ratio=multi_branch_ret_ratio,
+                                    multi_branch_ret_ratio_select_all=multi_branch_ret_ratio_select_all,
                                     k_ret_ratio=k_ret_ratio,
                                     layer_id=layer_id
                                 )
@@ -5398,6 +5470,7 @@ def hip_masking(
     multi_branch_per_layer : int = 1,
     multi_branch_true_iteration : int = 0,
     multi_branch_ret_ratio: float = 1.0,
+    multi_branch_ret_ratio_select_all: bool = False,
 
     k_ret_ratio : float = 1.0,
     
@@ -5496,6 +5569,7 @@ def hip_masking(
             multi_branch_per_layer=multi_branch_per_layer,
             multi_branch_true_iteration=multi_branch_true_iteration,
             multi_branch_ret_ratio=multi_branch_ret_ratio,
+            multi_branch_ret_ratio_select_all=multi_branch_ret_ratio_select_all,
             k_ret_ratio=k_ret_ratio,
             layer_id=layer_id
         )
@@ -5932,6 +6006,7 @@ def hip_attention(
     multi_branch_per_layer : int = 1,
     multi_branch_true_iteration : int = 0,
     multi_branch_ret_ratio: float = 1.0,
+    multi_branch_ret_ratio_select_all: bool = False,
 
     k_ret_ratio : float = 1.0,
     
@@ -6002,6 +6077,7 @@ def hip_attention(
         multi_branch_per_layer=multi_branch_per_layer,
         multi_branch_true_iteration=multi_branch_true_iteration,
         multi_branch_ret_ratio=multi_branch_ret_ratio,
+        multi_branch_ret_ratio_select_all = multi_branch_ret_ratio_select_all,
         k_ret_ratio=k_ret_ratio,
         layer_id=layer_id
     )

@@ -18,6 +18,9 @@ class ArgsType:
     dense_queries: int = 0
     dense_layers: int = 3
 
+    branching_method: str = 'half'
+    sampling_method: str = 'first'
+
     ensemble: bool = False
     ensemble_model_setting : str = "random_pruning"
     ensemble_method : str = "final_attn"
@@ -43,6 +46,7 @@ class ArgsType:
     multi_branch_per_layer : int = 1
     multi_branch_true_iteration : int = 0
     multi_branch_ret_ratio : float = 1.0
+    multi_branch_ret_ratio_select_all : bool = False
 
     k_ret_ratio : float = 1.0
 
@@ -104,6 +108,8 @@ def eval_args(
     parser.add_argument('--multi-branch-per-layer', type=int, default=1)
     parser.add_argument('--multi-branch-true-iteration', type=int, default=0)
     parser.add_argument('--multi-branch-ret-ratio', type=float, default=1.0)
+    parser.add_argument('--multi-branch-ret-ratio-select-all', default=False, action='store_true')
+
 
     parser.add_argument('--k-ret-ratio', type=float, default=1.0)
 
@@ -113,7 +119,8 @@ def eval_args(
     parser.add_argument('--disable_flash', default=False, action='store_true')
     parser.add_argument('--disable_sparq', default=False, action='store_true')
     parser.add_argument('--disable_sliding_window', default=False, action='store_true')
-    parser.add_argument('--sampling_method', default='random', type=str)
+    parser.add_argument('--sampling_method', default='first', type=str)
+    parser.add_argument('--branching_method', default='half', type=str)
     parser.add_argument('--overwrite', default=False, action='store_true')
     parser.add_argument('--dataset', default='wikitext', type=str)
     args = parser.parse_args()

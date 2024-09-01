@@ -428,6 +428,7 @@ class LlamaCustomAttention(LlamaAttention):
         self.tree_enable_flash = True
         self.tree_use_sliding_window = True
         self.tree_sampling_method = 'random'
+        self.tree_branching_method = 'half'
         self.tree_lp_norm_coeff = 0.5
         self.tree_stride = -1
 
@@ -470,6 +471,7 @@ class LlamaCustomAttention(LlamaAttention):
         self.multi_branch_per_layer = 1
         self.multi_branch_true_iteration = 0
         self.multi_branch_ret_ratio = 1.0
+        self.multi_branch_ret_ratio_select_all = False
 
         self.k_ret_ratio = 1.0
 
@@ -631,6 +633,7 @@ class LlamaCustomAttention(LlamaAttention):
             tree_dense_queries=self.tree_dense_queries,
             tree_last_dense_queries=self.tree_last_dense_queries,
             tree_sampling_method=self.tree_sampling_method,
+            tree_branching_method=self.tree_branching_method,
 
             # Latency optimization tweaks
             tree_enable_flash=self.tree_enable_flash,
@@ -687,6 +690,7 @@ class LlamaCustomAttention(LlamaAttention):
             multi_branch_per_layer = self.multi_branch_per_layer,
             multi_branch_true_iteration = self.multi_branch_true_iteration,
             multi_branch_ret_ratio = self.multi_branch_ret_ratio,
+            multi_branch_ret_ratio_select_all = self.multi_branch_ret_ratio_select_all,
 
             k_ret_ratio = self.k_ret_ratio,
 
@@ -870,6 +874,7 @@ class LlamaCustomAttention(LlamaAttention):
             tree_dense_queries=self.tree_dense_queries,
             tree_last_dense_queries=self.tree_last_dense_queries,
             tree_sampling_method=self.tree_sampling_method,
+            tree_branching_method=self.tree_branching_method,
             tree_stride=self.tree_stride,
 
             # Latency optimization tweaks
@@ -927,6 +932,7 @@ class LlamaCustomAttention(LlamaAttention):
             multi_branch_per_layer = self.multi_branch_per_layer,
             multi_branch_true_iteration = self.multi_branch_true_iteration,
             multi_branch_ret_ratio = self.multi_branch_ret_ratio,
+            multi_branch_ret_ratio_select_all = self.multi_branch_ret_ratio_select_all,
 
             k_ret_ratio = self.k_ret_ratio,
 
