@@ -45,9 +45,10 @@ class ArgsType:
     multi_branch_layer_till : int = None
     multi_branch_layer_all : bool = False
     multi_branch_per_layer : int = 1
-    multi_branch_true_iteration : int = 0
+    multi_branch_true_iter : int = 0
     multi_branch_ret_ratio : float = 1.0
     multi_branch_ret_ratio_select_all : bool = False
+    multi_branch_true_iter_cnt : int = 1
 
     k_ret_ratio : float = 1.0
 
@@ -108,10 +109,10 @@ def eval_args(
     parser.add_argument('--multi-branch-layer-till', type=int, default=None)
     parser.add_argument('--multi-branch-layer-all', default=False, action='store_true')
     parser.add_argument('--multi-branch-per-layer', type=int, default=1)
-    parser.add_argument('--multi-branch-true-iteration', type=int, default=0)
+    parser.add_argument('--multi-branch-true-iter', type=int, default=0)
     parser.add_argument('--multi-branch-ret-ratio', type=float, default=1.0)
     parser.add_argument('--multi-branch-ret-ratio-select-all', default=False, action='store_true')
-
+    parser.add_argument('--multi-branch-true-iter-cnt', type=int, default=1)
 
     parser.add_argument('--k-ret-ratio', type=float, default=1.0)
 
