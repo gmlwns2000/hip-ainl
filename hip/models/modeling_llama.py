@@ -471,6 +471,7 @@ class LlamaCustomAttention(LlamaAttention):
         self.multi_branch_layer_all = False
         self.multi_branch_per_layer = 1
         self.multi_branch_true_iter = 0
+        self.multi_branch_true_iter_str = None
         self.multi_branch_ret_ratio = 1.0
         self.multi_branch_ret_ratio_select_all = False
         self.multi_branch_true_iter_cnt = 1
@@ -692,6 +693,7 @@ class LlamaCustomAttention(LlamaAttention):
             multi_branch_layer_all = self.multi_branch_layer_all,
             multi_branch_per_layer = self.multi_branch_per_layer,
             multi_branch_true_iter = self.multi_branch_true_iter,
+            multi_branch_true_iter_str = self.multi_branch_true_iter_str,
             multi_branch_ret_ratio = self.multi_branch_ret_ratio,
             multi_branch_ret_ratio_select_all = self.multi_branch_ret_ratio_select_all,
             multi_branch_true_iter_cnt = self.multi_branch_true_iter_cnt,
@@ -936,6 +938,7 @@ class LlamaCustomAttention(LlamaAttention):
             multi_branch_layer_all = self.multi_branch_layer_all,
             multi_branch_per_layer = self.multi_branch_per_layer,
             multi_branch_true_iter = self.multi_branch_true_iter,
+            multi_branch_true_iter_str = self.multi_branch_true_iter_str,
             multi_branch_ret_ratio = self.multi_branch_ret_ratio,
             multi_branch_ret_ratio_select_all = self.multi_branch_ret_ratio_select_all,
             multi_branch_true_iter_cnt = self.multi_branch_true_iter_cnt,
