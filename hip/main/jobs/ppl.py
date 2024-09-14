@@ -94,7 +94,7 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=F
                     samples = []
                     with tqdm(range(sample_counts), dynamic_ncols=True, position=1, disable=sample_counts <= 1) as pbar_sample:
                         for _ in pbar_sample:
-                            if args.method in ['h2o', 'tova']:
+                            if args.method in ['h2o', 'h2o_stream', 'tova'] and (os.getenv('H2O_DEFAULT', '0') == '1' or os.getenv('H2O_DEFAULT', '0') == '-1' or os.getenv('TOVA_DEFAULT', '0') == '1'):
                                 loss_sum = 0
                                 loss_count = 0
                                 prompt_ids = input_ids[:, :args.k]
@@ -157,15 +157,15 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=F
                                     loss_count += curr_token.shape[-1]
                                     tqdm.write(f'H2O Loss idx={prompt_ids.shape[1]+curr_idx+1}: {math.exp(loss_sum / loss_count)}')
                                     
-                                for m in model.modules():
-                                    if hasattr(m, '_clean_cache'):
-                                        m._clean_cache()
                                 final_loss = loss_sum / loss_count
                                 samples.append(final_loss)
                                 pbar_sample.set_description(
                                     f'ppl: {torch.exp(torch.stack(nlls + [final_loss.cpu()]).mean()).item():.6f}'
                                 )
-                            else:
+                                for m in model.modules():
+                                    if hasattr(m, '_clean_cache'):
+                                        m._clean_cache()
+                            else: # TODO NOTE currently pass_key_values are passed as a tuple
                                 outputs = model(
                                     input_ids,
                                     labels=target_ids,
@@ -175,6 +175,10 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=F
                                 pbar_sample.set_description(
                                     f'ppl: {torch.exp(torch.stack(nlls + [outputs.loss.cpu()]).mean()).item():.6f}'
                                 )
+                                if args.method in ['h2o', 'h2o_stream', 'tova']:
+                                    for m in model.modules():
+                                        if hasattr(m, '_clean_cache'):
+                                            m._clean_cache()
                     if len(samples) > 1:
                         print([f'{x.item():.5f}' for x in samples])
                     neg_log_likelihood = min(samples)
