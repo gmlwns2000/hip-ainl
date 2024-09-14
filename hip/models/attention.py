@@ -287,7 +287,7 @@ def custom_attention(
                 #     topk_head_group_size=1,
                 # )
                 
-                q = q.permute(0, 2, 1, 3)
+                q = q.permute(0, 2, 1, 3) # N, H, T, HID -> N, T, H, HID
                 k = k.permute(0, 2, 1, 3)
                 v = v.permute(0, 2, 1, 3)
                 

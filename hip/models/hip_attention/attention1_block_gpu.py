@@ -1610,6 +1610,24 @@ from hip.models.hip_attention.attention2_draft_prefetch import hip_attention as 
 def main_latency_benchmark():
     global DEBUG
     
+    MODELS = {
+        'llama1b': 'princeton-nlp/Sheared-LLaMA-1.3B',
+        'llama3b': 'princeton-nlp/Sheared-LLaMA-2.7B',
+        'llama7b': 'meta-llama/Llama-2-7b-chat-hf',
+        'llama32k': 'togethercomputer/LLaMA-2-7B-32K',
+        'llama32k_instruct': 'togethercomputer/Llama-2-7B-32K-Instruct',
+        'llama13b': 'meta-llama/Llama-2-13b-hf',
+        'llama13b_32k': 'Yukang/Llama-2-13b-longlora-32k-ft',
+        'llama13b_32k_instruct': 'Yukang/Llama-2-13b-chat-longlora-32k-sft',
+        'llama3_8b_1m': 'gradientai/Llama-3-8B-Instruct-Gradient-1048k',
+        'llama3.1_8b': 'meta-llama/Meta-Llama-3.1-8B',
+        'llama3.1_8b_instruct': 'meta-llama/Meta-Llama-3.1-8B-Instruct',
+        'qwen14b': 'Qwen/Qwen1.5-14B-Chat',
+        'qwen7b': 'Qwen/Qwen1.5-7B-Chat',
+        'qwen1.5b': 'Qwen/Qwen1.5-1.8B-Chat',
+        'qwen0.5b': 'Qwen/Qwen1.5-0.5B-Chat',
+    }
+    
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--trace', action='store_true')
@@ -1630,6 +1648,10 @@ def main_latency_benchmark():
     parser.add_argument('--refresh_interval', type=int, default=8)
     parser.add_argument('--not_causal', action='store_true')
     parser.add_argument('--head_groups', type=int, default=1)
+    
+    # h2o
+    parser.add_argument('--model', type=str, default='llama3.1_8b_instruct')
+    
     args = parser.parse_args()
     
     if args.query_size > 1:
@@ -1643,6 +1665,7 @@ def main_latency_benchmark():
     METHOD = args.method
     n_samples = args.samples
     is_causal = not args.not_causal
+    model_id = MODELS[args.model]
     
     if DEBUG:
         seed()
@@ -1651,7 +1674,11 @@ def main_latency_benchmark():
     get_bench().synchronize = True
 
     CHUNK_LEN = 1024
+    # q: [N*H, T_DST, HID] = [32, 1024, 128]
+    # k, v: [N*H_KV, T_SRC, HID] = [8, 1024, 128]
     q, k, v, out = load_checkouts(idx=0, window=40, seq_len=CHUNK_LEN)
+    # head_size = q.shape[0] # NOTE moved
+   
     HID = q.shape[-1]
     
     q = q.cpu()
@@ -1676,10 +1703,10 @@ def main_latency_benchmark():
         v = v.repeat(1, 1, hid_reps)[:, :, :args.hidden_size].contiguous()
         HID = args.hidden_size
     
-    head_size = q.shape[0]
-    cos = sin = torch.randn((k.shape[1], k.shape[2]), dtype=k.dtype, device=k.device)
+    head_size = q.shape[0] # TODO move
+    cos = sin = torch.randn((k.shape[1], k.shape[2]), dtype=k.dtype, device=k.device) # [T, HID]
     
-    if METHOD in ['flash', 'fa2', 'hip1.1']:
+    if METHOD in ['flash', 'fa2', 'hip1.1']: # N, T, H, HID
         q = q.view(BSIZE, -1, QUERY_SIZE, HID).permute(0, 2, 1, 3).contiguous()
         k = k.view(BSIZE, -1, CHUNK_LEN * DUPS, HID)[:, ::args.head_groups, :, :].permute(0, 2, 1, 3).contiguous()
         v = v.view(BSIZE, -1, CHUNK_LEN * DUPS, HID)[:, ::args.head_groups, :, :].permute(0, 2, 1, 3).contiguous()
@@ -1687,6 +1714,10 @@ def main_latency_benchmark():
         q = q.view(BSIZE, -1, QUERY_SIZE, HID).contiguous()
         k = k.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).contiguous()
         v = v.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).contiguous()
+    elif METHOD in ['h2o', 'h2o_stream']: # TODO NOTE args.head_groups automatically detected??
+        q = q.view(BSIZE, -1, QUERY_SIZE, HID).contiguous() # [128, 32, 32k, 128]
+        k = k.view(BSIZE, -1, CHUNK_LEN * DUPS, HID)[:, ::args.head_groups, :, :].contiguous() # [128, 8, 32k, 128]
+        v = v.view(BSIZE, -1, CHUNK_LEN * DUPS, HID)[:, ::args.head_groups, :, :].contiguous() # [128, 8, 32k, 128]
     
     q = q.cuda()
     k = k.cuda()
@@ -1699,6 +1730,27 @@ def main_latency_benchmark():
     
     hip_attention_mask = torch.full((q.shape[0], k.shape[1]), True, dtype=torch.bool, device=q.device)
     
+    from hip.models.h2o_llama import H2OLlamaAttention
+    from hip.models.h2o_llama import H2OLlamaAttention_streaming
+    from transformers.models.llama.configuration_llama import LlamaConfig
+    
+    # import os
+    # os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+    # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    # os.environ["TORCH_USE_CUDA_DSA"] = '1'
+    
+    if METHOD in ['h2o', 'h2o_stream']:
+        config = LlamaConfig.from_pretrained(model_id)
+        config.hh_size = 4
+        config.recent_size = args.k
+        config._attn_implementation = config.attn_implementation = 'eager'
+        config.shift_q_pos = args.shift_q_pos
+        config.reduction_for_gqa = args.reduce_for_gqa
+        if METHOD == 'h2o':
+            h2o_attention = H2OLlamaAttention(config, layer_idx=0).to(q.device).to(q.dtype) # TODO set layer_idx?
+        else:
+            h2o_attention = H2OLlamaAttention_streaming(config, layer_idx=0).to(q.device).to(q.dtype) # TODO set layer_idx?
+        
     from hip.models.hyper_attention.hyper_attn import HyperAttention
     hyper_attention = HyperAttention(
         input_dim=q.shape[-1],
@@ -1729,6 +1781,26 @@ def main_latency_benchmark():
                     causal=True, 
                     scale=1
                 )
+            elif METHOD in ['h2o', 'h2o_stream']:                
+                assert QUERY_SIZE > 1
+                assert QUERY_SIZE == CHUNK_LEN * DUPS
+                
+                attn_output, attn_weights, past_key_value = h2o_attention(
+                    None,
+                    q, k, v,
+                    attention_mask = None,
+                    position_ids = torch.arange(0, QUERY_SIZE).repeat(q.shape[0], 1).to(q.device), # TODO postiion_ids to batch size?
+                    past_key_value = None,
+                    output_attentions= False, # TODO check
+                    use_cache = True,
+                    shift_q_pos = config.shift_q_pos,
+                    mask_k = args.k,
+                    reduction_for_gqa = config.reduction_for_gqa,
+                    H2O_BENCHMARK = 1
+                )
+                for m in h2o_attention.modules():
+                    if hasattr(m, '_clean_cache'):
+                        m._clean_cache()
             elif METHOD == 'hip1.1':
                 assert is_causal
                 if state is None:

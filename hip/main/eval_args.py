@@ -52,6 +52,11 @@ def eval_args(
     parser.add_argument('--sampling_method', default='random', type=str)
     parser.add_argument('--overwrite', default=False, action='store_true')
     parser.add_argument('--dataset', default='wikitext', type=str)
+    
+    # h2o
+    parser.add_argument('--shift-q-pos', action='store_true')
+    parser.add_argument('--reduce-for-gqa', type=str, default='average')
+    
     args = parser.parse_args()
     print(args)
     return args
