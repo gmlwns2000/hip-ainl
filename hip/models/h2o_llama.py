@@ -372,91 +372,91 @@ def apply_rotary_pos_emb_single(x, cos, sin, position_ids, unsqueeze_dim=1, posi
 # def _final_kv_hh_compute():
 # NOTE consider batch; mask [N, H, T]
 
-@triton.jit
-def _final_kv_hh_compute_test(
-    PAST_KEY: tl.bfloat16, stride_past_key_n, stride_past_key_head, stride_past_key_t, stride_past_key_hid,
-    PAST_VALUE: tl.bfloat16, stride_past_value_n, stride_past_value_head, stride_past_value_t, stride_past_value_hid,
+# @triton.jit
+# def _final_kv_hh_compute_test(
+#     PAST_KEY: tl.bfloat16, stride_past_key_n, stride_past_key_head, stride_past_key_t, stride_past_key_hid,
+#     PAST_VALUE: tl.bfloat16, stride_past_value_n, stride_past_value_head, stride_past_value_t, stride_past_value_hid,
     
-    MASK, stride_mask_head, stride_mask_t,
+#     MASK, stride_mask_head, stride_mask_t,
     
-    K_HH_RECENT, stride_k_hh_recent_n, stride_k_hh_recent_head, stride_k_hh_recent_cz, stride_k_hh_recent_hid,
-    V_HH_RECENT, stride_v_hh_recent_n, stride_v_hh_recent_head, stride_v_hh_recent_cz, stride_v_hh_recent_hid,
+#     K_HH_RECENT, stride_k_hh_recent_n, stride_k_hh_recent_head, stride_k_hh_recent_cz, stride_k_hh_recent_hid,
+#     V_HH_RECENT, stride_v_hh_recent_n, stride_v_hh_recent_head, stride_v_hh_recent_cz, stride_v_hh_recent_hid,
     
-    BLOCK_T: tl.constexpr, 
-    BLOCK_HID: tl.constexpr, 
-    BLOCK_CACHE_SIZE: tl.constexpr,
-    T, HID, CACHE_SIZE
-):
-    # NOTE mask [H, T]
-    idx_n = tl.program_id(0).to(tl.int64)
-    idx_head = tl.program_id(1).to(tl.int64)
+#     BLOCK_T: tl.constexpr, 
+#     BLOCK_HID: tl.constexpr, 
+#     BLOCK_CACHE_SIZE: tl.constexpr,
+#     T, HID, CACHE_SIZE
+# ):
+#     # NOTE mask [H, T]
+#     idx_n = tl.program_id(0).to(tl.int64)
+#     idx_head = tl.program_id(1).to(tl.int64)
     
-    idx_t = (tl.arange(0, BLOCK_T)).to(tl.int64)
-    mask_t = idx_t < T
+#     idx_t = (tl.arange(0, BLOCK_T)).to(tl.int64)
+#     mask_t = idx_t < T
     
-    idx_hid = (tl.arange(0, BLOCK_HID)).to(tl.int64)
-    mask_hid = idx_hid < HID
+#     idx_hid = (tl.arange(0, BLOCK_HID)).to(tl.int64)
+#     mask_hid = idx_hid < HID
     
-    idx_cache_size = (tl.arange(0, BLOCK_CACHE_SIZE)).to(tl.int64)
-    mask_cache_size = idx_cache_size < CACHE_SIZE
+#     idx_cache_size = (tl.arange(0, BLOCK_CACHE_SIZE)).to(tl.int64)
+#     mask_cache_size = idx_cache_size < CACHE_SIZE
     
-    mask = tl.load( # [T]
-        MASK +\
-        idx_head * stride_mask_head +\
-        idx_t * stride_mask_t,
-        mask = mask_t,
-        # other = 0,
-    )#.to(tl.int64)
+#     mask = tl.load( # [T]
+#         MASK +\
+#             idx_head * stride_mask_head +\
+#             idx_t * stride_mask_t,
+#         mask = mask_t,
+#         # other = 0,
+#     )#.to(tl.int64)
     
-    tl.static_print(mask.dtype)
-    tl.static_print(mask)
+#     tl.static_print(mask.dtype)
+#     tl.static_print(mask)
     
-    past_key = tl.load( # [T, HID]
-        PAST_KEY +\
-        idx_n * stride_past_key_n +\
-        idx_head * stride_past_key_head +\
-        idx_t[:, None].to(tl.int64) * stride_past_key_t +\
-        idx_hid[None, :].to(tl.int64) * stride_past_key_hid,
-        mask = ((mask_t & mask)[:, None]) & mask_hid[None, :],
-        # other = 0
-    )#.to(tl.bfloat16)
+#     past_key = tl.load( # [T, HID]
+#         PAST_KEY +\
+#             idx_n * stride_past_key_n +\
+#             idx_head * stride_past_key_head +\
+#             idx_t[:, None].to(tl.int64) * stride_past_key_t +\
+#             idx_hid[None, :].to(tl.int64) * stride_past_key_hid,
+#         mask = ((mask_t & mask)[:, None]) & mask_hid[None, :],
+#         # other = 0
+#     )#.to(tl.bfloat16)
     
-    tl.static_print(past_key.dtype)
-    tl.static_print(past_key)
+#     tl.static_print(past_key.dtype)
+#     tl.static_print(past_key)
     
-    past_value = tl.load( # [T, HID]
-        PAST_VALUE +\
-        idx_n * stride_past_value_n +\
-        idx_head * stride_past_value_head +\
-        idx_t[:, None].to(tl.int64) * stride_past_value_t +\
-        idx_hid[None, :].to(tl.int64) * stride_past_value_hid,
-        mask = ((mask_t & mask)[:, None]) & mask_hid[None, :],
-        # other = 0
-    )#.to(tl.bfloat16)
+#     past_value = tl.load( # [T, HID]
+#         PAST_VALUE +\
+#             idx_n * stride_past_value_n +\
+#             idx_head * stride_past_value_head +\
+#             idx_t[:, None].to(tl.int64) * stride_past_value_t +\
+#             idx_hid[None, :].to(tl.int64) * stride_past_value_hid,
+#         mask = ((mask_t & mask)[:, None]) & mask_hid[None, :],
+#         # other = 0
+#     )#.to(tl.bfloat16)
     
-    # [CACHE_SIZE, HID]
-    # k_hh_recent = past_key[mask]#.view(CACHE_SIZE, HID)
-    # v_hh_recent = past_value[mask]#.view(CACHE_SIZE, HID)
+#     # [CACHE_SIZE, HID]
+#     # k_hh_recent = past_key[mask]#.view(CACHE_SIZE, HID)
+#     # v_hh_recent = past_value[mask]#.view(CACHE_SIZE, HID)
     
-    tl.store(
-        K_HH_RECENT +\
-        idx_n * stride_k_hh_recent_n +\
-        idx_head * stride_k_hh_recent_head +\
-        idx_cache_size[:, None] * stride_k_hh_recent_cz +\
-        idx_hid[None, :] * stride_k_hh_recent_hid,
-        value = past_key,
-        mask = mask_cache_size[:, None] & mask_hid[None, :],
-    )
+#     tl.store(
+#         K_HH_RECENT +\
+#             idx_n * stride_k_hh_recent_n +\
+#             idx_head * stride_k_hh_recent_head +\
+#             idx_cache_size[:, None] * stride_k_hh_recent_cz +\
+#             idx_hid[None, :] * stride_k_hh_recent_hid,
+#         value = past_key,
+#         mask = mask_cache_size[:, None] & mask_hid[None, :],
+#     )
     
-    tl.store(
-        V_HH_RECENT +\
-        idx_n * stride_v_hh_recent_n +\
-        idx_head * stride_v_hh_recent_head +\
-        idx_cache_size[:, None] * stride_v_hh_recent_cz +\
-        idx_hid[None, :] * stride_v_hh_recent_hid,
-        value = past_value,
-        mask = mask_cache_size[:, None] & mask_hid[None, :],
-    )
+#     tl.store(
+#         V_HH_RECENT +\
+#             idx_n * stride_v_hh_recent_n +\
+#             idx_head * stride_v_hh_recent_head +\
+#             idx_cache_size[:, None] * stride_v_hh_recent_cz +\
+#             idx_hid[None, :] * stride_v_hh_recent_hid,
+#         value = past_value,
+#         mask = mask_cache_size[:, None] & mask_hid[None, :],
+#     )
 
 import os
 class H2OKVCache_LayerWise:
@@ -499,10 +499,10 @@ class H2OKVCache_LayerWise:
             mask = torch.zeros(self.hh_score.shape, dtype=torch.bool).to(past_key_values[0].device)
             mask = mask.scatter(-1, keep_idx, 1)
 
-            print('past_key_values ', past_key_values[0].shape)
-            print('past_key_values_ ', past_key_values[0].squeeze().shape)
-            print('mask ', mask.shape)
-            breakpoint()
+            # print('past_key_values ', past_key_values[0].shape)
+            # print('past_key_values_ ', past_key_values[0].squeeze().shape)
+            # print('mask ', mask.shape)
+            # breakpoint()
             k_hh_recent = past_key_values[0].squeeze()[mask].view(bsz, num_heads, -1, head_dim)
             v_hh_recent = past_key_values[1].squeeze()[mask].view(bsz, num_heads, -1, head_dim)
 
@@ -539,36 +539,39 @@ class H2OKVCache_LayerWise:
             # breakpoint()
             
             
-            grid = (bsz, num_heads)
+            # grid = (bsz, num_heads)
             
-            past_key = past_key_values[layer_idx][0]#.to(torch.bfloat16) # N, H, T, HID
-            past_value = past_key_values[layer_idx][1]#.to(torch.bfloat16) # N, H, T, HID
+            # past_key = past_key_values[layer_idx][0]#.to(torch.bfloat16) # N, H, T, HID
+            # past_value = past_key_values[layer_idx][1]#.to(torch.bfloat16) # N, H, T, HID
             
-            k_hh_recent = torch.zeros(bsz, num_heads, self.cache_size, head_dim, dtype=past_key_values[layer_idx][0].dtype)
-            v_hh_recent = torch.zeros(bsz, num_heads, self.cache_size, head_dim, dtype=past_key_values[layer_idx][0].dtype)
+            # k_hh_recent = torch.zeros(bsz, num_heads, self.cache_size, head_dim, dtype=past_key_values[layer_idx][0].dtype)
+            # v_hh_recent = torch.zeros(bsz, num_heads, self.cache_size, head_dim, dtype=past_key_values[layer_idx][0].dtype)
             
-            block_t = triton.next_power_of_2(seq_len)
-            block_hid = triton.next_power_of_2(head_dim)
-            block_cache_size = triton.next_power_of_2(self.cache_size)
+            # block_t = triton.next_power_of_2(seq_len)
+            # block_hid = triton.next_power_of_2(head_dim)
+            # block_cache_size = triton.next_power_of_2(self.cache_size)
             
-            # breakpoint()
-            _final_kv_hh_compute_test[grid](
-                past_key, *past_key.stride(),
-                past_value, *past_value.stride(),
+            # _final_kv_hh_compute_test[grid](
+            #     past_key, *past_key.stride(),
+            #     past_value, *past_value.stride(),
                 
-                mask, *mask.stride(),
+            #     mask, *mask.stride(),
                 
-                k_hh_recent, *k_hh_recent.stride(),
-                v_hh_recent, *v_hh_recent.stride(),
+            #     k_hh_recent, *k_hh_recent.stride(),
+            #     v_hh_recent, *v_hh_recent.stride(),
                 
-                block_t, block_hid, block_cache_size,
-                seq_len, head_dim, self.cache_size
-            )
+            #     block_t, block_hid, block_cache_size,
+            #     seq_len, head_dim, self.cache_size
+            # )
             
-            # k_hh_recent = past_key_values[layer_idx][0][mask].view(bsz, num_heads, -1, head_dim)
-            # v_hh_recent = past_key_values[layer_idx][1][mask].view(bsz, num_heads, -1, head_dim)
+            mask = torch.unsqueeze(mask, 0)
+            
+            k_hh_recent = past_key_values[layer_idx][0][mask].view(bsz, num_heads, -1, head_dim)
+            v_hh_recent = past_key_values[layer_idx][1][mask].view(bsz, num_heads, -1, head_dim)
 
             # self.hh_score : [num_heads, seq_len] TODO check for H2O_DEFAULT 0 whether to modify this part
+            
+            mask = mask.squeeze(0)
             self.hh_score= self.hh_score[mask].view(num_heads, self.cache_size)
             
             return (True, k_hh_recent, v_hh_recent)
@@ -791,7 +794,7 @@ class H2OLlamaAttention(nn.Module):
         position_embeddings: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         if os.getenv('H2O_DEFAULT', '0') == '1':
-            print(f'### l{self.layer_idx} INSIDE ATTN ###')
+            # print(f'### l{self.layer_idx} INSIDE ATTN ###')
             if H2O_BENCHMARK == 1:
                 bsz, _, q_len, _ = query_states.shape
             else:
@@ -987,7 +990,7 @@ class H2OLlamaAttention(nn.Module):
         
         # NOTE call h2o_attention in LlamaCustomAttention & change past_key_values to use DynamicCache (self.kv_cach call is also modified)
         elif os.getenv('H2O_DEFAULT', '0') == '-1':
-            print(f'### l{self.layer_idx} INSIDE ATTN ###')
+            # print(f'### l{self.layer_idx} INSIDE ATTN ###')
             assert hidden_states is None
             bsz, _, q_len, _ = query_states.shape
             
@@ -1507,7 +1510,7 @@ class H2OLlamaAttention(nn.Module):
             #         past_key_value = DynamicCache()
             #     past_key_values_length = past_key_value.get_seq_length()
         
-        print('=================')
+        # print('=================')
         return attn_output, attn_weights, past_key_value
 
 
