@@ -508,12 +508,6 @@ class LlamaCustomAttention(LlamaAttention):
         from hip.models.h2o_llama import H2OLlamaAttention
         from hip.models.h2o_llama import H2OLlamaAttention_streaming
         
-        self.config.hh_size = 4
-        self.config.recent_size = 512
-        self.config._attn_implementation = self.config.attn_implementation = 'eager'
-        self.config.shift_q_pos = False
-        self.config.reduction_for_gqa = 'average'
-        
         self.h2o_attention = H2OLlamaAttention(self.config, self.layer_idx)# .to(query_states.device).to(query_states.dtype)
         # self.h2o_attention_ = H2OLlamaAttention_streaming(self.config, self.layer_idx)# .to(query_states.device).to(query_states.dtype)
         
@@ -785,6 +779,17 @@ class LlamaCustomAttention(LlamaAttention):
             self.h2o_attention.o_proj = self.o_proj
             mask_k = self.tree_k
             
+            if position_embeddings is None:
+                logger.warning_once(
+                    "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
+                    "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
+                    "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.45 `position_ids` will be "
+                    "removed and `position_embeddings` will be mandatory."
+                )
+                cos, sin = self.rotary_emb(value_states, position_ids)
+            else:
+                cos, sin = position_embeddings
+            
             if q_len > mask_k:
                 compute_final_attn_output = True
                 
@@ -818,6 +823,9 @@ class LlamaCustomAttention(LlamaAttention):
                     kv_seq_len=kv_seq_len,
                     decoding_loop_for_prefill=True,
                     compute_final_attn_output=compute_final_attn_output,
+                    
+                    cos=cos,
+                    sin=sin
                 )
                 
                 # loop one by one
@@ -840,7 +848,10 @@ class LlamaCustomAttention(LlamaAttention):
                         reduction_for_gqa=self.config.reduction_for_gqa,
                         kv_seq_len=kv_seq_len,
                         decoding_loop_for_prefill=True,
-                        compute_final_attn_output=compute_final_attn_output
+                        compute_final_attn_output=compute_final_attn_output,
+                        
+                        cos=cos,
+                        sin=sin
                     )
                     
                     attn_output = torch.cat((attn_output, attn_output_), dim=1)
@@ -867,7 +878,10 @@ class LlamaCustomAttention(LlamaAttention):
                     reduce_for_gqa=self.config.reduction_for_gqa,
                     kv_seq_len=kv_seq_len,
                     decoding_loop_for_prefill=True,
-                    compute_final_attn_output=True # compute_final_attn_output
+                    compute_final_attn_output=True, # compute_final_attn_output
+                    
+                    cos=cos,
+                    sin=sin
                 )
             print('=========')
         

@@ -163,11 +163,13 @@ def load_model(args):
             # from hip.models.h2o_llama_masked import H2OLlamaForCausalLM # this file does not use H2O, use this for validation
             from hip.models.h2o_llama import H2OLlamaForCausalLM # this is real H2O
             ModelClass = H2OLlamaForCausalLM
-        config.hh_size = 4
-        config.recent_size = args.k
-        config._attn_implementation = config.attn_implementation = 'eager'
-        config.shift_q_pos = args.shift_q_pos
-        config.reduction_for_gqa = args.reduce_for_gqa
+    config.hh_size = 4
+    config.recent_size = args.k
+    config._attn_implementation = config.attn_implementation = 'eager'
+    config.shift_q_pos = args.shift_q_pos
+    config.streaming = args.streaming
+    config.reduction_for_gqa = args.reduce_for_gqa
+        
     if args.method == 'tova':
         from transformers.models.llama.modeling_llama import LlamaForCausalLM as OriginalLlamaForCausalLM
         ModelClass = OriginalLlamaForCausalLM
