@@ -403,6 +403,35 @@ class LlamaAttention(nn.Module):
 
         return attn_output, attn_weights, past_key_value
 
+# TODO LATER?
+# def _make_causal_mask(
+#     bsz: int, tgt_len: int, past_key_values_length: int, dtype: torch.dtype, device: torch.device):
+#     """
+#     Make causal mask used for bi-directional self-attention.
+#     """
+#     mask = torch.full((tgt_len, tgt_len), torch.finfo(dtype).min, device=device)
+#     mask_cond = torch.arange(mask.size(-1), device=device)
+#     mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
+#     mask = mask.to(dtype)
+
+#     if past_key_values_length > 0:
+#         mask = torch.cat([torch.zeros(tgt_len, past_key_values_length, dtype=dtype, device=device), mask], dim=-1)
+#     return mask[None, None, :, :].expand(bsz, 1, tgt_len, tgt_len + past_key_values_length)
+
+
+def apply_rotary_pos_emb_single(x, cos, sin, position_ids, unsqueeze_dim=1):
+    # cos, sin : [bsz, seq_len, dim], position_ids : [bsz, seq_len]
+    # Gather values from a according to position_ids along the T dimension (dim=1)
+    _, _, cos_dim = cos.shape
+    bsz, pos_t = position_ids.shape
+    assert sin.shape[-1] == cos_dim
+    assert x.shape[-2] == pos_t
+    cos = torch.gather(cos, 1, position_ids.unsqueeze(-1).expand(bsz, pos_t, cos_dim)).unsqueeze(1)  # [bs, 1, seq_len, dim]
+    sin = torch.gather(sin, 1, position_ids.unsqueeze(-1).expand(bsz, pos_t, cos_dim)).unsqueeze(1)  # [bs, 1, seq_len, dim]
+    
+    x_embed = (x * cos) + (rotate_half(x) * sin) # [bs, head, pos_t, dim]
+    return x_embed
+
 
 class LlamaCustomAttention(LlamaAttention):
     def __init__(
@@ -479,6 +508,12 @@ class LlamaCustomAttention(LlamaAttention):
         from hip.models.h2o_llama import H2OLlamaAttention
         from hip.models.h2o_llama import H2OLlamaAttention_streaming
         
+        self.config.hh_size = 4
+        self.config.recent_size = 512
+        self.config._attn_implementation = self.config.attn_implementation = 'eager'
+        self.config.shift_q_pos = False
+        self.config.reduction_for_gqa = 'average'
+        
         self.h2o_attention = H2OLlamaAttention(self.config, self.layer_idx)# .to(query_states.device).to(query_states.dtype)
         # self.h2o_attention_ = H2OLlamaAttention_streaming(self.config, self.layer_idx)# .to(query_states.device).to(query_states.dtype)
         
@@ -523,9 +558,59 @@ class LlamaCustomAttention(LlamaAttention):
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        
+        kv_seq_len = None
 
-        if self.attention_method not in ['h2o', 'h2o_stream']:
-            if position_embeddings is None:
+        if (self.layer_idx in self.tree_dense_layers) or (self.attention_method not in ['h2o', 'h2o_stream']) or (os.getenv('H2O_DEFAULT', '0') not in ['-1', '0', '1', '3']):
+            if self.attention_method in ['h2o', 'h2o_stream'] and self.layer_idx not in self.tree_dense_layers:
+                raise Exception()
+                # TODO LATER?
+                assert self.attention_method != 'h2o_stream'
+                assert self.config.hh_size == 4
+                assert self.config.recent_size == self.tree_k
+                assert self.config._attn_implementation == self.config.attn_implementation == 'eager'
+                assert self.config.shift_q_pos is not None
+                assert self.config.reduction_for_gqa is not None
+                
+                self.h2o_attention.o_proj = self.o_proj
+                
+                if q_len > mask_k:
+                    # NOTE CustomAttention mainly adds work for prefill
+                    position_ids_k = position_ids[:, :mask_k]
+                    position_ids_loop = position_ids[:, mask_k:]
+                    
+                    query_states_k = query_states[:, :, :mask_k, :]
+                    query_states_loop = query_states[:, :, mask_k:, :]
+                    key_states_k = key_states[:, :, :mask_k, :]
+                    key_states_loop = key_states[:, :, mask_k:, :]
+                    value_states_k = value_states[:, :, :mask_k, :]
+                    value_states_loop = value_states[:, :, mask_k:, :]
+                    
+                    assert use_cache is True
+                
+                
+                attention_mask = _make_causal_mask(
+                    bsz=bsz,
+                    tgt_len=q_len,
+                    past_key_values_length=past_key_value[self.layer_idx][0].shape[-2] if (past_key_value is not None and len(past_key_value) > self.layer_idx) else 0,
+                    dtype=query_states.dtype,
+                    device=query_states.device,
+                )
+                
+                kv_seq_len = key_states.shape[-2]
+                if past_key_value is not None and len(past_key_value) > self.layer_idx:
+                    kv_seq_len += past_key_value[self.layer_idx][0].shape[-2]
+
+                position_length = kv_seq_len
+
+                if not position_ids[0].nelement() > 1: # NOTE to support batch - check
+                    # import warnings
+                    # warnings.warn(f'pos_id {position_ids.shape}, pos_id_n_elem = {position_ids[0].nelement()}; assumed all batch contains same id')
+                    if position_length < position_ids[0].item()+1: # NOTE can be greater than kv_seq_len, after eviction starts
+                        position_length = position_ids[0].item()+1
+                
+                cos, sin = self.rotary_emb(value_states, torch.arange(0, position_length, device=key_states.device)[None, :])
+            elif position_embeddings is None:
                 logger.warning_once(
                     "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
                     "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
@@ -535,48 +620,41 @@ class LlamaCustomAttention(LlamaAttention):
                 cos, sin = self.rotary_emb(value_states, position_ids)
             else:
                 cos, sin = position_embeddings
-            
-            # print('## cos ', cos.shape)
-            # print('## sin ', sin.shape)
-            
                 
             if self.layer_idx in self.tree_dense_layers:
                 query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
             else:
                 if self.attention_method == 'streaming_llm':
                     cos = sin = None # NOTE weird
+                elif self.attention_method in ['h2o', 'h2o_stream']:
+                    raise Exception()
+                    # TODO LATER?
+                    ### Shift Pos: query pos is min(cache_size, idx)
+                    query_states = apply_rotary_pos_emb_single(
+                        query_states, 
+                        cos, 
+                        sin, 
+                        torch.clamp_max(position_ids, kv_seq_len) if self.config.shift_q_pos else position_ids,
+                    )
+                    key_states = apply_rotary_pos_emb_single(
+                        key_states, 
+                        cos, 
+                        sin, 
+                        position_ids,
+                    )
                 else:
                     query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-            # query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-            
-            # print('########################3')
-            # print('None? ', past_key_value is None)
-            # print('k_None? ', past_key_value.key_cache is None)
-            # print('len_past_key_value', len(past_key_value))
-            # print('len_k? ', len(past_key_value.key_cache))
-            # breakpoint()
-            
+            # query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)           
             
             if past_key_value is not None:
                 # sin and cos are specific to RoPE models; cache_position needed for the static cache
                 cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
                 key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
-                if cos is None:
+                if cos is None: # TODO LATER? and self.attention_method not in ['h2o', 'h2o_stream']:
                     cos, sin = self.rotary_emb(
                         value_states,
                         torch.arange(0, key_states.shape[-2], device=key_states.device)[None, :]
                     )
-            
-            # print('================')
-            # # print('custom_attn_past_key_value ', past_key_value)
-            # print('layer_id ', self.layer_idx)
-            # # print('None? ', past_key_value is None)
-            # print('len_past_key_value', len(past_key_value))
-            # # print('k', past_key_value.key_cache)
-            # print('len_k', len(past_key_value.key_cache))
-            # print('shape_k', past_key_value.key_cache[self.layer_idx].shape)
-            # print('shape_k ', past_key_value.key_cache[self.layer_idx].shape)
-            
             
             # NOTE: HiP, FA2 supports GQA, MQA natively.
             if self.attention_method not in ['hip', 'fa2', 'none']:
@@ -597,12 +675,22 @@ class LlamaCustomAttention(LlamaAttention):
             causal_mask = attention_mask
             # if attention_mask is not None and cache_position is not None:
             if attention_mask is not None:
-                causal_mask = causal_mask[:, :, :, : key_states.shape[-2]]
+                if self.attention_method in ['h2o', 'h2o_stream'] and self.layer_idx not in self.tree_dense_layers:
+                    raise Exception()
+                    # TODO LATER?
+                    if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
+                        raise ValueError(
+                            f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
+                        )
+                else:
+                    causal_mask = causal_mask[:, :, :, : key_states.shape[-2]]
 
             mask_k = self.tree_k
             if self.layer_idx in self.tree_high_k_layers:
                 mask_k = self.tree_high_k_layers[self.layer_idx] * mask_k
-
+            
+            # TODO LATER?
+            # attn_output, cur_cumsum, attn_sparsity_loss, computed_final_attn_output = custom_attention(
             attn_output, cur_cumsum, attn_sparsity_loss = custom_attention(
                 query_states=query_states, 
                 key_states=key_states, 
@@ -649,8 +737,20 @@ class LlamaCustomAttention(LlamaAttention):
                 
                 # Hyper attention states
                 hyper_attention=self.hyper_attention,
+                
+                # TODO LATER?
+                # H2O attention states
+                # h2o_attention=self.h2o_attention,
+                # past_key_value=past_key_value,
+                # position_embeddings=position_embeddings,
+                # kv_seq_len=kv_seq_len,
+                # shift_q_pos=self.config.shift_q_pos,
+                # reduction_for_gqa=self.config.reduction_for_gqa,
+                # cache_position=cache_position,
+                # layer_idx=self.layer_idx,
             )
-
+            
+            # if not computed_final_attn_output: # TODO LATER?
             if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
                 raise ValueError(
                     f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
@@ -672,7 +772,105 @@ class LlamaCustomAttention(LlamaAttention):
 
             if not output_attentions:
                 attn_weights = None
-
+        elif self.attention_method in ['h2o', 'h2o_stream'] and os.getenv('H2O_DEFAULT', '0')=='3':
+            assert self.config.hh_size == 4
+            assert self.config.recent_size == self.tree_k
+            assert self.config._attn_implementation == self.config.attn_implementation == 'eager'
+            assert self.config.shift_q_pos is not None
+            assert self.config.reduction_for_gqa is not None
+            
+            assert self.attention_method != 'h2o_stream'
+            assert use_cache == True
+            
+            self.h2o_attention.o_proj = self.o_proj
+            mask_k = self.tree_k
+            
+            if q_len > mask_k:
+                compute_final_attn_output = True
+                
+                position_ids_k = position_ids[:, :mask_k]
+                position_ids_loop = position_ids[:, mask_k:]
+                
+                query_states_k = query_states[:, :, :mask_k, :]
+                query_states_loop = query_states[:, :, mask_k:, :]
+                key_states_k = key_states[:, :, :mask_k, :]
+                key_states_loop = key_states[:, :, mask_k:, :]
+                value_states_k = value_states[:, :, :mask_k, :]
+                value_states_loop = value_states[:, :, mask_k:, :]
+                
+                # assert past_key_value is None # TODO CHECK
+                assert use_cache is True
+                
+                # print('========== prompt_attn')
+                attn_output, attn_weights, past_key_value = self.h2o_attention._h2o_attention( # , hh_score
+                    query_states_k,
+                    key_states_k,
+                    value_states_k,
+                    
+                    position_ids_k,
+                    past_key_value=past_key_value,
+                    output_attentions=output_attentions,
+                    use_cache=use_cache,
+                    # hh_score=hh_score,
+                    bsz=bsz,
+                    cache_position=cache_position,
+                    reduction_for_gqa=self.config.reduction_for_gqa,
+                    kv_seq_len=kv_seq_len,
+                    decoding_loop_for_prefill=True,
+                    compute_final_attn_output=compute_final_attn_output,
+                )
+                
+                # loop one by one
+                # print('========== prompt_loop_attn')
+                assert query_states_loop.shape[-2] == q_len - mask_k
+                for i in range(q_len - mask_k):
+                    # print(f'>> loop {i}')
+                    attn_output_, attn_weights_, past_key_value = self.h2o_attention._h2o_attention( # , hh_score
+                        query_states_loop[:, :, i, :][:, :, None, :],
+                        key_states_loop[:, :, i, :][:, :, None, :],
+                        value_states_loop[:, :, i, :][:, :, None, :],
+                        
+                        position_ids_loop[:, i][:, None],
+                        past_key_value=past_key_value,
+                        output_attentions=output_attentions,
+                        use_cache=use_cache,
+                        # hh_score=hh_score,
+                        bsz=bsz,
+                        cache_position=cache_position,
+                        reduction_for_gqa=self.config.reduction_for_gqa,
+                        kv_seq_len=kv_seq_len,
+                        decoding_loop_for_prefill=True,
+                        compute_final_attn_output=compute_final_attn_output
+                    )
+                    
+                    attn_output = torch.cat((attn_output, attn_output_), dim=1)
+                    if output_attentions:
+                        raise Exception()
+                        attn_weights = torch.cat((attn_weights, attn_weights_), dim=2)
+                        
+            else:
+                assert use_cache is True
+                # compute_final_attn_output = False
+                
+                attn_output, attn_weights, past_key_value = self.h2o_attention._h2o_attention( # , hh_score
+                    query_states,
+                    key_states,
+                    value_states,
+                    
+                    position_ids,
+                    past_key_value=past_key_value,
+                    output_attentions=output_attentions,
+                    use_cache=use_cache,
+                    # hh_score=hh_score,
+                    bsz=bsz,
+                    cache_position=cache_position,
+                    reduce_for_gqa=self.config.reduction_for_gqa,
+                    kv_seq_len=kv_seq_len,
+                    decoding_loop_for_prefill=True,
+                    compute_final_attn_output=True # compute_final_attn_output
+                )
+            print('=========')
+        
         else:
             assert self.config.hh_size == 4
             assert self.config.recent_size == self.tree_k
@@ -680,32 +878,29 @@ class LlamaCustomAttention(LlamaAttention):
             assert self.config.shift_q_pos is not None
             assert self.config.reduction_for_gqa is not None
             
-            # if self.attention_method == 'h2o':
-            #     h2o_attention = H2OLlamaAttention(self.config, self.layer_idx).to(query_states.device).to(query_states.dtype)
-            # else:
-            #     h2o_attention = H2OLlamaAttention_streaming(self.config, self.layer_idx).to(query_states.device).to(query_states.dtype)
             assert self.attention_method != 'h2o_stream'
+            assert use_cache == True
+            
             self.h2o_attention.o_proj = self.o_proj
+            # TODO LATER?
+            # attn_output, attn_weights, past_key_value, computed_final_attn_output = self.h2o_attention(
             attn_output, attn_weights, past_key_value = self.h2o_attention(
-                None,
-                query_states, key_states, value_states,
-                attention_mask,
-                position_ids,
-                past_key_value,
-                output_attentions,
-                use_cache,
-                self.config.shift_q_pos,
-                self.tree_k,
-                self.config.reduction_for_gqa,
-                cache_position,
-                position_embeddings
+                hidden_states=None,
+                query_states=query_states, 
+                key_states=key_states, 
+                value_states=value_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_value,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                shift_q_pos=self.config.shift_q_pos,
+                mask_k=self.tree_k,
+                reduction_for_gqa=self.config.reduction_for_gqa,
+                cache_position=cache_position,
+                position_embeddings=position_embeddings
             )
 
-        # print('=============')        
-        # print('layer_id ', self.layer_idx)
-        # print('past_key_value_k_shape ', past_key_value[self.layer_idx][0].shape)
-        # print('past_key_value_ele ', len(past_key_value[self.layer_idx]))
-        # print('final ', past_key_value[self.layer_idx][0].shape)
         return attn_output, attn_weights, past_key_value
     
     # Adapted from LlamaAttention.forward
@@ -1441,6 +1636,11 @@ class LlamaModel(LlamaPreTrainedModel):
             if attention_mask is not None and 0.0 in attention_mask:
                 return attention_mask
             return None
+        
+        # NOTE: NO NO NO ATTENTION MASK.
+        if attention_mask is not None and 0.0 in attention_mask:
+            return attention_mask
+        return None 
 
         # For SDPA, when possible, we will rely on its `is_causal` argument instead of its `attn_mask` argument, in
         # order to dispatch on Flash Attention 2. This feature is not compatible with static cache, as SDPA will fail

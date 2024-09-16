@@ -51,6 +51,17 @@ def custom_attention(
     
     # Hyper attention state
     hyper_attention=None,
+    
+    # TODO LATER?
+    # H2O attention state
+    # h2o_attention=None,
+    # past_key_value=None,
+    # position_embeddings=None,
+    # kv_seq_len=None,
+    # shift_q_pos=False,
+    # reduction_for_gqa='average',
+    # cache_position=None,
+    # layer_idx=0,
 ):
     """
     @param query_states: (N, H, TDST, HID)
@@ -84,6 +95,8 @@ def custom_attention(
     @return: Attention output, last cumsum, attention sparsity loss
     """
     attn_sparsity_loss = None
+    # TODO LATER?
+    # computed_final_attn_output = False
     
     N, H, T, HID = query_states.shape
     _N, _H, _T, _HID = key_states.shape
@@ -433,7 +446,31 @@ def custom_attention(
         )
 
         attn_output = attn_output.view(N, H, TDST, HID)  # .to(hidden_states.dtype)
-
+    
+    elif attention_method in ['h2o', 'h2o_stream']:
+        raise Exception()
+        # TODO LATER?
+        # prefill -> prefill_ + for loop decoding : past_key_value = None
+        # decoding -> decoding : 
+        # breakpoint()
+        attn_output, _, _, computed_final_attn_output = h2o_attention( # NOTE call immediately bc we also have to support attention1_block_gpu
+            hidden_states=None,
+            query_states=query_states, 
+            key_states=key_states, 
+            value_states=value_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_value=past_key_value if not is_prompt else None, # TODO check!!!!!
+            output_attentions=False,
+            use_cache=True,
+            kv_seq_len=kv_seq_len,
+            shift_q_pos=shift_q_pos,
+            mask_k=tree_k,
+            reduction_for_gqa=reduction_for_gqa,
+            cache_position=cache_position, # must
+            position_embeddings=position_embeddings,
+        )
+            
     elif attention_method == 'hyper_attention':
         q = query_states / (query_states.shape[-1] ** 0.5)
         k = key_states
@@ -454,5 +491,5 @@ def custom_attention(
     else:
         raise Exception(attention_method)
 
-    return attn_output, last_cumsum, attn_sparsity_loss
+    return attn_output, last_cumsum, attn_sparsity_loss# , computed_final_attn_output # TODO LATER?
 
