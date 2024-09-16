@@ -125,7 +125,7 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=F
                                 )
                                 loss_sum += outputs.loss * prompt_ids.shape[-1]
                                 loss_count += prompt_ids.shape[-1]
-                                # tqdm.write(f'H2O Loss: {math.exp(loss_sum / loss_count)}')
+                                tqdm.write(f'H2O Loss: {math.exp(loss_sum / loss_count)}')
                                 
                                 for curr_idx in tqdm(range(decode_ids.shape[-1]-1), dynamic_ncols=True):
                                     curr_token = decode_ids[:, curr_idx:curr_idx+1]
@@ -158,7 +158,7 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=F
                                     )
                                     loss_sum += loss * curr_token.shape[-1]
                                     loss_count += curr_token.shape[-1]
-                                    # tqdm.write(f'H2O Loss idx={prompt_ids.shape[1]+curr_idx+1}: {math.exp(loss_sum / loss_count)}')
+                                    tqdm.write(f'H2O Loss idx={prompt_ids.shape[1]+curr_idx+1}: {math.exp(loss_sum / loss_count)}')
                                     
                                 final_loss = loss_sum / loss_count
                                 samples.append(final_loss)
