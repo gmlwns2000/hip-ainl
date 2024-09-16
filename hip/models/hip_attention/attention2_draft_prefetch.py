@@ -75,10 +75,21 @@ class HiPAttentionArgs:
     
     group_size_q: int = int(os.getenv('HIP_GROUP_SIZE_Q', '1'))
     
+    add_approx_k_window: bool = os.getenv('HIP_USING_APPROX_K', '0') == '1'
+    approx_k: int = 32
+    approx_k_window: int = 8
+    
+    add_snap_kv: bool = os.getenv('HIP_USING_SNAP_KV', '0') == '1'
+    snap_kv_vert_k: int = int(os.getenv('HIP_SNAP_KV_VERT_K', '32'))
+    snap_kv_diag_k: int = int(os.getenv('HIP_SNAP_KV_DIAG_K', '256'))
+    # snap_kv_page_size: int = 8
+    snap_kv_obs_window: int = 256
+    snap_kv_kernel_size: int = 15
+    
     is_causal: bool = True
     
-    sliding_window_size: int = 256
-    sink_token_size: int = 16
+    sliding_window_size: int = int(os.getenv('HIP_SW', '256'))
+    sink_token_size: int = int(os.getenv('HIP_NSINK', '16'))
     
     num_dense_queries: int = -1
     
@@ -126,6 +137,7 @@ class HiPAttentionArgs:
     offload_cache_kv_heads: Optional[int] = None
     offload_cache_mask_k_tables: Optional[Tensor] = None
     offload_cache_mask_k_banks: Optional[Tensor] = None
+    offload_cache_mask_k_bank_stats: Optional[Tensor] = None
     offload_cache_sa_k_tables: Optional[Tensor] = None
     offload_cache_sa_k_banks: Optional[Tensor] = None
     offload_cache_sa_v_tables: Optional[Tensor] = None
@@ -252,6 +264,7 @@ class HiPAttentionArgs:
                 self.offload_cache_kv_heads,
                 self.offload_cache_mask_k_tables, *self.safe_stride(self.offload_cache_mask_k_tables, 2),
                 self.offload_cache_mask_k_banks, *self.safe_stride(self.offload_cache_mask_k_banks, 4),
+                self.offload_cache_mask_k_bank_stats, *self.safe_stride(self.offload_cache_mask_k_bank_stats, 3),
                 self.offload_cache_counters, *self.safe_stride(self.offload_cache_counters, 2),
             )
         else:
@@ -563,6 +576,10 @@ def load_tokens(
     stride_offload_cache_k_banks_page,
     stride_offload_cache_k_banks_offset,
     stride_offload_cache_k_banks_hid,
+    OFFLOAD_CACHE_K_BANK_STATS,
+    stride_offload_cache_k_bank_stats_n,
+    stride_offload_cache_k_bank_stats_page,
+    stride_offload_cache_k_bank_stats_k,
     OFFLOAD_CACHE_COUNTERS,
     stride_offload_cache_counters_n,
     stride_offload_cache_counters_k,
@@ -585,7 +602,7 @@ def load_tokens(
             idx_cache = (
                 idx_bsz.to(tl.int64) * OFFLOAD_CACHE_KV_HEAD +\
                     idx_kv_head.to(tl.int64)
-            )
+            ).to(tl.int64)
             idx_bank_page = tl.load(
                 OFFLOAD_CACHE_K_TABLES +\
                     idx_cache * stride_offload_cache_k_tables_n +\
@@ -595,6 +612,18 @@ def load_tokens(
             ).to(tl.uint16)
             mask_bank_hit = (idx_bank_page != 65536) & (idx_bank_page < OFFLOAD_CACHE_BUDGET)
             mask_keys = mask_keys & (~mask_bank_hit)
+            
+            # load from offload cache
+            keys_from_cache = tl.load(
+                OFFLOAD_CACHE_K_BANKS +\
+                    idx_cache.to(tl.int64) * stride_offload_cache_k_banks_n +\
+                    idx_bank_page.to(tl.int64) * stride_offload_cache_k_banks_page +\
+                    (idx_tsrc % BLOCK_SIZE_K).to(tl.int64) * stride_offload_cache_k_banks_offset +\
+                    idx_hid.to(tl.int64) * stride_offload_cache_k_banks_hid,
+                mask = mask_bank_hit,
+                other = 0.0,
+                # cache_modifier='.cs', # TODO: uncomment this
+            )
             
             # num accessed
             tl.atomic_add(
@@ -611,6 +640,17 @@ def load_tokens(
                     1 * stride_offload_cache_counters_k,
                 val=tl.sum(mask_bank_hit.to(tl.int64))
             )
+            
+            # num access per page
+            if OFFLOAD_CACHE_K_BANK_STATS is not None:
+                tl.atomic_add(
+                    OFFLOAD_CACHE_K_BANK_STATS +\
+                        idx_cache * stride_offload_cache_k_bank_stats_n +\
+                        idx_bank_page * stride_offload_cache_k_bank_stats_page +\
+                        0 * stride_offload_cache_k_bank_stats_k,
+                    val=1,
+                    mask=mask_bank_hit,
+                )
         
         keys = tl.load(
             K +\
@@ -624,17 +664,6 @@ def load_tokens(
         )
         
         if USING_OFFLOAD_CACHE:
-            # load from offload cache
-            keys_from_cache = tl.load(
-                OFFLOAD_CACHE_K_BANKS +\
-                    idx_cache.to(tl.int64) * stride_offload_cache_k_banks_n +\
-                    idx_bank_page.to(tl.int64) * stride_offload_cache_k_banks_page +\
-                    (idx_tsrc % BLOCK_SIZE_K).to(tl.int64) * stride_offload_cache_k_banks_offset +\
-                    idx_hid.to(tl.int64) * stride_offload_cache_k_banks_hid,
-                mask = mask_bank_hit,
-                other = 0.0,
-                # cache_modifier='.cs', # TODO: uncomment this
-            )
             # merge keys and loaded cache
             keys = tl.where(mask_bank_hit, keys_from_cache.to(keys.dtype), keys)
             # update cache if there is uvm-loaded-keys
@@ -762,6 +791,10 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     stride_offload_cache_k_banks_page,
     stride_offload_cache_k_banks_offset,
     stride_offload_cache_k_banks_hid,
+    OFFLOAD_CACHE_K_BANK_STATS,
+    stride_offload_cache_k_bank_stats_n,
+    stride_offload_cache_k_bank_stats_page,
+    stride_offload_cache_k_bank_stats_k,
     OFFLOAD_CACHE_COUNTERS,
     stride_offload_cache_counters_n,
     stride_offload_cache_counters_k,
@@ -777,13 +810,15 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     NUM_CALIB: tl.constexpr = 32
 ):
     if BLOCK_ACCESS_LOG is not None:
-        mask_block_access = dupped_mask
+        list_block_access = dupped_indices_for_keys
+        mask_block_access = dupped_mask & (list_block_access < tl.cdiv(MAX_TSRC, BLOCK_SIZE_K))
+        
         len_block_access = tl.sum(mask_block_access.to(tl.int32))
         block_access_location = tl.atomic_add(
             BLOCK_ACCESS_COUNT +\
                 idx_b * stride_block_access_count_b +\
                 idx_bdst * stride_block_access_count_bdst,
-            val=len_block_access
+            val=len_block_access,
         )
         idx_block_access = (block_access_location + tl.cumsum(mask_block_access.to(tl.int32)) - 1) % MAX_BLOCK_ACCESS_COUNT
         tl.store(
@@ -792,7 +827,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 idx_bdst * stride_block_access_log_bdst +\
                 idx_block_access * stride_block_access_log_t,
             mask=mask_block_access,
-            value=dupped_indices_for_keys,
+            value=list_block_access,
         )
     
     idx_tsrc = (
@@ -904,6 +939,10 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
             stride_offload_cache_k_banks_page,
             stride_offload_cache_k_banks_offset,
             stride_offload_cache_k_banks_hid,
+            OFFLOAD_CACHE_K_BANK_STATS,
+            stride_offload_cache_k_bank_stats_n,
+            stride_offload_cache_k_bank_stats_page,
+            stride_offload_cache_k_bank_stats_k,
             OFFLOAD_CACHE_COUNTERS,
             stride_offload_cache_counters_n,
             stride_offload_cache_counters_k,
@@ -1289,6 +1328,10 @@ def masking_iteration_draft_cuda_dup_and_score(
     stride_offload_cache_k_banks_page,
     stride_offload_cache_k_banks_offset,
     stride_offload_cache_k_banks_hid,
+    OFFLOAD_CACHE_K_BANK_STATS,
+    stride_offload_cache_k_bank_stats_n,
+    stride_offload_cache_k_bank_stats_page,
+    stride_offload_cache_k_bank_stats_k,
     OFFLOAD_CACHE_COUNTERS,
     stride_offload_cache_counters_n,
     stride_offload_cache_counters_k,
@@ -1572,6 +1615,10 @@ def masking_iteration_draft_cuda_dup_and_score(
                 stride_offload_cache_k_banks_page,
                 stride_offload_cache_k_banks_offset,
                 stride_offload_cache_k_banks_hid,
+                OFFLOAD_CACHE_K_BANK_STATS,
+                stride_offload_cache_k_bank_stats_n,
+                stride_offload_cache_k_bank_stats_page,
+                stride_offload_cache_k_bank_stats_k,
                 OFFLOAD_CACHE_COUNTERS,
                 stride_offload_cache_counters_n,
                 stride_offload_cache_counters_k,
@@ -1724,6 +1771,10 @@ def masking_iteration_draft_cuda_dup_and_score(
             stride_offload_cache_k_banks_page,
             stride_offload_cache_k_banks_offset,
             stride_offload_cache_k_banks_hid,
+            OFFLOAD_CACHE_K_BANK_STATS,
+            stride_offload_cache_k_bank_stats_n,
+            stride_offload_cache_k_bank_stats_page,
+            stride_offload_cache_k_bank_stats_k,
             OFFLOAD_CACHE_COUNTERS,
             stride_offload_cache_counters_n,
             stride_offload_cache_counters_k,
@@ -1853,6 +1904,10 @@ def masking_iteration_draft_cuda_dup_and_score(
             stride_offload_cache_k_banks_page,
             stride_offload_cache_k_banks_offset,
             stride_offload_cache_k_banks_hid,
+            OFFLOAD_CACHE_K_BANK_STATS,
+            stride_offload_cache_k_bank_stats_n,
+            stride_offload_cache_k_bank_stats_page,
+            stride_offload_cache_k_bank_stats_k,
             OFFLOAD_CACHE_COUNTERS,
             stride_offload_cache_counters_n,
             stride_offload_cache_counters_k,
@@ -2341,6 +2396,79 @@ def get_masking_iteration_draft_cuda_fused_configs():
                 ))
     return configs
 
+@triton.jit
+def sum_all_diagonal_cuda(
+    SCORES,
+    stride_scores_n, stride_scores_tdst, stride_scores_tsrc,
+    OUT,
+    stride_out_n, stride_out_tdst, stride_out_tsrc,
+    
+    TDST, TSRC, GROUP_TSRC,
+    
+    BLOCK_TDST: tl.constexpr,
+):
+    idx_n = tl.program_id(2).to(tl.int64)
+    idx_bdst = tl.program_id(1).to(tl.int64)
+    idx_bsrc = tl.program_id(0).to(tl.int64)
+    
+    for i_gsrc in range(GROUP_TSRC):
+        idx_tsrc_end = idx_bsrc * GROUP_TSRC + i_gsrc
+        idx_tdst_end = tl.minimum(TDST - 1, idx_bdst * BLOCK_TDST)
+        idx_out = idx_tsrc_end + TDST - 1 - idx_tdst_end
+        mask_out = (idx_out >= 0) & (idx_out < TSRC) & (idx_tsrc_end < TSRC)
+        
+        idx_tdst = tl.arange(0, BLOCK_TDST) + idx_bdst * BLOCK_TDST
+        mask_tdst = idx_tdst < BLOCK_TDST
+        
+        idx_tsrc = idx_tsrc_end - (BLOCK_TDST - 1) + tl.arange(0, BLOCK_TDST)
+        mask_tsrc = (idx_tsrc >= 0) & (idx_tsrc < TSRC) & mask_tdst
+        
+        scores = tl.load(
+            SCORES +\
+                idx_n * stride_scores_n +\
+                idx_tdst * stride_scores_tdst +\
+                idx_tsrc * stride_scores_tsrc,
+            mask=mask_tdst & mask_tsrc & mask_out,
+            other=0
+        )
+        score = tl.sum(scores)
+
+        tl.atomic_add(
+            OUT +\
+                idx_n * stride_out_n +\
+                0 * stride_out_tdst +\
+                idx_out * stride_out_tsrc,
+            val=score,
+            mask=mask_out,
+        )
+
+def sum_all_diagonal(scores: Tensor):
+    N, TDST, TSRC = scores.shape
+    reduced_score = torch.zeros(
+        (N, 1, TSRC),
+        dtype=torch.float32,
+        device=scores.device,
+    )
+    
+    GROUP_TSRC = cdiv_python(TSRC, 2048)
+    BLOCK_TDST = 128
+    grid = (
+        triton.cdiv(TSRC, GROUP_TSRC),
+        triton.cdiv(TDST, BLOCK_TDST), 
+        N, 
+    )
+    d = torch.get_default_device()
+    torch.set_default_device(scores.device)
+    sum_all_diagonal_cuda[grid](
+        scores, *scores.stride(),
+        reduced_score, *reduced_score.stride(),
+        TDST, TSRC, GROUP_TSRC,
+        BLOCK_TDST,
+    )
+    torch.set_default_device(d)
+    
+    return reduced_score.to(scores.dtype)
+
 @triton.autotune(
     configs=get_masking_iteration_draft_cuda_fused_configs(),
     key=[
@@ -2517,6 +2645,10 @@ def masking_iteration_draft_cuda_fused(
     stride_offload_cache_k_banks_page,
     stride_offload_cache_k_banks_offset,
     stride_offload_cache_k_banks_hid,
+    OFFLOAD_CACHE_K_BANK_STATS,
+    stride_offload_cache_k_bank_stats_n,
+    stride_offload_cache_k_bank_stats_page,
+    stride_offload_cache_k_bank_stats_k,
     OFFLOAD_CACHE_COUNTERS,
     stride_offload_cache_counters_n,
     stride_offload_cache_counters_k,
@@ -2698,6 +2830,10 @@ def masking_iteration_draft_cuda_fused(
                     stride_offload_cache_k_banks_page,
                     stride_offload_cache_k_banks_offset,
                     stride_offload_cache_k_banks_hid,
+                    OFFLOAD_CACHE_K_BANK_STATS,
+                    stride_offload_cache_k_bank_stats_n,
+                    stride_offload_cache_k_bank_stats_page,
+                    stride_offload_cache_k_bank_stats_k,
                     OFFLOAD_CACHE_COUNTERS,
                     stride_offload_cache_counters_n,
                     stride_offload_cache_counters_k,
@@ -2973,6 +3109,10 @@ def masking_iteration_draft_cuda_initialize_score(
     stride_offload_cache_k_banks_page,
     stride_offload_cache_k_banks_offset,
     stride_offload_cache_k_banks_hid,
+    OFFLOAD_CACHE_K_BANK_STATS,
+    stride_offload_cache_k_bank_stats_n,
+    stride_offload_cache_k_bank_stats_page,
+    stride_offload_cache_k_bank_stats_k,
     OFFLOAD_CACHE_COUNTERS,
     stride_offload_cache_counters_n,
     stride_offload_cache_counters_k,
@@ -3126,6 +3266,10 @@ def masking_iteration_draft_cuda_initialize_score(
         stride_offload_cache_k_banks_page,
         stride_offload_cache_k_banks_offset,
         stride_offload_cache_k_banks_hid,
+        OFFLOAD_CACHE_K_BANK_STATS,
+        stride_offload_cache_k_bank_stats_n,
+        stride_offload_cache_k_bank_stats_page,
+        stride_offload_cache_k_bank_stats_k,
         OFFLOAD_CACHE_COUNTERS,
         stride_offload_cache_counters_n,
         stride_offload_cache_counters_k,
@@ -3763,11 +3907,91 @@ def masking_iteration_draft(
     
     indices.mul_(args.block_size_k)
     
-    # NOTE: before this sort, indices are sorted by imporatnce of each block
-    indices, indices_sort_mapping = torch.sort(indices, dim=-1, stable=False)
-    
-    scores_final = scores_final\
-        .gather(index=indices_sort_mapping, dim=-1)
+    if args.add_snap_kv and (isinstance(q, Tensor) and isinstance(k, Tensor)):
+        observation_window = args.snap_kv_obs_window
+        snap_kv_k = args.snap_kv_vert_k
+        snap_kv_kernel_size = args.snap_kv_kernel_size
+        diag_kv_k = args.snap_kv_diag_k
+        diag_kv_kernel_size = args.snap_kv_kernel_size
+        
+        # TODO: fuse this
+        obs_q = q.view(q.shape[0], q.shape[1], -1, q.shape[-1])[:, -observation_window:]
+        obs_k = k.view(k.shape[0], k.shape[1], -1, k.shape[-1])[:, :-args.sliding_window_size]
+        if HEAD != KV_HEAD:
+            obs_k = obs_k.repeat_interleave(HEAD // KV_HEAD, dim=2)
+        snap_attn_weights = obs_q.permute(0, 2, 1, 3) @ obs_k.permute(0, 2, 3, 1)
+        snap_attn_weights = snap_attn_weights.mean(dim=1)
+        # TODO: fuse this
+        
+        snap_vote = snap_attn_weights.mean(dim=1, keepdim=True)
+        snap_pool_vote = F.max_pool1d(snap_vote, kernel_size=snap_kv_kernel_size, stride=args.block_size_k, padding=snap_kv_kernel_size//2)
+        snap_indices = snap_pool_vote.topk(snap_kv_k // args.block_size_k, dim=-1, sorted=False).indices
+        snap_indices.floor_divide_(args.block_size_k).mul_(args.block_size_k)
+        snap_indices = snap_indices\
+            .view(BSZ, 1, -1)\
+            .repeat_interleave(HEAD, dim=0)\
+            .expand(BSZ*HEAD, BDST, -1)
+        
+        diag_vote = sum_all_diagonal(snap_attn_weights)
+        diag_pool_vote = F.max_pool1d(diag_vote, kernel_size=diag_kv_kernel_size, stride=args.block_size_k, padding=snap_kv_kernel_size//2)
+        diag_indices = diag_pool_vote.topk(diag_kv_k // args.block_size_k, dim=-1, sorted=False).indices
+        diag_indices.floor_divide_(args.block_size_k).mul_(args.block_size_k)
+        diag_indices = diag_indices\
+            .view(BSZ, 1, -1)\
+            .repeat_interleave(HEAD, dim=0)\
+            .expand(BSZ*HEAD, BDST, -1)
+        diag_indices = diag_indices -\
+            torch.flip(
+                torch.arange(
+                    0, BDST * args.block_size_q, args.block_size_q, 
+                    device=indices.device
+                ), dims=(0,)
+            )[None, :, None]
+        torch.clamp_min(diag_indices, 0, out=diag_indices)
+        
+        # concat and union and update ks
+        indices = torch.cat([
+            indices, 
+            snap_indices,
+            diag_indices,
+        ], dim=-1).sort(dim=-1).values
+        unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
+        indices = torch.where(unique_mask, indices, MAX_TSRC * G)
+        indices = indices.sort(dim=-1).values
+        ks = unique_mask.int().sum(-1)
+        
+        scores_final = None
+    elif args.add_approx_k_window:
+        approx_k = cdiv_python(args.approx_k, args.block_size_k)
+        approx_k_window = cdiv_python(args.approx_k_window, args.block_size_k)
+        _, selected_indices = torch.topk(scores_final, dim=-1, k=approx_k)
+        approx_top_k_indices = indices.gather(dim=-1, index=selected_indices)
+        approx_top_k_indices = approx_top_k_indices[:, :, :, None] +\
+            (torch.arange(0, approx_k_window, device=indices.device) - approx_k_window // 2)
+        approx_top_k_indices = approx_top_k_indices.view(indices.shape[0], indices.shape[1], -1)
+        approx_top_k_indices = approx_top_k_indices.clamp_min_(0)
+        indices = torch.cat([indices, approx_top_k_indices], dim=-1)
+        
+        # union
+        indices = indices.sort(dim=-1).values
+        unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
+        indices = torch.where(unique_mask, indices, MAX_TSRC * G)
+        indices = indices.sort(dim=-1).values
+        
+        ks = unique_mask.int().sum(-1)
+        
+        # NOTE: before this sort, indices are sorted by imporatnce of each block
+        # indices, indices_sort_mapping = torch.sort(indices, dim=-1, stable=False)
+        
+        scores_final = None
+        # scores_final = scores_final\
+        #     .gather(index=indices_sort_mapping, dim=-1)
+    else:
+        # NOTE: before this sort, indices are sorted by imporatnce of each block
+        indices, indices_sort_mapping = torch.sort(indices, dim=-1, stable=False)
+        
+        scores_final = scores_final\
+            .gather(index=indices_sort_mapping, dim=-1)
     
     # scores_final = None
     
@@ -3981,12 +4205,12 @@ def block_sparse_attention_cuda_step(
 def get_block_sparse_attention_configs():
     autotune_disabled = os.getenv('HIP_DISABLE_AUTOTUNE', '0') == '1'
     if autotune_disabled:
-        return [triton.Config({'BLOCK_BK': 16}, num_warps=4, num_stages=2, maxnreg=256)]
+        return [triton.Config({'BLOCK_BK': 4}, num_warps=4, num_stages=2, maxnreg=256)]
     warnings.warn('triton autotuning is activated. this should be disabled for faster startup. if you want set HIP_DISABLE_AUTOTUNE=1')
     configs = []
     # for block_bk in [4, 8, 16, 32]:
     # for block_bk in [16, 32,]:
-    for block_bk in [2, 4, 8, 16, 32, 64]:
+    for block_bk in [1, 2, 4, 8, 16, 32, 64]:
         for max_nreg in [128, 256, 512]:
             for num_warps in [4, 8]:
                 for num_stages in [2, 4]:
@@ -4003,7 +4227,7 @@ def get_block_sparse_attention_configs():
 def perf_model_block_sparse_attention(**kwargs):
     block_bk = kwargs['BLOCK_BK']
     block_k = kwargs['BLOCK_SIZE_K']
-    if ((block_bk * block_k) <= 512) and ((block_bk * block_k) >= 32):
+    if ((block_bk * block_k) <= 64) and ((block_bk * block_k) >= 32):
         return 0
     return 999999999 # run might fails
 
@@ -4017,7 +4241,7 @@ def perf_model_block_sparse_attention(**kwargs):
     ],
     prune_configs_by={
         'perf_model': perf_model_block_sparse_attention,
-        'top_k': 36,
+        'top_k': 24,
     }
 )
 @triton.jit
@@ -4235,6 +4459,7 @@ def block_sparse_attention_cuda(
                     stride_offload_cache_k_banks_page,
                     stride_offload_cache_k_banks_offset,
                     stride_offload_cache_k_banks_hid,
+                    None, 0, 0, 0,
                     OFFLOAD_CACHE_COUNTERS,
                     stride_offload_cache_counters_n,
                     stride_offload_cache_counters_k,
@@ -4281,6 +4506,7 @@ def block_sparse_attention_cuda(
                     stride_offload_cache_v_banks_page,
                     stride_offload_cache_v_banks_offset,
                     stride_offload_cache_v_banks_hid,
+                    None, 0, 0, 0,
                     OFFLOAD_CACHE_COUNTERS,
                     stride_offload_cache_counters_n,
                     stride_offload_cache_counters_k,
@@ -4325,7 +4551,7 @@ def block_sparse_attention_cuda(
             tl.debug_barrier()
         tl.debug_barrier()
     
-    if sliding_window_size > 0:
+    if (sliding_window_size > 0):
         CURR_TSRC = tl.max(pos_tdst)
         # CURR_TSRC = (idx_bdst + 1) * BLOCK_SIZE_Q + MAX_TSRC - MAX_TDST
         for i_tsrc in range(tl.maximum(0, CURR_TSRC - sliding_window_size - BLOCK_SIZE_Q), CURR_TSRC, BLOCK_BK * BLOCK_SIZE_K):
@@ -4366,6 +4592,7 @@ def block_sparse_attention_cuda(
                 stride_offload_cache_k_banks_page,
                 stride_offload_cache_k_banks_offset,
                 stride_offload_cache_k_banks_hid,
+                None, 0, 0, 0,
                 OFFLOAD_CACHE_COUNTERS,
                 stride_offload_cache_counters_n,
                 stride_offload_cache_counters_k,
@@ -4412,6 +4639,7 @@ def block_sparse_attention_cuda(
                 stride_offload_cache_v_banks_page,
                 stride_offload_cache_v_banks_offset,
                 stride_offload_cache_v_banks_hid,
+                None, 0, 0, 0,
                 OFFLOAD_CACHE_COUNTERS,
                 stride_offload_cache_counters_n,
                 stride_offload_cache_counters_k,
@@ -5102,6 +5330,8 @@ def hip_masking(
         assert args.sink_token_size == 0, 'if bidirectional, you should disable sink tokens'
     
     if args.randomize_mask or (os.getenv('HIP_RANDOM_MASK', '0') == '1'):
+        warnings.warn('BigBird simulated with HiP kernel')
+        
         BSZ, TDST, HEAD, HID = q.shape
         if k is not None:
             _, _, HEAD_KV, HID = k.shape
@@ -5122,7 +5352,11 @@ def hip_masking(
         indices = torch.rand((N, BDST, BK), dtype=torch.float32, device=q.device)
         
         seq_lens = args.position_ids[:, min(args.block_stride_q-1, TDST-1)::args.block_size_q] + args.block_size_q
-        assert seq_lens.shape == (BSZ, BDST)
+        
+        if (seq_lens.shape != (BSZ, BDST)):
+            seq_lens = torch.cat([seq_lens, args.position_ids[:, -1:] + args.block_size_q], dim=1)
+        
+        assert seq_lens.shape == (BSZ, BDST), f'{seq_lens.shape} == ({BSZ}, {BDST}), {args.position_ids}, {args.block_size_q}'
         seq_lens = torch.clamp(seq_lens - args.sliding_window_size, 0, LARGE_INT)
         indices = indices * seq_lens.repeat_interleave(repeats=HEAD, dim=0).unsqueeze(-1)
         indices = indices.long() // args.block_size_k * args.block_size_k
@@ -5153,7 +5387,7 @@ def hip_masking(
                     TSRC * args.topk_head_group_size, 
                     args.block_size_q, 
                     args.block_size_k * args.block_size_k_group,
-                )[0]
+                )[1]
                 if args.group_size_q > 1:
                     debug_mask = debug_mask.repeat(axis=0, repeats=args.group_size_q)
                 plt.clf()
@@ -5271,7 +5505,10 @@ def hip_masking(
         args.position_ids = original_position_ids
         
         if os.getenv('HIP_DEBUG', '0') == '1':
+            max_query = 2048
+            
             B, TDST, H, HID = q.shape
+            TDST = min(max_query, TDST)
             if k is not None:
                 _, TSRC, H_KV, _ = k.shape
             else:
@@ -5279,8 +5516,8 @@ def hip_masking(
             N = B * H
             def render_mask():
                 debug_mask = to_dense(
-                    indices.cpu().numpy(),
-                    ks.cpu().numpy(),
+                    indices[:, -cdiv_python(TDST, args.block_size_q):].cpu().numpy(),
+                    ks[:, -cdiv_python(TDST, args.block_size_q):].cpu().numpy(),
                     None,
                     cdiv_python(N, args.topk_head_group_size),
                     TDST, 
@@ -5294,7 +5531,7 @@ def hip_masking(
                 plt.figure(figsize=(4 * args.topk_head_group_size, 4))
                 plt.imshow(debug_mask)
                 plt.tight_layout()
-                plt.savefig('dummy_prefetch.png', dpi=96, bbox_inches='tight')
+                plt.savefig('dummy_prefetch.png', dpi=192, bbox_inches='tight')
                 print('saved dummy_prefetch.png', indices.shape, debug_mask.shape, original_position_ids.shape)
             render_mask()
         
@@ -5503,8 +5740,10 @@ def hip_masking(
             block_access_score = None
             block_access_count = None
     
-    if os.getenv('HIP_DEBUG', '0') == '1':
+    if (os.getenv('HIP_DEBUG', '0') == '1') and (not torch.cuda.is_current_stream_capturing()):
+        max_query = 1024
         B, TDST, H, HID = q.shape
+        TDST = min(TDST, max_query)
         if k is not None:
             _, TSRC, H_KV, _ = k.shape
         else:
@@ -5512,8 +5751,8 @@ def hip_masking(
         N = B * H
         def render_mask():
             debug_mask = to_dense(
-                indices.cpu().numpy(),
-                ks.cpu().numpy(),
+                indices[:, -cdiv_python(TDST, args.block_size_q):].cpu().numpy(),
+                ks[:, -cdiv_python(TDST, args.block_size_q):].cpu().numpy(),
                 None,
                 cdiv_python(N, args.topk_head_group_size),
                 TDST, 
@@ -5523,13 +5762,22 @@ def hip_masking(
             )[0]
             if args.group_size_q > 1:
                 debug_mask = debug_mask.repeat(axis=0, repeats=args.group_size_q)
-            plt.clf()
-            plt.figure(figsize=(4*args.topk_head_group_size, 4))
-            plt.imshow(debug_mask)
-            plt.tight_layout()
-            plt.savefig('dummy.png', dpi=96, bbox_inches='tight')
-            print('saved dummy.png')
-        render_mask()
+            
+            cv2.imwrite('dummy_raw.png', debug_mask.astype(np.uint8) * 255)
+            print('saved dummy_raw.png', indices.shape, ks.shape, debug_mask.shape, q.shape, TSRC)
+            
+            # plt.clf()
+            # plt.figure(figsize=(4*args.topk_head_group_size, 4))
+            # plt.imshow(debug_mask)
+            # plt.tight_layout()
+            # plt.savefig('dummy.png', dpi=96, bbox_inches='tight')
+            # print('saved dummy.png')
+        
+        # render_mask()
+        if q.shape[1] > 64000:
+            render_mask()
+        else:
+            print(q.shape[1])
     
     return (
         indices, 
@@ -5833,7 +6081,7 @@ def paged_varlen_hip_attention(
 
 def main():
     debug_only = True
-    seq_len = 1024 * 4
+    seq_len = 1024 * 128
     seq_repeat = 1
     batch_repeat = 1
     if os.getenv('HIP_DEBUG', '1') == '0':
@@ -5876,10 +6124,10 @@ def main():
     k = reshape(k, HEAD_KV)
     v = reshape(v, HEAD_KV)
     out = reshape(out, HEAD)
-    q_quant = q.to(torch.float8_e5m2).view(torch.uint8)#[...,::2]
-    k_quant = k.to(torch.float8_e5m2).view(torch.uint8)#[...,::2]
-    # q_quant = q
-    # k_quant = k
+    # q_quant = q.to(torch.float8_e5m2).view(torch.uint8)#[...,::2]
+    # k_quant = k.to(torch.float8_e5m2).view(torch.uint8)#[...,::2]
+    q_quant = q
+    k_quant = k
     
     # bidirectional out
     # bi_probs = torch.softmax(q.permute(0, 2, 1, 3) @ k.repeat(1, 1, 4, 1).permute(0, 2, 3, 1), dim=-1)
@@ -5900,18 +6148,26 @@ def main():
             q, k, v, 
             
             args = HiPAttentionArgs(
-                mask_k=512,
+                mask_k=4096,
                 
-                block_size_q=32,
+                block_size_q=64,
                 block_stride_q=2,
-                block_size_k=2,
-                block_stride_k=1,
+                block_size_k=8,
+                block_stride_k=4,
                 block_size_k_group=1,
+                
+                group_size_q=1,
+                
+                add_snap_kv=True,
+                snap_kv_vert_k=512,
+                snap_kv_diag_k=2048,
+                snap_kv_kernel_size=63,
+                snap_kv_obs_window=512,
                 
                 is_causal=True,
                 
-                sliding_window_size=0,
-                sink_token_size=0,
+                sliding_window_size=2048,
+                sink_token_size=16,
                 
                 using_extend=False,
                 rope_cos=cos,
