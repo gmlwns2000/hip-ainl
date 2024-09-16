@@ -508,11 +508,14 @@ class H2OLlamaAttention(nn.Module):
         
         bsz,
         cache_position,
-        reduction_for_gqa,
+        reduction_for_gqa=None,
         kv_seq_len=None,
         decoding_loop_for_prefill=True,
         compute_final_attn_output=True,
-        position_embeddings=None,
+        
+        cos=None,
+        sin=None
+        # position_embeddings=None,
     ):
         q_len = query_states.shape[-2]
         
@@ -546,65 +549,64 @@ class H2OLlamaAttention(nn.Module):
             3. StreamingLLM style RoPE: my own implementation
             """
 
-            # shift_q_pos = False
-            # streaming = True
+            if self.config.streaming:
+                if past_key_value is not None: # and len(past_key_value) != 0:
+                    # sin and cos are specific to RoPE models; cache_position needed for the static cache
+                    cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+                    key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs) # TODO check past_key_value update
+                    # reuse k, v, self_attention
+                    # key_states = torch.cat([past_key_value[0], key_states], dim=2)
+                    # value_states = torch.cat([past_key_value[1], value_states], dim=2)
+                # past_key_value = (key_states, value_states) if use_cache else None
+                
+                position_ids = torch.arange(0, key_states.shape[-2], device=key_states.device)[None, :]
+                
+                # cos, sin = self.rotary_emb(value_states, seq_len=position_length)
+                # NOTE: grab all position embeddings
+                # cos, sin = self.rotary_emb(value_states, position_ids)
+                
+                ### Shift Pos: query pos is min(cache_size, idx)
+                query_states = apply_rotary_pos_emb_single(
+                    query_states, 
+                    cos, 
+                    sin, 
+                    position_ids[:, -q_len:],
+                )
+                key_states = apply_rotary_pos_emb_single(
+                    key_states, 
+                    cos, 
+                    sin, 
+                    position_ids,
+                )
+            else:
+                # cos, sin = self.rotary_emb(value_states, seq_len=position_length)
+                # NOTE: grab all position embeddings
             
-            # if streaming:
-            #     if past_key_value is not None and len(past_key_value) != 0:
-            #         # reuse k, v, self_attention
-            #         key_states = torch.cat([past_key_value[0], key_states], dim=2)
-            #         value_states = torch.cat([past_key_value[1], value_states], dim=2)
+                # TODO discard this part
+                # cos, sin = self.rotary_emb(value_states, torch.arange(0, position_length, device=key_states.device)[None, :])
                 
-            #     past_key_value = (key_states, value_states) if use_cache else None
-                
-            #     position_ids = torch.arange(0, key_states.shape[-2], device=key_states.device)[None, :]
-                
-            #     # cos, sin = self.rotary_emb(value_states, seq_len=position_length)
-            #     # NOTE: grab all position embeddings
-            #     cos, sin = self.rotary_emb(value_states, position_ids)
-                
-            #     ### Shift Pos: query pos is min(cache_size, idx)
-            #     query_states = apply_rotary_pos_emb_single(
-            #         query_states, 
-            #         cos, 
-            #         sin, 
-            #         position_ids[:, -q_len:],
-            #     )
-            #     key_states = apply_rotary_pos_emb_single(
-            #         key_states, 
-            #         cos, 
-            #         sin, 
-            #         position_ids,
-            #     )
-            # else:
-            # cos, sin = self.rotary_emb(value_states, seq_len=position_length)
-            # NOTE: grab all position embeddings
-            
-            # TODO discard this part
-            cos, sin = self.rotary_emb(value_states, torch.arange(0, position_length, device=key_states.device)[None, :])
-            
-            ### Shift Pos: query pos is min(cache_size, idx)
-            query_states = apply_rotary_pos_emb_single(
-                query_states, 
-                cos, 
-                sin, 
-                torch.clamp_max(position_ids, kv_seq_len) if self.config.shift_q_pos else position_ids,
-            )
-            key_states = apply_rotary_pos_emb_single(
-                key_states, 
-                cos, 
-                sin, 
-                position_ids,
-            )
+                ### Shift Pos: query pos is min(cache_size, idx)
+                query_states = apply_rotary_pos_emb_single(
+                    query_states, 
+                    cos, 
+                    sin, 
+                    torch.clamp_max(position_ids, kv_seq_len) if self.config.shift_q_pos else position_ids,
+                )
+                key_states = apply_rotary_pos_emb_single(
+                    key_states, 
+                    cos, 
+                    sin, 
+                    position_ids,
+                )
 
-            if past_key_value is not None: # and len(past_key_value) != 0:
-                # sin and cos are specific to RoPE models; cache_position needed for the static cache
-                cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-                key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs) # TODO check past_key_value update
-                # reuse k, v, self_attention
-                # key_states = torch.cat([past_key_value[0], key_states], dim=2)
-                # value_states = torch.cat([past_key_value[1], value_states], dim=2)
-            # past_key_value = (key_states, value_states) if use_cache else None
+                if past_key_value is not None: # and len(past_key_value) != 0:
+                    # sin and cos are specific to RoPE models; cache_position needed for the static cache
+                    cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+                    key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs) # TODO check past_key_value update
+                    # reuse k, v, self_attention
+                    # key_states = torch.cat([past_key_value[0], key_states], dim=2)
+                    # value_states = torch.cat([past_key_value[1], value_states], dim=2)
+                # past_key_value = (key_states, value_states) if use_cache else None
 
             # repeat k/v heads if n_kv_heads < n_heads
             key_states = repeat_kv(key_states, self.num_key_value_groups)
@@ -782,7 +784,7 @@ class H2OLlamaAttention(nn.Module):
                 
                 position_ids = torch.arange(0, key_states.shape[-2], device=key_states.device)[None, :]
                 
-                cos, sin = self.rotary_emb(value_states, seq_len=position_length)
+                # cos, sin = self.rotary_emb(value_states, seq_len=position_length)
                 # NOTE: grab all position embeddings
                 cos, sin = self.rotary_emb(value_states, position_ids)
                 

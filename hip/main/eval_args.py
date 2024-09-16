@@ -55,6 +55,7 @@ def eval_args(
     
     # h2o
     parser.add_argument('--shift-q-pos', action='store_true')
+    parser.add_argument('--streaming', action='store_true')
     parser.add_argument('--reduce-for-gqa', type=str, default='average')
     
     args = parser.parse_args()
