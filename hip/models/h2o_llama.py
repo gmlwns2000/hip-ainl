@@ -226,7 +226,7 @@ def _make_causal_mask(
     return mask[None, None, :, :].expand(bsz, 1, tgt_len, tgt_len + past_key_values_length)
 
 def apply_rotary_pos_emb_single(x, cos, sin, position_ids, unsqueeze_dim=1):
-    if os.getenv('H2O_DEFAULT', '0') == '1':# or os.getenv('H2O_DEFAULT', '0') == '-1':
+    if os.getenv('H2O_DEFAULT', '3') == '1':# or os.getenv('H2O_DEFAULT', '3') == '-1':
         # cos, sin [1, seq_len, dim] -> [seq_len, dim]
         
         cos = cos.squeeze(1).squeeze(0)  # [seq_len, dim]
@@ -268,7 +268,7 @@ class H2OKVCache_LayerWise:
         self.hh_score = None
 
     def __call__(self, past_key_values, attn_score_cache, num_key_value_groups=None, reduction_for_gqa=None, layer_idx=None): # , hh_score=None
-        if os.getenv('H2O_DEFAULT', '0') == '1':
+        if os.getenv('H2O_DEFAULT', '3') == '1':
             self._update_hh_score(attn_score_cache, num_key_value_groups, reduction_for_gqa) # , hh_score
 
             if past_key_values is None:
@@ -366,7 +366,7 @@ class H2OKVCache_LayerWise:
         return (k_hh_recent, v_hh_recent)
 
     def _update_hh_score(self, attn_score_cache, num_key_value_groups=None, reduction_for_gqa=None): # , hh_score
-        if os.getenv('H2O_DEFAULT', '0') == '1': #  or os.getenv('H2O_DEFAULT', '0') == '-1'
+        if os.getenv('H2O_DEFAULT', '3') == '1': #  or os.getenv('H2O_DEFAULT', '3') == '-1'
             num_new_tokens = attn_score_cache.shape[2]
 
             if self.hh_score is None:
@@ -442,7 +442,7 @@ class H2OLlamaAttention(nn.Module):
                 f" and `num_heads`: {self.num_heads})."
             )
         
-        if os.getenv('H2O_DEFAULT', '0') == '1':
+        if os.getenv('H2O_DEFAULT', '3') == '1':
             self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
             self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
             self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
@@ -696,7 +696,7 @@ class H2OLlamaAttention(nn.Module):
         position_embeddings: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         compute_final_attn_output = True
-        if os.getenv('H2O_DEFAULT', '0') == '1':
+        if os.getenv('H2O_DEFAULT', '3') == '1':
             # print(f'### l{self.layer_idx} INSIDE ATTN ###')
             if H2O_BENCHMARK == 1:
                 bsz, _, q_len, _ = query_states.shape
@@ -885,7 +885,7 @@ class H2OLlamaAttention(nn.Module):
             if not output_attentions:
                 attn_weights = None
 
-        elif os.getenv('H2O_DEFAULT', '0') == '-1':
+        elif os.getenv('H2O_DEFAULT', '3') == '-1':
             bsz, _, q_len, _ = query_states.shape
             attn_output, attn_weights, past_key_value = self._h2o_attention(
                 query_states,
@@ -902,7 +902,7 @@ class H2OLlamaAttention(nn.Module):
                 reduction_for_gqa=reduction_for_gqa
             )
         # NOTE call h2o_attention in LlamaCustomAttention & change past_key_values to use DynamicCache (self.kv_cach call is also modified)
-        # elif os.getenv('H2O_DEFAULT', '0') == '-1':
+        # elif os.getenv('H2O_DEFAULT', '3') == '-1':
         #     # print(f'### l{self.layer_idx} INSIDE ATTN ###')
         #     assert hidden_states is None
         #     bsz, _, q_len, _ = query_states.shape
@@ -1075,7 +1075,7 @@ class H2OLlamaAttention(nn.Module):
         #     if not output_attentions:
         #         attn_weights = None
         
-        elif os.getenv('H2O_DEFAULT', '0') == '2':
+        elif os.getenv('H2O_DEFAULT', '3') == '2':
             raise Exception()
             bsz, _, q_len, _ = query_states.shape
             # prompting

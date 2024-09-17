@@ -1,11 +1,12 @@
 #!/bin/bash
+MODEL="llama3.1_8b"
 
 echo MODEL=${MODEL}
 echo METHOD=${METHOD}
 
 EVAL_TOKENS=16777216
 
-for seq in 131072 65536 32768 16384 8192    
+for seq in 16384 32768 65536 131072 # 8192
 do
 count=$((EVAL_TOKENS / seq))
 
@@ -22,6 +23,12 @@ python hip/main/model_eval.py --method fa2 --model llama3.1_8b --stride $seq --d
 elif [ "${METHOD}" == "streaming_llm" ]; then
 echo run streaming llm
 python hip/main/model_eval.py --method streaming_llm --model llama3.1_8b --stride $seq --dataset pg19 --overwrite
+elif [ "${METHOD}" == "h2o" ]; then
+echo run h2o
+H2O_DEFAULT=3 python -m hip.main.model_eval --method h2o --model llama3.1_8b --stride $seq --dataset pg19 --overwrite --count $count
+elif [ "${METHOD}" == "h2o_stream" ]; then
+echo run h2o stream
+H2O_DEFAULT=3 python -m hip.main.model_eval --method h2o_stream --model llama3.1_8b --stride $seq --dataset pg19 --overwrite --streaming --count $count
 elif [ "${METHOD}" == "hyper_attention" ]; then
 echo run hyper attention
 if [ "${DENSE_LAYERS}" == "" ]; then

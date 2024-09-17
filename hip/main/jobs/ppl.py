@@ -27,7 +27,10 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=F
         LLM = torch.Tensor
         warnings.warn('vllm is not installed, this may cause error when you gave vLLM LLM')
     
-    outfile = f'./cache/llama_eval/{args.name}/ppl_{args.dataset}_{args.method}_{safe_name(args.model)}_s{args.stride}_dl{args.dense_layers}_k{args.k}_bq{args.block_size_q}_bk{args.block_size_k}_ckpt{args.checkpoint is not None}.json'
+    if args.method not in ['h2o', 'h2o_stream'] or args.reduce_for_gqa == 'average':
+        outfile = f'./cache/llama_eval/{args.name}/ppl_{args.dataset}_{args.method}_{safe_name(args.model)}_s{args.stride}_dl{args.dense_layers}_k{args.k}_bq{args.block_size_q}_bk{args.block_size_k}_ckpt{args.checkpoint is not None}_c{args.count}.json'
+    elif args.reduce_for_gqa != 'average':
+        outfile = f'./cache/llama_eval/{args.name}/ppl_{args.dataset}_{args.method}_{safe_name(args.model)}_s{args.stride}_dl{args.dense_layers}_k{args.k}_bq{args.block_size_q}_bk{args.block_size_k}_ckpt{args.checkpoint is not None}_c{args.count}_rgqa{args.reduce_for_gqa}.json'
     pathlib.Path(outfile).parent.mkdir(parents=True, exist_ok=True)
     if not quite:
         print("Will write to", outfile)
@@ -36,7 +39,7 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=F
         return
 
     os.makedirs('./cache', exist_ok=True)
-    cache_path = f'./cache/llama_eval_{args.dataset}_{safe_name(args.model)}.pth'
+    cache_path = f'./cache/llama_eval_{args.dataset}_{safe_name(args.model)}_c{args.count}.pth'
     PG19_BOOK_INDEX = int(os.getenv('PG19_BOOK_INDEX', '-1'))
     if PG19_BOOK_INDEX >= 0:
         cache_path = 'none'
@@ -97,7 +100,7 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=F
                     samples = []
                     with tqdm(range(sample_counts), dynamic_ncols=True, position=1, disable=sample_counts <= 1) as pbar_sample:
                         for _ in pbar_sample:
-                            if args.method in ['h2o', 'h2o_stream', 'tova'] and (os.getenv('H2O_DEFAULT', '0') == '1' or os.getenv('H2O_DEFAULT', '0') == '-1' or os.getenv('TOVA_DEFAULT', '0') == '1'):
+                            if args.method in ['h2o', 'h2o_stream', 'tova'] and (os.getenv('H2O_DEFAULT', '3') == '1' or os.getenv('H2O_DEFAULT', '3') == '-1' or os.getenv('TOVA_DEFAULT', '0') == '1'):
                                 loss_sum = 0
                                 loss_count = 0
                                 prompt_ids = input_ids[:, :args.k]
