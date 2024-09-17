@@ -178,6 +178,11 @@ def evaluate_subject(args: ArgsType, model, tokenizer, subject):
         })
         seq_lens.append(inputs.input_ids.shape[-1])
         choices += len(entry['options'])
+        
+        if args.method in ['h2o', 'h2o_stream', 'tova']:
+            for m in model.modules():
+                if hasattr(m, '_clean_cache'):
+                    m._clean_cache()
     
     # print(get_bench().format_tracetree())
     benchmarks = get_bench().todict()

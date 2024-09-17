@@ -159,7 +159,9 @@ def load_model(args):
     if args.model.startswith('qwen'):
         ModelClass = Qwen2ForCausalLM
     if args.method in ['h2o', 'h2o_stream']:
-        if os.getenv('H2O_DEFAULT', '0') == '1': # NOTE not include '-1'
+        if args.method == 'h2o_stream':
+            args.streaming = True
+        if os.getenv('H2O_DEFAULT', '3') == '1': # NOTE not include '-1'
             # from hip.models.h2o_llama_masked import H2OLlamaForCausalLM # this file does not use H2O, use this for validation
             from hip.models.h2o_llama import H2OLlamaForCausalLM # this is real H2O
             ModelClass = H2OLlamaForCausalLM
@@ -191,6 +193,7 @@ def load_model(args):
         torch_dtype=infer_dtype,
         # torch_dtype=torch.float32,
         trust_remote_code=True,
+        token='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'
     )
     
     if args.method == 'tova':

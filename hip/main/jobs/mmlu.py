@@ -46,6 +46,7 @@ MMLU_SUBJECTS = [
     'anatomy', 
     'human_sexuality', 
     'college_medicine', 
+    #####
     'high_school_government_and_politics', 
     'college_chemistry', 
     'logical_fallacies', 
@@ -188,13 +189,18 @@ def evaluate_mmlu(args, model, tokenizer, subject_name):
             'correct': correct,
             'seq_len': seq_len,
         })
+        if args.method in ['h2o', 'h2o_stream', 'tova']:
+            for m in model.modules():
+                if hasattr(m, '_clean_cache'):
+                    m._clean_cache()
+                    
     elapsed = time.time() - t_start
     
     accuracy = (n_correct / len(results)) * 100
     avg_seq_len = seq_len_sum / len(results)
     print(f'{subject_name} = Accuracy: {accuracy:.4f} %, avg_seq_len: {avg_seq_len:.2f}. elapsed: {elapsed:.1f} s')
 
-    folder = f'./saves/llama_eval/mmlu/{args.name}_{args.model}_{args.method}'
+    folder = f'./saves/llama_eval/mmlu/{args.name}_{args.model}_{args.method}_gpu0'
     if args.method == 'hip':
         folder = f'./saves/llama_eval/mmlu/{args.name}_{args.model}_{args.method}_bq{args.block_size_q}_bk{args.block_size_k}_k{args.k}'
     os.makedirs(folder, exist_ok=True)

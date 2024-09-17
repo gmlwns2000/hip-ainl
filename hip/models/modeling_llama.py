@@ -555,7 +555,7 @@ class LlamaCustomAttention(LlamaAttention):
         
         kv_seq_len = None
 
-        if (self.layer_idx in self.tree_dense_layers) or (self.attention_method not in ['h2o', 'h2o_stream']) or (os.getenv('H2O_DEFAULT', '0') not in ['-1', '0', '1', '3']):
+        if (self.layer_idx in self.tree_dense_layers) or (self.attention_method not in ['h2o', 'h2o_stream']) or (os.getenv('H2O_DEFAULT', '3') not in ['-1', '0', '1', '3']):
             if self.attention_method in ['h2o', 'h2o_stream'] and self.layer_idx not in self.tree_dense_layers:
                 raise Exception()
                 # TODO LATER?
@@ -766,14 +766,15 @@ class LlamaCustomAttention(LlamaAttention):
 
             if not output_attentions:
                 attn_weights = None
-        elif self.attention_method in ['h2o', 'h2o_stream'] and os.getenv('H2O_DEFAULT', '0')=='3':
+        elif self.attention_method in ['h2o', 'h2o_stream'] and os.getenv('H2O_DEFAULT', '3')=='3':
             assert self.config.hh_size == 4
             assert self.config.recent_size == self.tree_k
             assert self.config._attn_implementation == self.config.attn_implementation == 'eager'
             assert self.config.shift_q_pos is not None
             assert self.config.reduction_for_gqa is not None
             
-            assert self.attention_method != 'h2o_stream'
+            if self.attention_method == 'h2o_stream':
+                assert self.config.streaming == True
             assert use_cache == True
             
             self.h2o_attention.o_proj = self.o_proj
@@ -883,7 +884,6 @@ class LlamaCustomAttention(LlamaAttention):
                     cos=cos,
                     sin=sin
                 )
-            print('=========')
         
         else:
             assert self.config.hh_size == 4
