@@ -526,7 +526,6 @@ class LlamaCustomAttention(LlamaAttention):
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
-
         if self.config.pretraining_tp > 1:
             key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
             query_slices = self.q_proj.weight.split(
@@ -555,7 +554,7 @@ class LlamaCustomAttention(LlamaAttention):
         
         kv_seq_len = None
 
-        if (self.layer_idx in self.tree_dense_layers) or (self.attention_method not in ['h2o', 'h2o_stream']) or (os.getenv('H2O_DEFAULT', '3') not in ['-1', '0', '1', '3']):
+        if (self.layer_idx in self.tree_dense_layers) or (self.attention_method not in ['h2o', 'h2o_stream']) or (os.getenv('H2O_DEFAULT', '3') not in ['-1', '0', '1', '3', '4', '5', '6']):
             if self.attention_method in ['h2o', 'h2o_stream'] and self.layer_idx not in self.tree_dense_layers:
                 raise Exception()
                 # TODO LATER?
@@ -883,6 +882,458 @@ class LlamaCustomAttention(LlamaAttention):
                     
                     cos=cos,
                     sin=sin
+                )
+        elif self.attention_method in ['h2o', 'h2o_stream'] and os.getenv('H2O_DEFAULT', '3')=='5':
+            assert self.config.hh_size == 4
+            assert self.config.recent_size == self.tree_k
+            assert self.config._attn_implementation == self.config.attn_implementation == 'eager'
+            assert self.config.shift_q_pos is not None
+            assert self.config.reduction_for_gqa is not None
+            
+            if self.attention_method == 'h2o_stream':
+                assert self.config.streaming == True
+            assert use_cache == True
+            
+            self.h2o_attention.o_proj = self.o_proj
+            mask_k = self.tree_k
+            
+            if position_embeddings is None:
+                logger.warning_once(
+                    "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
+                    "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
+                    "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.45 `position_ids` will be "
+                    "removed and `position_embeddings` will be mandatory."
+                )
+                cos, sin = self.rotary_emb(value_states, position_ids)
+            else:
+                cos, sin = position_embeddings
+            
+            if q_len > mask_k:
+                compute_final_attn_output = True
+                
+                position_ids_k = position_ids[:, :mask_k]
+                position_ids_loop = position_ids[:, mask_k:]
+                
+                query_states_k = query_states[:, :, :mask_k, :]
+                query_states_loop = query_states[:, :, mask_k:, :]
+                key_states_k = key_states[:, :, :mask_k, :]
+                key_states_loop = key_states[:, :, mask_k:, :]
+                value_states_k = value_states[:, :, :mask_k, :]
+                value_states_loop = value_states[:, :, mask_k:, :]
+                
+                # assert past_key_value is None # TODO CHECK
+                assert use_cache is True
+                
+                # print('========== prompt_attn')
+                attn_output, attn_weights, past_key_value = self.h2o_attention._h2o_attention( # , hh_score
+                    query_states_k,
+                    key_states_k,
+                    value_states_k,
+                    
+                    position_ids_k,
+                    past_key_value=past_key_value,
+                    output_attentions=output_attentions,
+                    use_cache=use_cache,
+                    # hh_score=hh_score,
+                    bsz=bsz,
+                    cache_position=cache_position,
+                    reduction_for_gqa=self.config.reduction_for_gqa,
+                    kv_seq_len=kv_seq_len,
+                    decoding_loop_for_prefill=True,
+                    compute_final_attn_output=compute_final_attn_output,
+                    
+                    cos=cos,
+                    sin=sin,
+                )
+                attn_output_loop = torch.zeros(
+                    (attn_output.shape[0], q_len - mask_k, attn_output.shape[-1]), 
+                    dtype=attn_output.dtype, device=attn_output.device
+                )
+                # print(f'l{self.layer_idx} ---------')
+                # print('attn_output ', attn_output)
+                # print('attn_output ', attn_output.shape)
+                
+                # loop one by one
+                # print('========== prompt_loop_attn')
+                assert query_states_loop.shape[-2] == q_len - mask_k
+                for i in range(q_len - mask_k):
+                    # print(f'>> loop {i}')
+                    attn_output_, attn_weights_, past_key_value = self.h2o_attention._h2o_attention( # , hh_score
+                        query_states_loop[:, :, i, :][:, :, None, :],
+                        key_states_loop[:, :, i, :][:, :, None, :],
+                        value_states_loop[:, :, i, :][:, :, None, :],
+                        
+                        position_ids_loop[:, i][:, None],
+                        past_key_value=past_key_value,
+                        output_attentions=output_attentions,
+                        use_cache=use_cache,
+                        # hh_score=hh_score,
+                        bsz=bsz,
+                        cache_position=cache_position,
+                        reduction_for_gqa=self.config.reduction_for_gqa,
+                        kv_seq_len=kv_seq_len,
+                        decoding_loop_for_prefill=True,
+                        compute_final_attn_output=compute_final_attn_output,
+                        
+                        cos=cos,
+                        sin=sin,
+                        i=i
+                    )
+                    
+                    attn_output_loop[:, i:i+1, :].copy_(attn_output_, non_blocking=True)
+                    
+                    # print('attn_output ', attn_output_)
+                    # print('attn_output ', attn_output_.shape)
+                    # if(i==4):
+                    #     breakpoint()
+                
+                attn_output = torch.cat((attn_output, attn_output_loop), dim=1)
+                
+                if os.getenv('FINAL_DEBUG', '0')=='1':
+                    torch.save(
+                        {'attn_output': attn_output,
+                         'past_key_value':past_key_value
+                        },
+                        f'./cache/llama/h2o_5/l{self.layer_idx}_final.pth')
+                    print(f'l{self.layer_idx}_final stored. press enter to continue >>> ')
+                if output_attentions:
+                    raise Exception()
+                    attn_weights = torch.cat((attn_weights, attn_weigth_loop), dim=-2)
+                
+                # print(f'[5] l{self.layer_idx}-------')
+                # print('>> attn_output ', attn_output)
+                # print('>> shape ', attn_output.shape)
+                        
+            else:
+                assert use_cache is True
+                # compute_final_attn_output = False
+                
+                attn_output, attn_weights, past_key_value = self.h2o_attention._h2o_attention( # , hh_score
+                    query_states,
+                    key_states,
+                    value_states,
+                    
+                    position_ids,
+                    past_key_value=past_key_value,
+                    output_attentions=output_attentions,
+                    use_cache=use_cache,
+                    # hh_score=hh_score,
+                    bsz=bsz,
+                    cache_position=cache_position,
+                    reduce_for_gqa=self.config.reduction_for_gqa,
+                    kv_seq_len=kv_seq_len,
+                    decoding_loop_for_prefill=True,
+                    compute_final_attn_output=True, # compute_final_attn_output
+                    
+                    cos=cos,
+                    sin=sin
+                )
+        elif self.attention_method in ['h2o', 'h2o_stream'] and os.getenv('H2O_DEFAULT', '3')=='6':
+            assert self.config.hh_size == 4
+            assert self.config.recent_size == self.tree_k
+            assert self.config._attn_implementation == self.config.attn_implementation == 'eager'
+            assert self.config.shift_q_pos is not None
+            assert self.config.reduction_for_gqa is not None
+            
+            cache_size = self.config.hh_size + self.config.recent_size
+            
+            if self.attention_method == 'h2o_stream':
+                assert self.config.streaming == True
+            assert use_cache == True
+            
+            self.h2o_attention.o_proj = self.o_proj
+            mask_k = self.tree_k
+            
+            if position_embeddings is None:
+                logger.warning_once(
+                    "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
+                    "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
+                    "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.45 `position_ids` will be "
+                    "removed and `position_embeddings` will be mandatory."
+                )
+                cos, sin = self.rotary_emb(value_states, position_ids)
+            else:
+                cos, sin = position_embeddings
+            
+            if q_len > mask_k:
+                compute_final_attn_output = True
+                
+                position_ids_k = position_ids[:, :mask_k]
+                position_ids_loop = position_ids[:, mask_k:]
+                
+                query_states_k = query_states[:, :, :mask_k, :]
+                query_states_loop = query_states[:, :, mask_k:, :]
+                key_states_k = key_states[:, :, :mask_k, :]
+                key_states_loop = key_states[:, :, mask_k:, :]
+                value_states_k = value_states[:, :, :mask_k, :]
+                value_states_loop = value_states[:, :, mask_k:, :]
+                
+                # assert past_key_value is None # TODO CHECK
+                assert use_cache is True
+                
+                # print('========== prompt_attn')
+                attn_output, attn_weights, past_key_value = self.h2o_attention._h2o_attention( # , hh_score
+                    query_states_k,
+                    key_states_k,
+                    value_states_k,
+                    
+                    position_ids_k,
+                    past_key_value=past_key_value,
+                    output_attentions=output_attentions,
+                    use_cache=use_cache,
+                    # hh_score=hh_score,
+                    bsz=bsz,
+                    cache_position=cache_position[: mask_k],
+                    reduction_for_gqa=self.config.reduction_for_gqa,
+                    kv_seq_len=kv_seq_len,
+                    decoding_loop_for_prefill=True,
+                    compute_final_attn_output=compute_final_attn_output,
+                    
+                    cos=cos,
+                    sin=sin,
+                    cache_size=cache_size
+                )
+                attn_output_loop = torch.zeros(
+                    (attn_output.shape[0], q_len - mask_k, attn_output.shape[-1]), 
+                    dtype=attn_output.dtype, device=attn_output.device
+                )
+                
+                # print(f'l{self.layer_idx} ---------')
+                # print('attn_output ', attn_output)
+                # print('attn_output ', attn_output.shape)
+                
+                # loop one by one
+                # print('========== prompt_loop_attn')
+                assert query_states_loop.shape[-2] == q_len - mask_k
+                for i in range(q_len - mask_k):
+                    # print(f'>> loop {i}')
+                    if mask_k + i <= cache_size:
+                        cache_position_ = cache_position[mask_k + i : mask_k + i + 1]
+                    else:
+                        cache_position_ = cache_position[cache_size: cache_size + 1]
+                    attn_output_, attn_weights_, past_key_value = self.h2o_attention._h2o_attention( # , hh_score
+                        query_states_loop[:, :, i, :][:, :, None, :],
+                        key_states_loop[:, :, i, :][:, :, None, :],
+                        value_states_loop[:, :, i, :][:, :, None, :],
+                        
+                        position_ids_loop[:, i][:, None],
+                        past_key_value=past_key_value,
+                        output_attentions=output_attentions,
+                        use_cache=use_cache,
+                        # hh_score=hh_score,
+                        bsz=bsz,
+                        cache_position=cache_position_,
+                        reduction_for_gqa=self.config.reduction_for_gqa,
+                        kv_seq_len=kv_seq_len,
+                        decoding_loop_for_prefill=True,
+                        compute_final_attn_output=compute_final_attn_output,
+                        
+                        cos=cos,
+                        sin=sin,
+                        cache_size=cache_size,
+                        i=i
+                    )
+                    
+                    attn_output_loop[:, i:i+1, :].copy_(attn_output_, non_blocking=True)
+                    # print('attn_output ', attn_output_)
+                    # print('attn_output ', attn_output_.shape)
+                    
+                    # if(i==4):
+                    #     breakpoint()
+                
+                attn_output = torch.cat((attn_output, attn_output_loop), dim=1)
+                
+                if os.getenv('FINAL_DEBUG', '0')=='1':
+                    torch.save(
+                        {'attn_output': attn_output,
+                         'past_key_value':past_key_value,
+                        },
+                        f'./cache/llama/h2o_6/l{self.layer_idx}_final.pth')
+                    print(f'l{self.layer_idx}_final stored. press enter to continue >>> ')
+                if output_attentions:
+                    raise Exception()
+                    attn_weights = torch.cat((attn_weights, attn_weigth_loop), dim=-2)
+                # print(f'[6] l{self.layer_idx}-------')
+                # print('>> attn_output ', attn_output)
+                # print('>> shape ', attn_output.shape)
+                        
+            else:
+                assert use_cache is True
+                # compute_final_attn_output = False
+                
+                attn_output, attn_weights, past_key_value = self.h2o_attention._h2o_attention( # , hh_score
+                    query_states,
+                    key_states,
+                    value_states,
+                    
+                    position_ids,
+                    past_key_value=past_key_value,
+                    output_attentions=output_attentions,
+                    use_cache=use_cache,
+                    # hh_score=hh_score,
+                    bsz=bsz,
+                    cache_position=cache_position[: q_len],
+                    reduce_for_gqa=self.config.reduction_for_gqa,
+                    kv_seq_len=kv_seq_len,
+                    decoding_loop_for_prefill=True,
+                    compute_final_attn_output=True, # compute_final_attn_output
+                    
+                    cos=cos,
+                    sin=sin,
+                    cache_size=cache_size
+                )
+            
+        elif self.attention_method in ['h2o', 'h2o_stream'] and os.getenv('H2O_DEFAULT', '3')=='4':
+            assert self.config.hh_size == 4
+            assert self.config.recent_size == self.tree_k
+            assert self.config._attn_implementation == self.config.attn_implementation == 'eager'
+            assert self.config.shift_q_pos is not None
+            assert self.config.reduction_for_gqa is not None
+            
+            cache_size = self.config.hh_size + self.config.recent_size
+            # output_attentions =False # TODO discard
+            
+            if self.attention_method == 'h2o_stream':
+                assert self.config.streaming == True
+            assert use_cache == True
+            
+            self.h2o_attention.o_proj = self.o_proj
+            mask_k = self.tree_k
+            
+            if position_embeddings is None:
+                logger.warning_once(
+                    "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
+                    "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
+                    "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.45 `position_ids` will be "
+                    "removed and `position_embeddings` will be mandatory."
+                )
+                cos, sin = self.rotary_emb(value_states, position_ids)
+            else:
+                cos, sin = position_embeddings
+            
+            if q_len > mask_k:
+                compute_final_attn_output = True
+                
+                position_ids_k = position_ids[:, :mask_k]
+                position_ids_loop = position_ids[:, mask_k:]
+                
+                query_states_k = query_states[:, :, :mask_k, :]
+                query_states_loop = query_states[:, :, mask_k:, :]
+                key_states_k = key_states[:, :, :mask_k, :]
+                key_states_loop = key_states[:, :, mask_k:, :]
+                value_states_k = value_states[:, :, :mask_k, :]
+                value_states_loop = value_states[:, :, mask_k:, :]
+                
+                # assert past_key_value is None # TODO CHECK
+                assert use_cache is True
+                
+                # print('========== prompt_attn')
+                attn_output, attn_weights, past_key_value = self.h2o_attention._h2o_attention( # , hh_score
+                    query_states_k,
+                    key_states_k,
+                    value_states_k,
+                    
+                    position_ids_k,
+                    past_key_value=past_key_value,
+                    output_attentions=output_attentions,
+                    use_cache=use_cache,
+                    # hh_score=hh_score,
+                    bsz=bsz,
+                    cache_position=cache_position[ : mask_k],
+                    reduction_for_gqa=self.config.reduction_for_gqa,
+                    kv_seq_len=kv_seq_len,
+                    decoding_loop_for_prefill=True,
+                    compute_final_attn_output=compute_final_attn_output,
+                    
+                    cos=cos,
+                    sin=sin,
+                    cache_size=cache_size
+                )
+                # attn_output : N, T, HID
+                
+                # loop one by one
+                # print('========== prompt_loop_attn')
+                assert query_states_loop.shape[-2] == q_len - mask_k
+                attn_output_loop = torch.zeros(
+                    (attn_output.shape[0], q_len - mask_k, attn_output.shape[-1]), 
+                    dtype=attn_output.dtype, device=attn_output.device
+                )
+                # attn_weigth_loop = torch.zeros(
+                #     (attn_weights.shape[0], attn_weights.shape[1], q_len - mask_k, attn_weights.shape[-1]), 
+                #     dtype=attn_weights.dtype, device=attn_weights.device
+                # )
+                for i in range(q_len - mask_k):
+                    # print(f'>> loop {i}')
+                    # print('cache position ', cache_position)
+                    if mask_k + i <= cache_size:
+                        cache_position_ = cache_position[mask_k + i : mask_k + i + 1]
+                    else:
+                        cache_position_ = cache_position[cache_size: cache_size + 1] # TODO check
+                    attn_output_, attn_weights_, past_key_value = self.h2o_attention._h2o_attention( # , hh_score
+                        query_states_loop[:, :, i:i+1, :],
+                        key_states_loop[:, :, i:i+1, :],
+                        value_states_loop[:, :, i:i+1, :],
+                        
+                        position_ids_loop[:, i:i+1],
+                        past_key_value=past_key_value,
+                        output_attentions=output_attentions,
+                        use_cache=use_cache,
+                        # hh_score=hh_score,
+                        bsz=bsz,
+                        cache_position=cache_position_,
+                        reduction_for_gqa=self.config.reduction_for_gqa,
+                        kv_seq_len=kv_seq_len,
+                        decoding_loop_for_prefill=True,
+                        compute_final_attn_output=compute_final_attn_output,
+                        
+                        cos=cos,
+                        sin=sin,
+                        cache_size=cache_size
+                    )
+                    
+                    attn_output_loop[:, i:i+1, :].copy_(attn_output_, non_blocking=True)
+                    # attn_weigth_loop[:, :, i:i+1, :].copy_(attn_weights_, non_blocking=True)
+                    # attn_output = torch.cat((attn_output, attn_output_), dim=1)
+                    
+                attn_output = torch.cat((attn_output, attn_output_loop), dim=1)
+                if output_attentions:
+                    raise Exception()
+                    attn_weights = torch.cat((attn_weights, attn_weigth_loop), dim=-2)
+                
+                # if os.getenv('VIZ', '0') == '1':
+                #     os.makedirs('./cache/llama_h2o/', exist_ok=True)
+                #     torch.save({
+                #         'layer_idx': self.layer_idx,
+                #         'attn_weights':attn_weights
+                #     }, f'./cache/llama_h2o/attn_{self.layer_idx}.pth')
+                #     print(f'saved l{self.layer_idx}')
+                        
+            else:
+                assert use_cache is True
+                # compute_final_attn_output = False
+                
+                # TODO check: cache_position = cache_position[:mask_k] 
+                
+                attn_output, attn_weights, past_key_value = self.h2o_attention._h2o_attention( # , hh_score
+                    query_states,
+                    key_states,
+                    value_states,
+                    
+                    position_ids,
+                    past_key_value=past_key_value,
+                    output_attentions=output_attentions,
+                    use_cache=use_cache,
+                    # hh_score=hh_score,
+                    bsz=bsz,
+                    cache_position=cache_position[ : q_len],
+                    reduce_for_gqa=self.config.reduction_for_gqa,
+                    kv_seq_len=kv_seq_len,
+                    decoding_loop_for_prefill=True,
+                    compute_final_attn_output=True, # compute_final_attn_output
+                    
+                    cos=cos,
+                    sin=sin,
+                    cache_size=cache_size
                 )
         
         else:

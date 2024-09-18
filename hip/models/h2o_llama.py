@@ -267,7 +267,7 @@ class H2OKVCache_LayerWise:
         self.v_seq_dim = v_seq_dim
         self.hh_score = None
 
-    def __call__(self, past_key_values, attn_score_cache, num_key_value_groups=None, reduction_for_gqa=None, layer_idx=None): # , hh_score=None
+    def __call__(self, past_key_values, attn_score_cache, num_key_value_groups=None, reduction_for_gqa=None, layer_idx=None, cache_position=None): # , hh_score=None
         if os.getenv('H2O_DEFAULT', '3') == '1':
             self._update_hh_score(attn_score_cache, num_key_value_groups, reduction_for_gqa) # , hh_score
 
@@ -288,20 +288,101 @@ class H2OKVCache_LayerWise:
             keep_recent = torch.arange(seq_len - self.recent_size, seq_len, device=keep_topk.device).repeat(keep_topk.shape[0], 1)
             keep_idx = torch.cat([keep_topk, keep_recent], dim=-1)
 
-            mask = torch.zeros(self.hh_score.shape, dtype=torch.bool).to(past_key_values[0].device)
+            mask = torch.zeros(self.hh_score.shape, dtype=torch.bool, device=past_key_values[0].device)
             mask = mask.scatter(-1, keep_idx, 1)
 
-            # print('past_key_values ', past_key_values[0].shape)
-            # print('past_key_values_ ', past_key_values[0].squeeze().shape)
-            # print('mask ', mask.shape)
-            # breakpoint()
             k_hh_recent = past_key_values[0].squeeze()[mask].view(bsz, num_heads, -1, head_dim)
             v_hh_recent = past_key_values[1].squeeze()[mask].view(bsz, num_heads, -1, head_dim)
 
             self.hh_score= self.hh_score[mask].view(num_heads, self.cache_size)
             
             return (k_hh_recent, v_hh_recent)
-        
+        elif os.getenv('H2O_DEFAULT', '3')=='4':
+            self._update_hh_score(attn_score_cache, num_key_value_groups, reduction_for_gqa) # , hh_score
+            
+            if past_key_values is None or past_key_values.get_seq_length(layer_idx).item() <=0 : # past_key_values.get_seq_length(layer_idx).item() < (cache_position[-1]).item(): # TODO purpose?
+                return (False, None)
+            
+            # seq_len = past_key_values[layer_idx][0].size(self.k_seq_dim)
+            bsz, num_heads, _, head_dim = past_key_values.key_cache[layer_idx].shape # dim -2 returns max_cache_size
+            seq_len = past_key_values.get_seq_length(layer_idx).item()
+            
+            if seq_len <= self.cache_size: # TODO check
+                return (False, past_key_values)
+            
+            # hh-selection
+
+            select_hh_scores = self.hh_score[:, :, :seq_len - self.recent_size]
+            _, keep_topk = torch.topk(select_hh_scores, self.hh_size, dim=-1)
+            keep_topk = keep_topk.sort().values
+
+            # keep_recent = torch.arange(seq_len - self.recent_size, seq_len).expand(keep_topk.shape[0], 1).to(keep_topk.device)
+            keep_recent = torch.arange(seq_len - self.recent_size, seq_len, device=keep_topk.device).repeat(keep_topk.shape[0], keep_topk.shape[1], 1)
+            keep_idx = torch.cat([keep_topk, keep_recent], dim=-1)
+            
+            k_hh_recent = torch.gather(past_key_values.key_cache[layer_idx][:, :, :seq_len, :], -2, (keep_idx.unsqueeze(-1)).expand(-1, -1, -1, head_dim))
+            v_hh_recent = torch.gather(past_key_values.value_cache[layer_idx][:, :, :seq_len, :], -2, keep_idx.unsqueeze(-1).expand(-1, -1, -1, head_dim))
+            
+            self.hh_score = torch.gather(self.hh_score, -1, keep_idx.expand(bsz, num_heads, self.cache_size))
+        elif os.getenv('H2O_DEFAULT', '3')=='5':
+            self._update_hh_score(attn_score_cache, num_key_value_groups, reduction_for_gqa) # , hh_score
+            
+            if past_key_values is None or len(past_key_values) <= layer_idx: # TODO purpose?
+                return (False, None)
+            
+            # seq_len = past_key_values[layer_idx][0].size(self.k_seq_dim)
+            bsz, num_heads, seq_len, head_dim = past_key_values[layer_idx][0].shape
+            
+            if seq_len <= self.cache_size: # TODO check
+                return (False, past_key_values)
+            
+            # hh-selection
+
+            select_hh_scores = self.hh_score[:, :, :seq_len - self.recent_size]
+            _, keep_topk = torch.topk(select_hh_scores, self.hh_size, dim=-1)
+            keep_topk = keep_topk.sort().values
+
+            # keep_recent = torch.arange(seq_len - self.recent_size, seq_len).expand(keep_topk.shape[0], 1).to(keep_topk.device)
+            keep_recent = torch.arange(seq_len - self.recent_size, seq_len, device=keep_topk.device).repeat(keep_topk.shape[0], keep_topk.shape[1], 1)
+            keep_idx = torch.cat([keep_topk, keep_recent], dim=-1)
+
+            k_hh_recent = torch.gather(past_key_values.key_cache[layer_idx][:, :, :seq_len, :], -2, (keep_idx.unsqueeze(-1)).expand(-1, -1, -1, head_dim))
+            v_hh_recent = torch.gather(past_key_values.value_cache[layer_idx][:, :, :seq_len, :], -2, keep_idx.unsqueeze(-1).expand(-1, -1, -1, head_dim))
+            
+            
+            self.hh_score = torch.gather(self.hh_score, -1, keep_idx.expand(bsz, num_heads, self.cache_size))
+        elif os.getenv('H2O_DEFAULT', '3')=='6':
+            self._update_hh_score(attn_score_cache, num_key_value_groups, reduction_for_gqa) # , hh_score
+            # print('-----')
+            # print('cache_position ', cache_position)
+            
+            if past_key_values is None or past_key_values.get_seq_length(layer_idx).item() <= 0: # TODO purpose?
+                return (False, None)
+            
+            # seq_len = past_key_values[layer_idx][0].size(self.k_seq_dim)
+            bsz, num_heads, _, head_dim = past_key_values.key_cache[layer_idx].shape
+            
+            # cache_position[-1] contains index where the current key has been placed
+            seq_len = cache_position[-1].item() + 1 # TODO CHECK THIS PART. 1 for considering it's a length
+            
+            if seq_len <= self.cache_size: # TODO check
+                return (False, past_key_values)
+            
+            # hh-selection
+
+            select_hh_scores = self.hh_score[:, :, :seq_len - self.recent_size]
+            _, keep_topk = torch.topk(select_hh_scores, self.hh_size, dim=-1)
+            keep_topk = keep_topk.sort().values
+
+            # keep_recent = torch.arange(seq_len - self.recent_size, seq_len).expand(keep_topk.shape[0], 1).to(keep_topk.device)
+            keep_recent = torch.arange(seq_len - self.recent_size, seq_len, device=keep_topk.device).repeat(keep_topk.shape[0], keep_topk.shape[1], 1)
+            keep_idx = torch.cat([keep_topk, keep_recent], dim=-1)
+
+            # TODO CHECK THIS PART.
+            k_hh_recent = torch.gather(past_key_values.key_cache[layer_idx][:, :, :seq_len, :], -2, (keep_idx.unsqueeze(-1)).expand(-1, -1, -1, head_dim))
+            v_hh_recent = torch.gather(past_key_values.value_cache[layer_idx][:, :, :seq_len, :], -2, keep_idx.unsqueeze(-1).expand(-1, -1, -1, head_dim))
+            
+            self.hh_score = torch.gather(self.hh_score, -1, keep_idx.expand(bsz, num_heads, self.cache_size))
         else:
             self._update_hh_score(attn_score_cache, num_key_value_groups, reduction_for_gqa) # , hh_score
             
@@ -493,188 +574,950 @@ class H2OLlamaAttention(nn.Module):
 
     def _clean_cache(self):
         self.kv_cache._clean_scores()
-        
-    def _h2o_attention(
-        self,
-        query_states,
-        key_states,
-        value_states,
-        
-        position_ids,
-        past_key_value,
-        output_attentions,
-        use_cache,
-        # hh_score,
-        
-        bsz,
-        cache_position,
-        reduction_for_gqa=None,
-        kv_seq_len=None,
-        decoding_loop_for_prefill=True,
-        compute_final_attn_output=True,
-        
-        cos=None,
-        sin=None
-        # position_embeddings=None,
-    ):
-        q_len = query_states.shape[-2]
-        
-        if decoding_loop_for_prefill:
-            assert compute_final_attn_output == True
-            attention_mask = _make_causal_mask(
-                bsz=bsz,
-                tgt_len=q_len,
-                past_key_values_length=past_key_value[self.layer_idx][0].shape[-2] if (past_key_value is not None and len(past_key_value) > self.layer_idx) else 0,
-                dtype=query_states.dtype,
-                device=query_states.device,
+    
+    # NOTE DEFAULT 3 original well working one
+    if os.getenv('H2O_DEFAULT', '3') == '3':
+        def _h2o_attention(
+            self,
+            query_states,
+            key_states,
+            value_states,
+            
+            position_ids,
+            past_key_value,
+            output_attentions,
+            use_cache,
+            # hh_score,
+            
+            bsz,
+            cache_position,
+            reduction_for_gqa=None,
+            kv_seq_len=None,
+            decoding_loop_for_prefill=True,
+            compute_final_attn_output=True,
+            
+            cos=None,
+            sin=None
+            # position_embeddings=None,
+        ):
+            q_len = query_states.shape[-2]
+            
+            if decoding_loop_for_prefill:
+                assert compute_final_attn_output == True
+                attention_mask = _make_causal_mask(
+                    bsz=bsz,
+                    tgt_len=q_len,
+                    past_key_values_length=past_key_value[self.layer_idx][0].shape[-2] if (past_key_value is not None and len(past_key_value) > self.layer_idx) else 0,
+                    dtype=query_states.dtype,
+                    device=query_states.device,
+                )
+                
+                kv_seq_len = key_states.shape[-2]
+            
+                if past_key_value is not None and len(past_key_value) > self.layer_idx: # TODO check this for decoding
+                    kv_seq_len += past_key_value[self.layer_idx][0].shape[-2]
+
+                position_length = kv_seq_len
+
+                if not position_ids[0].nelement() > 1: # NOTE to support batch - check
+                    # import warnings
+                    # warnings.warn(f'pos_id {position_ids.shape}, pos_id_n_elem = {position_ids[0].nelement()}; assumed all batch contains same id')
+                    if position_length < position_ids[0].item()+1: # NOTE can be greater than kv_seq_len, after eviction starts
+                        position_length = position_ids[0].item()+1
+                
+                """
+                NOTE: H2O has 3 variants
+                1. No touch on RoPE: official implementation
+                2. shift query position of RoPE by min(k, pos idx): Implementation details in the official implementation that not API available. They describe this only with code comment
+                3. StreamingLLM style RoPE: my own implementation
+                """
+
+                if self.config.streaming:
+                    if past_key_value is not None: # and len(past_key_value) != 0:
+                        # sin and cos are specific to RoPE models; cache_position needed for the static cache
+                        cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+                        key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs) # TODO check past_key_value update
+                        # reuse k, v, self_attention
+                        # key_states = torch.cat([past_key_value[0], key_states], dim=2)
+                        # value_states = torch.cat([past_key_value[1], value_states], dim=2)
+                    # past_key_value = (key_states, value_states) if use_cache else None
+                    
+                    position_ids = torch.arange(0, key_states.shape[-2], device=key_states.device)[None, :]
+                    
+                    # cos, sin = self.rotary_emb(value_states, seq_len=position_length)
+                    # NOTE: grab all position embeddings
+                    # cos, sin = self.rotary_emb(value_states, position_ids)
+                    
+                    ### Shift Pos: query pos is min(cache_size, idx)
+                    query_states = apply_rotary_pos_emb_single(
+                        query_states, 
+                        cos, 
+                        sin, 
+                        position_ids[:, -q_len:],
+                    )
+                    key_states = apply_rotary_pos_emb_single(
+                        key_states, 
+                        cos, 
+                        sin, 
+                        position_ids,
+                    )
+                else:
+                    # cos, sin = self.rotary_emb(value_states, seq_len=position_length)
+                    # NOTE: grab all position embeddings
+                
+                    # TODO discard this part
+                    # cos, sin = self.rotary_emb(value_states, torch.arange(0, position_length, device=key_states.device)[None, :])
+                    
+                    ### Shift Pos: query pos is min(cache_size, idx)
+                    query_states = apply_rotary_pos_emb_single(
+                        query_states, 
+                        cos, 
+                        sin, 
+                        torch.clamp_max(position_ids, kv_seq_len) if self.config.shift_q_pos else position_ids,
+                    )
+                    key_states = apply_rotary_pos_emb_single(
+                        key_states, 
+                        cos, 
+                        sin, 
+                        position_ids,
+                    )
+
+                    if past_key_value is not None: # and len(past_key_value) != 0:
+                        # sin and cos are specific to RoPE models; cache_position needed for the static cache
+                        cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+                        key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs) # TODO check past_key_value update
+                        # reuse k, v, self_attention
+                        # key_states = torch.cat([past_key_value[0], key_states], dim=2)
+                        # value_states = torch.cat([past_key_value[1], value_states], dim=2)
+                    # past_key_value = (key_states, value_states) if use_cache else None
+
+                # repeat k/v heads if n_kv_heads < n_heads
+                key_states = repeat_kv(key_states, self.num_key_value_groups)
+                value_states = repeat_kv(value_states, self.num_key_value_groups)
+
+            ########
+            
+            attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(
+                self.head_dim
             )
             
+            if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
+                raise ValueError(
+                    f"Attention weights should be of size {(bsz, self.num_heads, q_len, kv_seq_len)}, but is"
+                    f" {attn_weights.size()}"
+                )
+
+            if attention_mask is not None:
+                if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
+                    raise ValueError(
+                        f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
+                    )
+                attn_weights = attn_weights + attention_mask
+            
+            # upcast attention to fp32
+            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(
+                query_states.dtype
+            )
+
+            kv_hh = self.kv_cache(past_key_value, attn_weights.detach().clone(), self.num_key_value_groups, reduction_for_gqa, self.layer_idx) # , hh_score TODO check
+            if kv_hh[0] == True:
+                _, k_hh_recent, v_hh_recent = kv_hh
+                past_key_value.key_cache[self.layer_idx] = k_hh_recent
+                past_key_value.value_cache[self.layer_idx] = v_hh_recent
+
+            attn_output = torch.matmul(attn_weights, value_states)
+            
+            #######
+            if compute_final_attn_output:
+                if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
+                    raise ValueError(
+                        f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
+                        f" {attn_output.size()}"
+                    )
+                    
+                attn_output = attn_output.transpose(1, 2).contiguous()
+                attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
+
+                if self.config.pretraining_tp > 1:
+                    attn_output = attn_output.split(
+                        self.hidden_size // self.config.pretraining_tp, dim=2
+                    )
+                    o_proj_slices = self.o_proj.weight.split(
+                        self.hidden_size // self.config.pretraining_tp, dim=1
+                    )
+                    attn_output = sum(
+                        [
+                            F.linear(attn_output[i], o_proj_slices[i])
+                            for i in range(self.config.pretraining_tp)
+                        ]
+                    )
+                else:
+                    attn_output = self.o_proj(attn_output)
+
+                if not output_attentions:
+                    attn_weights = None
+            
+            return attn_output, attn_weights, past_key_value # , hh_score
+    elif os.getenv('H2O_DEFAULT', '3') == '5': # NOTE not include static cache
+        def _h2o_attention(
+            self,
+            query_states,
+            key_states,
+            value_states,
+            
+            position_ids,
+            past_key_value,
+            output_attentions,
+            use_cache,
+            # hh_score,
+            
+            bsz,
+            cache_position,
+            reduction_for_gqa=None,
+            kv_seq_len=None,
+            decoding_loop_for_prefill=True,
+            compute_final_attn_output=True,
+            
+            cos=None,
+            sin=None,
+            i=None
+            # position_embeddings=None,
+        ):
+            # print('[5] ---------')
+            q_len = query_states.shape[-2]
+            
+            if decoding_loop_for_prefill:
+                assert compute_final_attn_output == True
+                attention_mask = _make_causal_mask(
+                    bsz=bsz,
+                    tgt_len=q_len,
+                    past_key_values_length=past_key_value[self.layer_idx][0].shape[-2] if (past_key_value is not None and len(past_key_value) > self.layer_idx) else 0,
+                    dtype=query_states.dtype,
+                    device=query_states.device,
+                )
+                
+                kv_seq_len = key_states.shape[-2]
+            
+                if past_key_value is not None and len(past_key_value) > self.layer_idx: # TODO check this for decoding
+                    kv_seq_len += past_key_value[self.layer_idx][0].shape[-2]
+
+                # position_length = kv_seq_len
+
+                # if not position_ids[0].nelement() > 1: # NOTE to support batch - check
+                #     # import warnings
+                #     # warnings.warn(f'pos_id {position_ids.shape}, pos_id_n_elem = {position_ids[0].nelement()}; assumed all batch contains same id')
+                #     if position_length < position_ids[0].item()+1: # NOTE can be greater than kv_seq_len, after eviction starts
+                #         position_length = position_ids[0].item()+1
+                
+                """
+                NOTE: H2O has 3 variants
+                1. No touch on RoPE: official implementation
+                2. shift query position of RoPE by min(k, pos idx): Implementation details in the official implementation that not API available. They describe this only with code comment
+                3. StreamingLLM style RoPE: my own implementation
+                """
+
+                if self.config.streaming:
+                    if past_key_value is not None: # and len(past_key_value) != 0:
+                        # sin and cos are specific to RoPE models; cache_position needed for the static cache
+                        cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+                        key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs) # TODO check past_key_value update
+                        # reuse k, v, self_attention
+                        # key_states = torch.cat([past_key_value[0], key_states], dim=2)
+                        # value_states = torch.cat([past_key_value[1], value_states], dim=2)
+                    # past_key_value = (key_states, value_states) if use_cache else None
+                    
+                    position_ids = torch.arange(0, key_states.shape[-2], device=key_states.device)[None, :]
+                    
+                    # cos, sin = self.rotary_emb(value_states, seq_len=position_length)
+                    # NOTE: grab all position embeddings
+                    # cos, sin = self.rotary_emb(value_states, position_ids)
+                    
+                    ### Shift Pos: query pos is min(cache_size, idx)
+                    query_states = apply_rotary_pos_emb_single(
+                        query_states, 
+                        cos, 
+                        sin, 
+                        position_ids[:, -q_len:],
+                    )
+                    key_states = apply_rotary_pos_emb_single(
+                        key_states, 
+                        cos, 
+                        sin, 
+                        position_ids,
+                    )
+                else:
+                    # cos, sin = self.rotary_emb(value_states, seq_len=position_length)
+                    # NOTE: grab all position embeddings
+                
+                    # TODO discard this part
+                    # cos, sin = self.rotary_emb(value_states, torch.arange(0, position_length, device=key_states.device)[None, :])
+                    
+                    ### Shift Pos: query pos is min(cache_size, idx)
+                    query_states = apply_rotary_pos_emb_single(
+                        query_states, 
+                        cos, 
+                        sin, 
+                        torch.clamp_max(position_ids, kv_seq_len) if self.config.shift_q_pos else position_ids,
+                    )
+                    key_states = apply_rotary_pos_emb_single(
+                        key_states, 
+                        cos, 
+                        sin, 
+                        position_ids,
+                    )
+                    # os.makedirs('./cache/llama/h2o_5/', exist_ok=True)
+                    # torch.save(
+                    #     {
+                    #         'k':key_states,
+                    #         'v':value_states
+                    #     }
+                    #     ,f'./cache/llama/h2o_5/l{self.layer_idx}_i{i}_rope.pth')
+
+                    if past_key_value is not None: # and len(past_key_value) != 0:
+                        # sin and cos are specific to RoPE models; cache_position needed for the static cache
+                        cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+                        key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs) # TODO check past_key_value update
+                        # reuse k, v, self_attention
+                        # key_states = torch.cat([past_key_value[0], key_states], dim=2)
+                        # value_states = torch.cat([past_key_value[1], value_states], dim=2)
+                    # past_key_value = (key_states, value_states) if use_cache else None
+                # torch.save(
+                #     {
+                #         'k':key_states,
+                #         'v':value_states
+                #     }
+                #     ,f'./cache/llama/h2o_5/l{self.layer_idx}_i{i}_pkv.pth')
+                # repeat k/v heads if n_kv_heads < n_heads
+                key_states = repeat_kv(key_states, self.num_key_value_groups)
+                value_states = repeat_kv(value_states, self.num_key_value_groups)
+
+            # torch.save(
+            #     {
+            #         'k':key_states,
+            #         'v':value_states
+            #     }
+            #     ,f'./cache/llama/h2o_5/l{self.layer_idx}_i{i}_repeat.pth')
+            ########
+            # print('kv_seq_len', kv_seq_len)
+            # print('q ', query_states)
+            # print('q ', query_states.shape)
+            # print('k ', key_states)
+            # print('k ', key_states.shape)
+            # print('v ', value_states)
+            # print('v ', value_states.shape)
+            attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(
+                self.head_dim
+            )
+            
+            if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
+                raise ValueError(
+                    f"Attention weights should be of size {(bsz, self.num_heads, q_len, kv_seq_len)}, but is"
+                    f" {attn_weights.size()}"
+                )
+
+            if attention_mask is not None:
+                if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
+                    raise ValueError(
+                        f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
+                    )
+                attn_weights = attn_weights + attention_mask
+            
+            # upcast attention to fp32
+            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(
+                query_states.dtype
+            )
+            
+            # print('attn_w ', attn_weights)
+            # print('attn_w ', attn_weights.shape)
+
+            kv_hh = self.kv_cache(past_key_value, attn_weights.detach().clone(), self.num_key_value_groups, reduction_for_gqa, self.layer_idx) # , hh_score TODO check
+            
+            # torch.save(
+            #     {
+            #         'k':key_states,
+            #         'v':value_states
+            #     }
+            #     ,f'./cache/llama/h2o_5/l{self.layer_idx}_i{i}_kvhh.pth')
+            
+            if kv_hh[0] == True:
+                _, k_hh_recent, v_hh_recent = kv_hh
+                # breakpoint()
+                
+                past_key_value.key_cache[self.layer_idx] = k_hh_recent
+                past_key_value.value_cache[self.layer_idx] = v_hh_recent
+                # breakpoint()
+                
+            # torch.save(
+            #     {
+            #         'k':key_states,
+            #         'v':value_states
+            #     }
+            #     ,f'./cache/llama/h2o_5/l{self.layer_idx}_i{i}_pkw_update.pth')
+            attn_output = torch.matmul(attn_weights, value_states)
+            #######
+            if compute_final_attn_output:
+                if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
+                    raise ValueError(
+                        f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
+                        f" {attn_output.size()}"
+                    )
+                    
+                attn_output = attn_output.transpose(1, 2).contiguous()
+                attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
+
+                if self.config.pretraining_tp > 1:
+                    attn_output = attn_output.split(
+                        self.hidden_size // self.config.pretraining_tp, dim=2
+                    )
+                    o_proj_slices = self.o_proj.weight.split(
+                        self.hidden_size // self.config.pretraining_tp, dim=1
+                    )
+                    attn_output = sum(
+                        [
+                            F.linear(attn_output[i], o_proj_slices[i])
+                            for i in range(self.config.pretraining_tp)
+                        ]
+                    )
+                else:
+                    attn_output = self.o_proj(attn_output)
+
+                if not output_attentions:
+                    attn_weights = None
+            if os.getenv('DEBUG', '0')=='1':
+                torch.save(
+                    {'q': query_states,
+                    'k':key_states,
+                    'v':value_states,
+                    'kv_seq_len': kv_seq_len,
+                    'past_key_value':past_key_value,
+                    'past_key_values_length':past_key_value[self.layer_idx][0].shape[-2],
+                    'attention_mask':attention_mask,
+                    'cache_kwargs':cache_kwargs,
+                    'attn_weights':attn_weights,
+                    'kv_hh':kv_hh,
+                    'attn_output':attn_output,
+                    'hh_score':self.kv_cache.hh_score,
+                    },
+                    f'./cache/llama/h2o_5/l{self.layer_idx}_i{i}.pth')
+                input(f'i{i} stored. press enter to continue >>> ')
+            # print('attn_output ', attn_output)
+            # print('attn_output ', attn_output.shape)
+            return attn_output, attn_weights, past_key_value # , hh_score
+    elif os.getenv('H2O_DEFAULT', '3') == '6': # NOTE include static cache
+        def _h2o_attention(
+            self,
+            query_states,
+            key_states,
+            value_states,
+            
+            position_ids,
+            past_key_value,
+            output_attentions,
+            use_cache,
+            # hh_score,
+            
+            bsz,
+            cache_position,
+            reduction_for_gqa=None,
+            kv_seq_len=None,
+            decoding_loop_for_prefill=True,
+            compute_final_attn_output=True,
+            
+            cos=None,
+            sin=None,
+            cache_size=None,
+            i=None
+            # position_embeddings=None,
+        ):
+            # print('[6] --------')
+            q_len = query_states.shape[-2]
             kv_seq_len = key_states.shape[-2]
-        
-            if past_key_value is not None and len(past_key_value) > self.layer_idx: # TODO check this for decoding
-                kv_seq_len += past_key_value[self.layer_idx][0].shape[-2]
-
-            position_length = kv_seq_len
-
-            if not position_ids[0].nelement() > 1: # NOTE to support batch - check
-                # import warnings
-                # warnings.warn(f'pos_id {position_ids.shape}, pos_id_n_elem = {position_ids[0].nelement()}; assumed all batch contains same id')
-                if position_length < position_ids[0].item()+1: # NOTE can be greater than kv_seq_len, after eviction starts
-                    position_length = position_ids[0].item()+1
             
-            """
-            NOTE: H2O has 3 variants
-            1. No touch on RoPE: official implementation
-            2. shift query position of RoPE by min(k, pos idx): Implementation details in the official implementation that not API available. They describe this only with code comment
-            3. StreamingLLM style RoPE: my own implementation
-            """
-
-            if self.config.streaming:
-                if past_key_value is not None: # and len(past_key_value) != 0:
-                    # sin and cos are specific to RoPE models; cache_position needed for the static cache
-                    cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-                    key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs) # TODO check past_key_value update
-                    # reuse k, v, self_attention
-                    # key_states = torch.cat([past_key_value[0], key_states], dim=2)
-                    # value_states = torch.cat([past_key_value[1], value_states], dim=2)
-                # past_key_value = (key_states, value_states) if use_cache else None
-                
-                position_ids = torch.arange(0, key_states.shape[-2], device=key_states.device)[None, :]
-                
-                # cos, sin = self.rotary_emb(value_states, seq_len=position_length)
-                # NOTE: grab all position embeddings
-                # cos, sin = self.rotary_emb(value_states, position_ids)
-                
-                ### Shift Pos: query pos is min(cache_size, idx)
-                query_states = apply_rotary_pos_emb_single(
-                    query_states, 
-                    cos, 
-                    sin, 
-                    position_ids[:, -q_len:],
-                )
-                key_states = apply_rotary_pos_emb_single(
-                    key_states, 
-                    cos, 
-                    sin, 
-                    position_ids,
-                )
+            if (past_key_value is not None and past_key_value.get_seq_length(self.layer_idx).item() > 0):
+                if past_key_value.get_seq_length(self.layer_idx).item() < cache_size:
+                    past_key_values_length = past_key_value.get_seq_length(self.layer_idx).item()
+                else:
+                    past_key_values_length = cache_size
+                kv_seq_len += past_key_values_length
             else:
-                # cos, sin = self.rotary_emb(value_states, seq_len=position_length)
-                # NOTE: grab all position embeddings
+                past_key_values_length = 0
+
+            if decoding_loop_for_prefill:
+                assert compute_final_attn_output == True
+                attention_mask = _make_causal_mask(
+                    bsz=bsz,
+                    tgt_len=q_len,
+                    past_key_values_length=past_key_values_length, # if (past_key_value is not None and past_key_value.get_seq_length(self.layer_idx).item() > 0) else 0,
+                    dtype=query_states.dtype,
+                    device=query_states.device,
+                )
             
-                # TODO discard this part
-                # cos, sin = self.rotary_emb(value_states, torch.arange(0, position_length, device=key_states.device)[None, :])
+                # if past_key_value is not None and past_key_value.get_seq_length(self.layer_idx).item() > 0: # TODO check this for decoding
+                #     kv_seq_len += past_key_value[self.layer_idx][0].shape[-2]
+
+                # position_length = kv_seq_len
+
+                # if not position_ids[0].nelement() > 1: # NOTE to support batch - check
+                #     # import warnings
+                #     # warnings.warn(f'pos_id {position_ids.shape}, pos_id_n_elem = {position_ids[0].nelement()}; assumed all batch contains same id')
+                #     if position_length < position_ids[0].item()+1: # NOTE can be greater than kv_seq_len, after eviction starts
+                #         position_length = position_ids[0].item()+1
                 
-                ### Shift Pos: query pos is min(cache_size, idx)
-                query_states = apply_rotary_pos_emb_single(
-                    query_states, 
-                    cos, 
-                    sin, 
-                    torch.clamp_max(position_ids, kv_seq_len) if self.config.shift_q_pos else position_ids,
+                """
+                NOTE: H2O has 3 variants
+                1. No touch on RoPE: official implementation
+                2. shift query position of RoPE by min(k, pos idx): Implementation details in the official implementation that not API available. They describe this only with code comment
+                3. StreamingLLM style RoPE: my own implementation
+                """
+
+                if self.config.streaming:
+                    if past_key_value is not None: # and len(past_key_value) != 0:
+                        # sin and cos are specific to RoPE models; cache_position needed for the static cache
+                        cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+                        key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs) # TODO check past_key_value update
+                        # (cache_position[-1]).item() : position where the key, value is placed
+                        assert torch.sum(key_states[:, :, (cache_position[-1]).item()+1:, :]).item() == 0
+                        assert torch.sum(value_states[:, :, (cache_position[-1]).item()+1:, :]).item() == 0
+                        
+                        key_states = key_states[:, :, :(cache_position[-1]).item()+1, :]
+                        value_states = value_states[:, :, :(cache_position[-1]).item()+1, :]
+                        
+                        # reuse k, v, self_attention
+                        # key_states = torch.cat([past_key_value[0], key_states], dim=2)
+                        # value_states = torch.cat([past_key_value[1], value_states], dim=2)
+                    # past_key_value = (key_states, value_states) if use_cache else None
+                    
+                    position_ids = torch.arange(0, key_states.shape[-2], device=key_states.device)[None, :]
+                    
+                    # cos, sin = self.rotary_emb(value_states, seq_len=position_length)
+                    # NOTE: grab all position embeddings
+                    # cos, sin = self.rotary_emb(value_states, position_ids)
+                    
+                    ### Shift Pos: query pos is min(cache_size, idx)
+                    query_states = apply_rotary_pos_emb_single(
+                        query_states, 
+                        cos, 
+                        sin, 
+                        position_ids[:, -q_len:],
+                    )
+                    key_states = apply_rotary_pos_emb_single(
+                        key_states, 
+                        cos, 
+                        sin, 
+                        position_ids,
+                    )
+                else:
+                    # cos, sin = self.rotary_emb(value_states, seq_len=position_length)
+                    # NOTE: grab all position embeddings
+                
+                    # TODO discard this part
+                    # cos, sin = self.rotary_emb(value_states, torch.arange(0, position_length, device=key_states.device)[None, :])
+                    
+                    ### Shift Pos: query pos is min(cache_size, idx)
+                    query_states = apply_rotary_pos_emb_single(
+                        query_states, 
+                        cos, 
+                        sin, 
+                        torch.clamp_max(position_ids, kv_seq_len) if self.config.shift_q_pos else position_ids,
+                    )
+                    key_states = apply_rotary_pos_emb_single(
+                        key_states, 
+                        cos, 
+                        sin, 
+                        position_ids,
+                    )
+                    os.makedirs('./cache/llama/h2o_6/', exist_ok=True)
+                    # torch.save(
+                    #     {
+                    #         'k':key_states,
+                    #         'v':value_states
+                    #     }
+                    #     ,f'./cache/llama/h2o_6/l{self.layer_idx}_i{i}_rope.pth')
+
+                    if past_key_value is not None: # and len(past_key_value) != 0:
+                        # sin and cos are specific to RoPE models; cache_position needed for the static cache
+                        cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+                        key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs) # TODO check past_key_value update
+                        # breakpoint()
+                        # print('----')
+                        # print('key_cache ', torch.sum(key_states[:, :, (cache_position[-1]).item():, :]).item())
+                        # print('value_cache ', torch.sum(value_states[:, :, (cache_position[-1]).item():, :]).item())
+                        # breakpoint()
+                        
+                        assert torch.sum(key_states[:, :, (cache_position[-1]).item()+1:, :]).item() == 0
+                        assert torch.sum(value_states[:, :, (cache_position[-1]).item()+1:, :]).item() == 0
+                        
+                        key_states = key_states[:, :, :(cache_position[-1]).item()+1, :]
+                        value_states = value_states[:, :, :(cache_position[-1]).item()+1, :]
+                        
+                        # reuse k, v, self_attention
+                        # key_states = torch.cat([past_key_value[0], key_states], dim=2)
+                        # value_states = torch.cat([past_key_value[1], value_states], dim=2)
+                    # past_key_value = (key_states, value_states) if use_cache else None
+                # torch.save(
+                #     {
+                #         'k':key_states,
+                #         'v':value_states
+                #     }
+                #     ,f'./cache/llama/h2o_6/l{self.layer_idx}_i{i}_pkv.pth')
+                # repeat k/v heads if n_kv_heads < n_heads
+                key_states = repeat_kv(key_states, self.num_key_value_groups)
+                value_states = repeat_kv(value_states, self.num_key_value_groups)
+                
+            # torch.save(
+            #     {
+            #         'k':key_states,
+            #         'v':value_states
+            #     }
+            #     ,f'./cache/llama/h2o_6/l{self.layer_idx}_i{i}_repeat.pth')
+
+            ########
+            # print('kv_seq_len', kv_seq_len)
+            # print('q ', query_states)
+            # print('q ', query_states.shape)
+            # print('k ', key_states)
+            # print('k ', key_states.shape)
+            # print('v ', value_states)
+            # print('v ', value_states.shape)
+            
+            attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(
+                self.head_dim
+            )
+            
+            if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
+                raise ValueError(
+                    f"Attention weights should be of size {(bsz, self.num_heads, q_len, kv_seq_len)}, but is"
+                    f" {attn_weights.size()}"
                 )
-                key_states = apply_rotary_pos_emb_single(
-                    key_states, 
-                    cos, 
-                    sin, 
-                    position_ids,
+
+            if attention_mask is not None:
+                if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
+                    raise ValueError(
+                        f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
+                    )
+                attn_weights = attn_weights + attention_mask
+            
+            # upcast attention to fp32
+            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(
+                query_states.dtype
+            )
+            
+            
+            # print('attn_w ', attn_weights)
+            # print('attn_w ', attn_weights.shape)
+
+            kv_hh = self.kv_cache(past_key_value, attn_weights.detach().clone(), self.num_key_value_groups, reduction_for_gqa, self.layer_idx, cache_position) # , hh_score TODO check
+            
+            # torch.save(
+            #     {
+            #         'k':key_states,
+            #         'v':value_states
+            #     }
+            #     ,f'./cache/llama/h2o_6/l{self.layer_idx}_i{i}_kvhh.pth')
+            
+            # if kv_hh[0] == True:
+            #     _, k_hh_recent, v_hh_recent = kv_hh
+            #     kv_cache_size = k_hh_recent.shape[-2]
+                
+            #     # breakpoint()
+                
+            #     past_key_value.key_cache[self.layer_idx].copy_(torch.cat((k_hh_recent, torch.zeros_like(past_key_value.key_cache[self.layer_idx][:, :, kv_cache_size:, :])), dim=-2), non_blocking=True)
+            #     past_key_value.value_cache[self.layer_idx].copy_(torch.cat((v_hh_recent, torch.zeros_like(past_key_value.value_cache[self.layer_idx][:, :, kv_cache_size:, :])), dim=-2), non_blocking=True)
+            #     # breakpoint()
+                
+                
+            #     assert torch.sum(past_key_value.key_cache[self.layer_idx][:, :, kv_cache_size:, :]).item() == 0
+            #     assert torch.sum(past_key_value.value_cache[self.layer_idx][:, :, kv_cache_size:, :]).item() == 0
+                
+                # past_key_value.key_cache[self.layer_idx][:, :, :kv_cache_size, :].copy_(k_hh_recent, non_blocking=True)
+                # past_key_value.value_cache[self.layer_idx][:, :, :kv_cache_size, :].copy_(v_hh_recent, non_blocking=True)
+                # past_key_value.key_cache[self.layer_idx] = k_hh_recent
+                # past_key_value.value_cache[self.layer_idx] = v_hh_recent
+            
+            # torch.save(
+            #     {
+            #         'k':key_states,
+            #         'v':value_states
+            #     }
+            #     ,f'./cache/llama/h2o_6/l{self.layer_idx}_i{i}_pkw_update.pth')
+            
+            attn_output = torch.matmul(attn_weights, value_states)
+            #######
+            if compute_final_attn_output:
+                if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
+                    raise ValueError(
+                        f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
+                        f" {attn_output.size()}"
+                    )
+                    
+                attn_output = attn_output.transpose(1, 2).contiguous()
+                attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
+
+                if self.config.pretraining_tp > 1:
+                    attn_output = attn_output.split(
+                        self.hidden_size // self.config.pretraining_tp, dim=2
+                    )
+                    o_proj_slices = self.o_proj.weight.split(
+                        self.hidden_size // self.config.pretraining_tp, dim=1
+                    )
+                    attn_output = sum(
+                        [
+                            F.linear(attn_output[i], o_proj_slices[i])
+                            for i in range(self.config.pretraining_tp)
+                        ]
+                    )
+                else:
+                    attn_output = self.o_proj(attn_output)
+
+                if not output_attentions:
+                    attn_weights = None
+            
+            # print('attn_output ', attn_output)
+            # print('attn_output ', attn_output.shape)
+            
+            if kv_hh[0] == True:
+                _, k_hh_recent, v_hh_recent = kv_hh
+                kv_cache_size = k_hh_recent.shape[-2]
+                
+                past_key_value.key_cache[self.layer_idx].copy_(torch.cat((k_hh_recent, torch.zeros_like(past_key_value.key_cache[self.layer_idx][:, :, kv_cache_size:, :])), dim=-2), non_blocking=True)
+                past_key_value.value_cache[self.layer_idx].copy_(torch.cat((v_hh_recent, torch.zeros_like(past_key_value.value_cache[self.layer_idx][:, :, kv_cache_size:, :])), dim=-2), non_blocking=True)
+                
+                assert torch.sum(past_key_value.key_cache[self.layer_idx][:, :, kv_cache_size:, :]).item() == 0
+                assert torch.sum(past_key_value.value_cache[self.layer_idx][:, :, kv_cache_size:, :]).item() == 0
+            
+            # if os.getenv('DEBUG', '0')=='1':
+            #     torch.save(
+            #         {'q': query_states,
+            #         'k':key_states,
+            #         'v':value_states,
+            #         'kv_seq_len': kv_seq_len,
+            #         'past_key_value':past_key_value,
+            #         'past_key_values_length':past_key_values_length,
+            #         'attention_mask':attention_mask,
+            #         'cache_kwargs':cache_kwargs,
+            #         'attn_weights':attn_weights,
+            #         'kv_hh':kv_hh,
+            #         'attn_output':attn_output,
+            #         'hh_score':self.kv_cache.hh_score,
+            #         },
+            #         f'./cache/llama/h2o_6/l{self.layer_idx}_i{i}.pth')
+            #     input(f'i{i} stored. press enter to continue >>> ')
+            
+            return attn_output, attn_weights, past_key_value # , hh_score
+    else:
+        def _h2o_attention(
+            self,
+            query_states,
+            key_states,
+            value_states,
+            
+            position_ids,
+            past_key_value,
+            output_attentions,
+            use_cache,
+            # hh_score,
+            
+            bsz,
+            cache_position,
+            reduction_for_gqa=None,
+            kv_seq_len=None,
+            decoding_loop_for_prefill=True,
+            compute_final_attn_output=True,
+            
+            cos=None,
+            sin=None,
+            cache_size=None
+            # position_embeddings=None,
+        ):
+            q_len = query_states.shape[-2]
+            
+            # print('past_key_values ', past_key_value)
+            # print('past_key_value_seq ', past_key_value.get_seq_length(self.layer_idx).item())
+            
+            if decoding_loop_for_prefill:
+                assert compute_final_attn_output == True
+                
+                kv_seq_len = key_states.shape[-2]
+
+                if past_key_value is not None and past_key_value.get_seq_length(self.layer_idx).item() > 0:# past_key_value.get_seq_length(self.layer_idx).item() >= (cache_position[-1]).item(): # TODO check this for decoding
+                    if past_key_value.get_seq_length(self.layer_idx).item() < cache_size:
+                        kv_seq_len += past_key_value.get_seq_length(self.layer_idx).item()
+                    else:
+                        kv_seq_len += cache_size
+                    past_key_values_length = kv_seq_len - 1
+                else:
+                    past_key_values_length = 0
+                    
+                    # print('-----')
+                    # print('kv_seq_bef ', kv_seq_len)
+                    # print('seen ', past_key_value.get_seq_length(self.layer_idx).item())
+                    # kv_seq_len += past_key_value.get_seq_length(self.layer_idx).item()
+
+                # position_length = kv_seq_len
+
+                # if not position_ids[0].nelement() > 1: # NOTE to support batch - check
+                #     # import warnings
+                #     # warnings.warn(f'pos_id {position_ids.shape}, pos_id_n_elem = {position_ids[0].nelement()}; assumed all batch contains same id')
+                #     if position_length < position_ids[0].item()+1: # NOTE can be greater than kv_seq_len, after eviction starts
+                #         position_length = position_ids[0].item()+1
+
+                attention_mask = _make_causal_mask(
+                    bsz=bsz,
+                    tgt_len=q_len,
+                    past_key_values_length=past_key_values_length,
+                    dtype=query_states.dtype,
+                    device=query_states.device,
+                )
+                
+                """
+                NOTE: H2O has 3 variants
+                1. No touch on RoPE: official implementation
+                2. shift query position of RoPE by min(k, pos idx): Implementation details in the official implementation that not API available. They describe this only with code comment
+                3. StreamingLLM style RoPE: my own implementation
+                """
+
+                if self.config.streaming:
+                    if past_key_value is not None: # and len(past_key_value) != 0:
+                        # sin and cos are specific to RoPE models; cache_position needed for the static cache
+                        cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+                        key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs) # TODO check past_key_value update
+                        # reuse k, v, self_attention
+                        # key_states = torch.cat([past_key_value[0], key_states], dim=2)
+                        # value_states = torch.cat([past_key_value[1], value_states], dim=2)
+                    # past_key_value = (key_states, value_states) if use_cache else None
+                    
+                    position_ids = torch.arange(0, key_states.shape[-2], device=key_states.device)[None, :]
+                    
+                    # cos, sin = self.rotary_emb(value_states, seq_len=position_length)
+                    # NOTE: grab all position embeddings
+                    # cos, sin = self.rotary_emb(value_states, position_ids)
+                    
+                    ### Shift Pos: query pos is min(cache_size, idx)
+                    query_states = apply_rotary_pos_emb_single(
+                        query_states, 
+                        cos, 
+                        sin, 
+                        position_ids[:, -q_len:],
+                    )
+                    key_states = apply_rotary_pos_emb_single(
+                        key_states, 
+                        cos, 
+                        sin, 
+                        position_ids,
+                    )
+                else:
+                    # cos, sin = self.rotary_emb(value_states, seq_len=position_length)
+                    # NOTE: grab all position embeddings
+                
+                    # TODO discard this part
+                    # cos, sin = self.rotary_emb(value_states, torch.arange(0, position_length, device=key_states.device)[None, :])
+                    
+                    ### Shift Pos: query pos is min(cache_size, idx)
+                    query_states = apply_rotary_pos_emb_single(
+                        query_states, 
+                        cos, 
+                        sin, 
+                        torch.clamp_max(position_ids, kv_seq_len) if self.config.shift_q_pos else position_ids,
+                    )
+                    key_states = apply_rotary_pos_emb_single(
+                        key_states, 
+                        cos, 
+                        sin, 
+                        position_ids,
+                    )
+
+                    if past_key_value is not None: # and len(past_key_value) != 0:
+                        # sin and cos are specific to RoPE models; cache_position needed for the static cache
+                        cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+                        key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs) # TODO check past_key_value update
+                        if os.getenv('H2O_DEFAULT', '3') == '4':
+                            key_states = key_states[:, :, :(cache_position[-1]).item()+1, :]
+                            value_states = value_states[:, :, :(cache_position[-1]).item()+1, :]
+                        # reuse k, v, self_attention
+                        # key_states = torch.cat([past_key_value[0], key_states], dim=2)
+                        # value_states = torch.cat([past_key_value[1], value_states], dim=2)
+                    # past_key_value = (key_states, value_states) if use_cache else None
+
+                # repeat k/v heads if n_kv_heads < n_heads
+                key_states = repeat_kv(key_states, self.num_key_value_groups)
+                value_states = repeat_kv(value_states, self.num_key_value_groups)
+
+            ########
+            
+            attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(
+                self.head_dim
+            )
+            
+            # print('>>>>')
+            # print('q ', query_states.shape)
+            # print('k ', key_states.shape)
+            # print('attn_weights ', attn_weights.shape)
+            # print('kv_seq ', kv_seq_len)
+            # print('attn_mask ', attention_mask.shape)
+            
+            if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
+                raise ValueError(
+                    f"Attention weights should be of size {(bsz, self.num_heads, q_len, kv_seq_len)}, but is"
+                    f" {attn_weights.size()}"
                 )
 
-                if past_key_value is not None: # and len(past_key_value) != 0:
-                    # sin and cos are specific to RoPE models; cache_position needed for the static cache
-                    cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-                    key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs) # TODO check past_key_value update
-                    # reuse k, v, self_attention
-                    # key_states = torch.cat([past_key_value[0], key_states], dim=2)
-                    # value_states = torch.cat([past_key_value[1], value_states], dim=2)
-                # past_key_value = (key_states, value_states) if use_cache else None
-
-            # repeat k/v heads if n_kv_heads < n_heads
-            key_states = repeat_kv(key_states, self.num_key_value_groups)
-            value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-        ########
-        
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(
-            self.head_dim
-        )
-        
-        if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
-            raise ValueError(
-                f"Attention weights should be of size {(bsz, self.num_heads, q_len, kv_seq_len)}, but is"
-                f" {attn_weights.size()}"
+            if attention_mask is not None:
+                if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
+                    raise ValueError(
+                        f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
+                    )
+                attn_weights = attn_weights + attention_mask
+            
+            # upcast attention to fp32
+            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(
+                query_states.dtype
             )
 
-        if attention_mask is not None:
-            if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
-                raise ValueError(
-                    f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
-                )
-            attn_weights = attn_weights + attention_mask
-        
-        # upcast attention to fp32
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(
-            query_states.dtype
-        )
-
-        kv_hh = self.kv_cache(past_key_value, attn_weights.detach().clone(), self.num_key_value_groups, reduction_for_gqa, self.layer_idx) # , hh_score TODO check
-        if kv_hh[0] == True:
-            _, k_hh_recent, v_hh_recent = kv_hh
-            past_key_value.key_cache[self.layer_idx] = k_hh_recent
-            past_key_value.value_cache[self.layer_idx] = v_hh_recent
-
-        attn_output = torch.matmul(attn_weights, value_states)
-        
-        #######
-        if compute_final_attn_output:
-            if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
-                raise ValueError(
-                    f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
-                    f" {attn_output.size()}"
-                )
+            kv_hh = self.kv_cache(past_key_value, attn_weights.detach().clone(), self.num_key_value_groups, reduction_for_gqa, self.layer_idx, cache_position) # , hh_score TODO check
+            if kv_hh[0] == True:
+                _, k_hh_recent, v_hh_recent = kv_hh
+                kv_cache_size = k_hh_recent.shape[-2]
                 
-            attn_output = attn_output.transpose(1, 2).contiguous()
-            attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
+                past_key_value.key_cache[self.layer_idx][:, :, :kv_cache_size, :].copy_(k_hh_recent, non_blocking=True)
+                past_key_value.value_cache[self.layer_idx][:, :, :kv_cache_size, :].copy_(v_hh_recent, non_blocking=True)
+                # past_key_value.key_cache[self.layer_idx] = k_hh_recent
+                # past_key_value.value_cache[self.layer_idx] = v_hh_recent
 
-            if self.config.pretraining_tp > 1:
-                attn_output = attn_output.split(
-                    self.hidden_size // self.config.pretraining_tp, dim=2
-                )
-                o_proj_slices = self.o_proj.weight.split(
-                    self.hidden_size // self.config.pretraining_tp, dim=1
-                )
-                attn_output = sum(
-                    [
-                        F.linear(attn_output[i], o_proj_slices[i])
-                        for i in range(self.config.pretraining_tp)
-                    ]
-                )
-            else:
-                attn_output = self.o_proj(attn_output)
+            attn_output = torch.matmul(attn_weights, value_states)
+            
+            #######
+            if compute_final_attn_output:
+                if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
+                    raise ValueError(
+                        f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
+                        f" {attn_output.size()}"
+                    )
+                    
+                attn_output = attn_output.transpose(1, 2).contiguous()
+                attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
-            if not output_attentions:
-                attn_weights = None
-        
-        return attn_output, attn_weights, past_key_value # , hh_score
+                if self.config.pretraining_tp > 1:
+                    attn_output = attn_output.split(
+                        self.hidden_size // self.config.pretraining_tp, dim=2
+                    )
+                    o_proj_slices = self.o_proj.weight.split(
+                        self.hidden_size // self.config.pretraining_tp, dim=1
+                    )
+                    attn_output = sum(
+                        [
+                            F.linear(attn_output[i], o_proj_slices[i])
+                            for i in range(self.config.pretraining_tp)
+                        ]
+                    )
+                else:
+                    attn_output = self.o_proj(attn_output)
+
+                if not output_attentions:
+                    attn_weights = None
+            
+            
+            
+            return attn_output, attn_weights, past_key_value # , hh_score
 
     def forward(
         self,
