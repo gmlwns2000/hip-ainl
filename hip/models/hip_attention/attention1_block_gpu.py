@@ -1600,6 +1600,7 @@ def landmark_attention(q: Tensor, k: Tensor, v: Tensor):
     is_mem = torch.arange(0, seqlen_k, device=q.device) % block_size == (block_size - 1)
     return fused_landmark_attention(q, k, v, is_mem, block_size=block_size)
 
+@torch.inference_mode(True)
 def streaming_attention(q: Tensor, k: Tensor, v: Tensor, cos: Tensor, sin: Tensor, window_size: int):
     from hip.models.sink_attention.sink_attention import sink_attention
     
@@ -1719,10 +1720,9 @@ def main_latency_benchmark():
         q = q.view(BSIZE, -1, QUERY_SIZE, HID).contiguous()
         k = k.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).contiguous()
         v = v.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).contiguous()
-    elif METHOD in ['h2o', 'h2o_stream']: # TODO NOTE args.head_groups automatically detected??
-        q = q.view(BSIZE, -1, QUERY_SIZE, HID).contiguous() # [128, 32, 32k, 128]
-        k = k.view(BSIZE, -1, CHUNK_LEN * DUPS, HID)[:, ::args.head_groups, :, :].contiguous() # [128, 8, 32k, 128]
-        v = v.view(BSIZE, -1, CHUNK_LEN * DUPS, HID)[:, ::args.head_groups, :, :].contiguous() # [128, 8, 32k, 128]
+    elif METHOD in ['streaming']:
+        k = k.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).repeat(q.shape[0] // k.shape[0], 1, 1, 1).view(q.shape[0], -1, q.shape[2])
+        v = v.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).repeat(q.shape[0] // v.shape[0], 1, 1, 1).view(q.shape[0], -1, q.shape[2])
     
     q = q.cuda()
     k = k.cuda()
