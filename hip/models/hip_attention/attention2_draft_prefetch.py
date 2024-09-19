@@ -2469,32 +2469,32 @@ def sum_all_diagonal(scores: Tensor):
     
     return reduced_score.to(scores.dtype)
 
-@triton.autotune(
-    configs=get_masking_iteration_draft_cuda_fused_configs(),
-    key=[
-        'BLOCK_BK',
-        'BLOCK_SIZE_K', 
-        'BLOCK_SIZE_Q', 
-        'HID',
-        'TDST_NEXT_POWER_OF_2',
-    ],
-    restore_value=[
-        'KEY_ACCESS_LOG',
-        'KEY_ACCESS_COUNT',
-        'INDICES',
-        'KS',
-        'GROUP_SIZE',
-        'DUPPED_INDICES',
-        'DUPPED_GROUP_SIZE',
-        'SCORES', 
-        'SCORES_FINAL',
-        'PROBS',
-        'TOPK_IDS',
-        'T_GROUP_SIZE',
-    ],
-    warmup=200,
-    rep=1000,
-)
+# @triton.autotune(
+#     configs=get_masking_iteration_draft_cuda_fused_configs(),
+#     key=[
+#         'BLOCK_BK',
+#         'BLOCK_SIZE_K', 
+#         'BLOCK_SIZE_Q', 
+#         'HID',
+#         'TDST_NEXT_POWER_OF_2',
+#     ],
+#     restore_value=[
+#         'KEY_ACCESS_LOG',
+#         'KEY_ACCESS_COUNT',
+#         'INDICES',
+#         'KS',
+#         'GROUP_SIZE',
+#         'DUPPED_INDICES',
+#         'DUPPED_GROUP_SIZE',
+#         'SCORES', 
+#         'SCORES_FINAL',
+#         'PROBS',
+#         'TOPK_IDS',
+#         'T_GROUP_SIZE',
+#     ],
+#     warmup=200,
+#     rep=1000,
+# )
 @triton.jit
 def masking_iteration_draft_cuda_fused(
     Q, 
