@@ -1917,10 +1917,11 @@ def main_latency_benchmark():
                                 
                     else:
                         # compute_final_attn_output = False
+                        k_cache, v_cache = past_key_value[0]
                         attn_output, attn_weights= h2o_attention._h2o_attention_itself(
                             q,
-                            k,
-                            v,
+                            torch.cat([k_cache, k[:, :, -1:, :]], dim=2),
+                            torch.cat([v_cache, v[:, :, -1:, :]], dim=2),
                             
                             bsz, num_heads, head_dim, q_len, kv_seq_len,
                             attention_mask,
