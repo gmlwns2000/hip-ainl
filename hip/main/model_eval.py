@@ -22,6 +22,7 @@ from hip.main.jobs.stream import job_stream
 from hip.main.jobs.stream_demo import job_stream_demo
 from hip.main.jobs.greedy_replace import job_greedy_replace
 from hip.main.jobs.passkey import job_passkey
+from hip.main.jobs.generation import job_generation
 from hip.models.modeling_llama import LlamaForCausalLM, LlamaConfig
 from hip.models.qwen.modeling_qwen2 import Qwen2ForCausalLM, Qwen2Config
 from hip.utils import seed
@@ -171,6 +172,10 @@ def load_model(args):
     config.shift_q_pos = args.shift_q_pos
     config.streaming = args.streaming
     config.reduction_for_gqa = args.reduce_for_gqa
+    if args.job not in ['generation', 'stream']:
+        config.is_decoding = False
+    else:
+        config.is_decoding = True
         
     if args.method == 'tova':
         from transformers.models.llama.modeling_llama import LlamaForCausalLM as OriginalLlamaForCausalLM
@@ -192,8 +197,7 @@ def load_model(args):
         ) if not args.no_quantize else None,
         torch_dtype=infer_dtype,
         # torch_dtype=torch.float32,
-        trust_remote_code=True,
-        token='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'
+        trust_remote_code=True
     )
     
     if args.method == 'tova':
@@ -279,7 +283,7 @@ def main():
     
     args = eval_args()
     
-    assert args.job in ['ppl', 'stream', 'mmlu', 'bench_single_layer', 'booksum', 'merge_lora', 'stream_demo', 'greedy_replace', 'passkey']
+    assert args.job in ['ppl', 'stream', 'mmlu', 'bench_single_layer', 'booksum', 'merge_lora', 'stream_demo', 'greedy_replace', 'passkey', 'generation']
     
     model, tokenizer, device = load_model(args)
 
@@ -301,6 +305,8 @@ def main():
         job_greedy_replace(args, model, tokenizer, device)
     elif args.job == 'passkey':
         job_passkey(args, model, tokenizer, device)
+    elif args.job == 'generation':
+        job_generation(args, model, tokenizer, device)
     else:
         raise Exception()
 

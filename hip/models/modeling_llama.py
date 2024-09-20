@@ -875,7 +875,7 @@ class LlamaCustomAttention(LlamaAttention):
                     # hh_score=hh_score,
                     bsz=bsz,
                     cache_position=cache_position,
-                    reduce_for_gqa=self.config.reduction_for_gqa,
+                    reduction_for_gqa=self.config.reduction_for_gqa,
                     kv_seq_len=kv_seq_len,
                     decoding_loop_for_prefill=True,
                     compute_final_attn_output=True, # compute_final_attn_output
@@ -908,9 +908,7 @@ class LlamaCustomAttention(LlamaAttention):
             else:
                 cos, sin = position_embeddings
             
-            if q_len > mask_k:
-                compute_final_attn_output = True
-                
+            if not self.config.is_decoding:
                 position_ids_k = position_ids[:, :mask_k]
                 position_ids_loop = position_ids[:, mask_k:]
                 
@@ -940,7 +938,7 @@ class LlamaCustomAttention(LlamaAttention):
                     reduction_for_gqa=self.config.reduction_for_gqa,
                     kv_seq_len=kv_seq_len,
                     decoding_loop_for_prefill=True,
-                    compute_final_attn_output=compute_final_attn_output,
+                    compute_final_attn_output=True,
                     
                     cos=cos,
                     sin=sin,
@@ -973,7 +971,7 @@ class LlamaCustomAttention(LlamaAttention):
                         reduction_for_gqa=self.config.reduction_for_gqa,
                         kv_seq_len=kv_seq_len,
                         decoding_loop_for_prefill=True,
-                        compute_final_attn_output=compute_final_attn_output,
+                        compute_final_attn_output=True,
                         
                         cos=cos,
                         sin=sin,
@@ -1020,7 +1018,7 @@ class LlamaCustomAttention(LlamaAttention):
                     # hh_score=hh_score,
                     bsz=bsz,
                     cache_position=cache_position,
-                    reduce_for_gqa=self.config.reduction_for_gqa,
+                    reduction_for_gqa=self.config.reduction_for_gqa,
                     kv_seq_len=kv_seq_len,
                     decoding_loop_for_prefill=True,
                     compute_final_attn_output=True, # compute_final_attn_output
@@ -1087,7 +1085,7 @@ class LlamaCustomAttention(LlamaAttention):
                     reduction_for_gqa=self.config.reduction_for_gqa,
                     kv_seq_len=kv_seq_len,
                     decoding_loop_for_prefill=True,
-                    compute_final_attn_output=compute_final_attn_output,
+                    compute_final_attn_output=True,
                     
                     cos=cos,
                     sin=sin,
