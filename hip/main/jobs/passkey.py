@@ -46,6 +46,9 @@ def job_passkey(args, model, tokenizer, device):
                     attention_mask=None,
                     pad_token_id=tokenizer.eos_token_id,
                 )
+                for m in model.modules():
+                    if hasattr(m, '_clean_cache'):
+                        m._clean_cache()
                 output = output[:, input_ids.shape[1]:]
     
         truth = tokenizer.batch_decode(target_ids)
