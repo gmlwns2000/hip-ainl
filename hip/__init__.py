@@ -1,3 +1,6 @@
+import os
+if 'H2O_DEFAULT' not in os.environ:
+    os.environ['H2O_DEFAULT'] = '5'
 print('------------------- CAUTION, YOU NEED TO REVERT THIS BRANCH FOR PRODUCTION -------------------')
 
 # version 1.0

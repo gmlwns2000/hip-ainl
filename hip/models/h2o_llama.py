@@ -272,9 +272,21 @@ class H2OKVCache_LayerWise:
         self.v_seq_dim = v_seq_dim
         self.hh_score = None
 
-    def __call__(self, past_key_values, attn_score_cache, num_key_value_groups=None, reduction_for_gqa=None, layer_idx=None, cache_position=None): # , hh_score=None
+    def __call__(
+        self, 
+        past_key_values, 
+        attn_score_cache, 
+        num_key_value_groups=None, 
+        reduction_for_gqa=None, 
+        layer_idx=None, 
+        cache_position=None,
+        num_new_tokens=None,
+    ): # , hh_score=None
         if os.getenv('H2O_DEFAULT', '3') == '1':
-            self._update_hh_score(attn_score_cache, num_key_value_groups, reduction_for_gqa) # , hh_score
+            self._update_hh_score(
+                attn_score_cache, 
+                num_key_value_groups, 
+                reduction_for_gqa) # , hh_score
 
             if past_key_values is None:
                 return None
@@ -330,7 +342,12 @@ class H2OKVCache_LayerWise:
             
             self.hh_score = torch.gather(self.hh_score, -1, keep_idx.expand(bsz, num_heads, self.cache_size))
         elif os.getenv('H2O_DEFAULT', '3')=='5':
-            self._update_hh_score(attn_score_cache, num_key_value_groups, reduction_for_gqa) # , hh_score
+            self._update_hh_score(
+                attn_score_cache, 
+                num_key_value_groups, 
+                reduction_for_gqa,
+                num_new_tokens=num_new_tokens,
+            ) # , hh_score
             
             if past_key_values is None or len(past_key_values) <= layer_idx: # TODO purpose?
                 return (False, None)
@@ -451,7 +468,7 @@ class H2OKVCache_LayerWise:
 
         return (k_hh_recent, v_hh_recent)
 
-    def _update_hh_score(self, attn_score_cache, num_key_value_groups=None, reduction_for_gqa=None): # , hh_score
+    def _update_hh_score(self, attn_score_cache, num_key_value_groups=None, reduction_for_gqa=None, num_new_tokens=None): # , hh_score
         if os.getenv('H2O_DEFAULT', '3') == '1': #  or os.getenv('H2O_DEFAULT', '3') == '-1'
             num_new_tokens = attn_score_cache.shape[2]
 
@@ -462,7 +479,9 @@ class H2OKVCache_LayerWise:
                 attn_score_cache[:, :-num_new_tokens] += self.hh_score
                 self.hh_score = attn_score_cache
         else:
-            num_new_tokens = attn_score_cache.shape[2]
+            # num_new_tokens = attn_score_cache.shape[2]
+            assert num_new_tokens is not None
+            assert attn_score_cache.ndim == 4
             attn_score_cache = attn_score_cache.sum(2)
             
             N, H, T = attn_score_cache.shape
@@ -594,38 +613,84 @@ class H2OLlamaAttention(nn.Module):
         reduction_for_gqa,
         layer_idx,
     ):            
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(
-            head_dim
-        )
         
-        if attn_weights.size() != (bsz, num_heads, q_len, kv_seq_len):
-            raise ValueError(
-                f"Attention weights should be of size {(bsz, num_heads, q_len, kv_seq_len)}, but is"
-                f" {attn_weights.size()}"
-            )
+        # if attn_weights.size() != (bsz, num_heads, q_len, kv_seq_len):
+        #     raise ValueError(
+        #         f"Attention weights should be of size {(bsz, num_heads, q_len, kv_seq_len)}, but is"
+        #         f" {attn_weights.size()}"
+        #     )
 
-        if attention_mask is not None:
-            if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
-                raise ValueError(
-                    f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
-                )
-            attn_weights = attn_weights + attention_mask
+        # if attention_mask is not None:
+        #     if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
+        #         raise ValueError(
+        #             f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
+        #         )
+        #     attn_weights = attn_weights + attention_mask
         
         # upcast attention to fp32
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(
-            query_states.dtype
-        )
-
-        kv_hh = self.kv_cache(past_key_value, attn_weights.detach().clone(), num_key_value_groups, reduction_for_gqa, layer_idx) # , hh_score TODO check
         
+        N, HEAD, TDST, HID = query_states.shape
+        N, HEAD_KV, TSRC, HID = key_states.shape
+        assert key_states.shape == value_states.shape
+        
+        attn_weight_accumulator = torch.zeros(
+            (N, HEAD, 1, TSRC), 
+            dtype=torch.float32, 
+            device=query_states.device
+        )
+        
+        chunk_count = math.ceil((TDST * TSRC) / (2040 * 2048))
+        chunk_size = math.ceil(TDST / chunk_count)
+        
+        attn_output_final = torch.empty_like(query_states)
+        
+        for i_tdst_start in range(0, TDST, chunk_size):
+            i_tdst_end = min(i_tdst_start + chunk_size, TDST)
+            attn_weights = torch.matmul(
+                query_states[:, :, i_tdst_start:i_tdst_end], 
+                key_states[:, :, :i_tdst_end + TSRC - TDST].transpose(2, 3)
+            ) / math.sqrt(head_dim)
+            if TDST > 1:
+                idx_tdst = torch.arange(i_tdst_start, i_tdst_end, device=query_states.device)
+                idx_tsrc = torch.arange(0, i_tdst_end, device=query_states.device) + TSRC - TDST
+                attn_weights = torch.where(
+                    idx_tsrc[None, None, :, None] <= idx_tdst[None, None, :, None],
+                    attn_weights,
+                    -32000.0
+                )
+            attn_weight_accumulator[:, :, :, :i_tdst_end + TSRC - TDST].add_(attn_weights.sum(2, keepdim=True))
+            attn_weights = nn.functional.softmax(
+                attn_weights,
+                dim=-1, 
+                dtype=torch.float32
+            ).to(query_states.dtype)
+            attn_output = torch.matmul(attn_weights, value_states[:, :, :i_tdst_end + TSRC - TDST])
+            attn_output_final.index_copy_(
+                dim=2,
+                index=torch.arange(i_tdst_start, i_tdst_end, device=attn_output.device),
+                source=attn_output
+            )
+            attn_output_final = attn_output
+
+        attn_weights = attn_weight_accumulator
+        attn_output = attn_output_final
+        
+        kv_hh = self.kv_cache(
+            past_key_value, 
+            attn_weights, 
+            num_key_value_groups, 
+            reduction_for_gqa, 
+            layer_idx,
+            num_new_tokens=TDST,
+        ) # , hh_score TODO check
+                
         if kv_hh[0] == True:
             _, k_hh_recent, v_hh_recent = kv_hh
             
             past_key_value.key_cache[layer_idx] = k_hh_recent
             past_key_value.value_cache[layer_idx] = v_hh_recent
-
-        attn_output = torch.matmul(attn_weights, value_states)
-        return attn_output, attn_weights
+        
+        return attn_output, None
     
     # NOTE DEFAULT 3 original well working one
     if os.getenv('H2O_DEFAULT', '3') == '3':
