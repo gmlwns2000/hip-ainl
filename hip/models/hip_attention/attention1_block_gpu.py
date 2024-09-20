@@ -1746,7 +1746,7 @@ def main_latency_benchmark():
     # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     # os.environ["TORCH_USE_CUDA_DSA"] = '1'
     
-    if METHOD in ['h2o', 'h2o_stream']:
+    if METHOD in ['h2o', 'h2o_stream'] and os.getenv('H2O_DEFAULT', '3') =='5':
         config = LlamaConfig.from_pretrained(model_id)
         config.hh_size = 4
         config.recent_size = args.k
@@ -1757,15 +1757,39 @@ def main_latency_benchmark():
         if METHOD == 'h2o_stream':
             config.streaming = True
         
+        mask_k = args.k
+                    
+        bsz, num_heads, q_len, head_dim = q.shape
+        _, kv_num_heads, kv_seq_len, _ = k.shape
+        
+        if q_len == 1:
+            config.is_decoding=True
+        else:
+            config.is_decoding=False
+        
+        attention_mask = torch.zeros(bsz, 1, q_len, kv_seq_len).to(q.device)
+        num_key_value_groups = num_heads // kv_num_heads
+        
+        from transformers import DynamicCache
+        
+        past_key_value = DynamicCache()
+        if QUERY_SIZE == 1:
+            past_key_value = DynamicCache()
+            for i in range(config.num_hidden_layers):
+                past_key_value.key_cache.append(k)
+                past_key_value.value_cache.append(v)
+            
+            from hip.models.h2o_llama import repeat_kv
+            k = repeat_kv(k, num_key_value_groups)
+            v = repeat_kv(v, num_key_value_groups)
+                
         h2o_attention = H2OLlamaAttention(config, layer_idx=0).to(q.device).to(q.dtype) # TODO set layer_idx?
         
         h2o_attention.o_proj = torch.nn.Identity
-        mask_k = args.k
         
-        bsz, _, q_len, hid = q.shape
-        
-        cos = sin = torch.randn(bsz, q_len, hid).to('cuda').to(q.dtype)
-        
+        bsz, num_heads, q_len, head_dim = q.shape
+        cos = sin = torch.randn(bsz, q_len, head_dim).to('cuda').to(q.dtype)
+
         position_ids = torch.arange(0, QUERY_SIZE).repeat(bsz, 1).to(q.device)
         cache_position = torch.arange(QUERY_SIZE).to(q.device)
         
@@ -1779,7 +1803,7 @@ def main_latency_benchmark():
         cuda=True, 
     ).to('cuda').to(q.dtype)
     
-    def sample(state = None):
+    def sample(state = None, past_key_value = None):
         with torch.no_grad():
             if METHOD in ['torch', 'none', 'default']:
                 torch_attention(q, k, v)
@@ -1800,15 +1824,15 @@ def main_latency_benchmark():
                     scale=1
                 )
             elif METHOD in ['h2o', 'h2o_stream']:                
-                assert QUERY_SIZE > 1
-                assert QUERY_SIZE == CHUNK_LEN * DUPS
+                
                 
                 if os.getenv('H2O_DEFAULT', '3')=='5':
-                    from transformers import DynamicCache
-                    
                     q_len = QUERY_SIZE
                     if q_len > mask_k:
-                        compute_final_attn_output = True
+                        assert QUERY_SIZE > 1
+                        assert QUERY_SIZE == CHUNK_LEN * DUPS
+
+                        # compute_final_attn_output = True
                         
                         position_ids_k = position_ids[:, :mask_k]
                         position_ids_loop = position_ids[:, mask_k:]
@@ -1838,7 +1862,7 @@ def main_latency_benchmark():
                             reduction_for_gqa=h2o_attention.config.reduction_for_gqa,
                             kv_seq_len=None,
                             decoding_loop_for_prefill=True,
-                            compute_final_attn_output=compute_final_attn_output,
+                            compute_final_attn_output=False,
                             
                             cos=cos,
                             sin=sin,
@@ -1869,7 +1893,7 @@ def main_latency_benchmark():
                                 reduction_for_gqa=h2o_attention.config.reduction_for_gqa,
                                 kv_seq_len=None,
                                 decoding_loop_for_prefill=True,
-                                compute_final_attn_output=compute_final_attn_output,
+                                compute_final_attn_output=False,
                                 
                                 cos=cos,
                                 sin=sin,
@@ -1883,27 +1907,40 @@ def main_latency_benchmark():
                                 
                     else:
                         # compute_final_attn_output = False
-                        
-                        attn_output, attn_weights, past_key_value = h2o_attention._h2o_attention( # , hh_score
+                        attn_output, attn_weights= h2o_attention._h2o_attention_itself(
                             q,
                             k,
                             v,
                             
-                            position_ids,
-                            past_key_value=past_key_value,
-                            output_attentions=False,
-                            use_cache=True,
-                            # hh_score=hh_score,
-                            bsz=bsz,
-                            cache_position=cache_position,
-                            reduce_for_gqa=h2o_attention.config.reduction_for_gqa,
-                            kv_seq_len=None,
-                            decoding_loop_for_prefill=True,
-                            compute_final_attn_output=True, # compute_final_attn_output
+                            bsz, num_heads, head_dim, q_len, kv_seq_len,
+                            attention_mask,
                             
-                            cos=cos,
-                            sin=sin
+                            past_key_value,
+                            num_key_value_groups,
+                            h2o_attention.config.reduction_for_gqa,
+                            layer_idx=0,
                         )
+                        # past_key_value = DynamicCache()
+                        # attn_output, attn_weights, past_key_value = h2o_attention._h2o_attention( # , hh_score
+                        #     q,
+                        #     k,
+                        #     v,
+                            
+                        #     position_ids,
+                        #     past_key_value=past_key_value,
+                        #     output_attentions=False,
+                        #     use_cache=True,
+                        #     # hh_score=hh_score,
+                        #     bsz=bsz,
+                        #     cache_position=cache_position,
+                        #     reduction_for_gqa=h2o_attention.config.reduction_for_gqa,
+                        #     kv_seq_len=None,
+                        #     decoding_loop_for_prefill=True,
+                        #     compute_final_attn_output=True, # compute_final_attn_output
+                            
+                        #     cos=cos,
+                        #     sin=sin
+                        # )
                     
                     # attn_output, attn_weights, past_key_value = h2o_attention._h2o_attention(
                     #     q, k, v,
@@ -2006,20 +2043,20 @@ def main_latency_benchmark():
         
         if i < 5:
             s.wait_stream(torch.cuda.current_stream())
-            state = sample()
+            state = sample(past_key_value)
             if args.refresh_interval > 0:
-                sample(state)
+                sample(state, past_key_value)
             torch.cuda.current_stream().wait_stream(s)
         elif args.trace:
-            sample()
+            sample(past_key_value)
         elif graph is None:
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
-                state = sample()
+                state = sample(past_key_value)
             if args.refresh_interval > 0:
                 graph_stateful = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(graph_stateful):
-                    sample(state)
+                    sample(state, past_key_value)
         else:
             if args.refresh_interval > 0:
                 if (i % args.refresh_interval) == 0:

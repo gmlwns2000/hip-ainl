@@ -225,7 +225,7 @@ def _make_causal_mask(
         mask = torch.cat([torch.zeros(tgt_len, past_key_values_length, dtype=dtype, device=device), mask], dim=-1)
     return mask[None, None, :, :].expand(bsz, 1, tgt_len, tgt_len + past_key_values_length)
 
-def apply_rotary_pos_emb_single(x, cos, sin, position_ids, unsqueeze_dim=1):
+def apply_rotary_pos_emb_single(x, cos, sin, position_ids, unsqueeze_dim=1, is_decoding=False):
     if os.getenv('H2O_DEFAULT', '3') == '1':# or os.getenv('H2O_DEFAULT', '3') == '-1':
         # cos, sin [1, seq_len, dim] -> [seq_len, dim]
         
@@ -244,8 +244,13 @@ def apply_rotary_pos_emb_single(x, cos, sin, position_ids, unsqueeze_dim=1):
         bsz, pos_t = position_ids.shape
         assert sin.shape[-1] == cos_dim
         assert x.shape[-2] == pos_t
-        cos = torch.gather(cos, 1, position_ids.unsqueeze(-1).expand(bsz, pos_t, cos_dim)).unsqueeze(1)  # [bs, 1, seq_len, dim]
-        sin = torch.gather(sin, 1, position_ids.unsqueeze(-1).expand(bsz, pos_t, cos_dim)).unsqueeze(1)  # [bs, 1, seq_len, dim]
+
+        if not is_decoding:
+            cos = torch.gather(cos, 1, position_ids.unsqueeze(-1).expand(bsz, pos_t, cos_dim)).unsqueeze(1)  # [bs, 1, seq_len, dim]
+            sin = torch.gather(sin, 1, position_ids.unsqueeze(-1).expand(bsz, pos_t, cos_dim)).unsqueeze(1)  # [bs, 1, seq_len, dim]
+        else:
+            cos = cos.unsqueeze(unsqueeze_dim)
+            sin = sin.unsqueeze(unsqueeze_dim)
         
         x_embed = (x * cos) + (rotate_half(x) * sin) # [bs, head, pos_t, dim]
         return x_embed
@@ -575,6 +580,53 @@ class H2OLlamaAttention(nn.Module):
     def _clean_cache(self):
         self.kv_cache._clean_scores()
     
+    def _h2o_attention_itself(
+        self,
+        query_states,
+        key_states,
+        value_states,
+        
+        bsz, num_heads, head_dim, q_len, kv_seq_len,
+        attention_mask,
+        
+        past_key_value, 
+        num_key_value_groups,
+        reduction_for_gqa,
+        layer_idx,
+    ):            
+        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(
+            head_dim
+        )
+        
+        if attn_weights.size() != (bsz, num_heads, q_len, kv_seq_len):
+            raise ValueError(
+                f"Attention weights should be of size {(bsz, num_heads, q_len, kv_seq_len)}, but is"
+                f" {attn_weights.size()}"
+            )
+
+        if attention_mask is not None:
+            if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
+                raise ValueError(
+                    f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
+                )
+            attn_weights = attn_weights + attention_mask
+        
+        # upcast attention to fp32
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(
+            query_states.dtype
+        )
+
+        kv_hh = self.kv_cache(past_key_value, attn_weights.detach().clone(), num_key_value_groups, reduction_for_gqa, layer_idx) # , hh_score TODO check
+        
+        if kv_hh[0] == True:
+            _, k_hh_recent, v_hh_recent = kv_hh
+            
+            past_key_value.key_cache[layer_idx] = k_hh_recent
+            past_key_value.value_cache[layer_idx] = v_hh_recent
+
+        attn_output = torch.matmul(attn_weights, value_states)
+        return attn_output, attn_weights
+    
     # NOTE DEFAULT 3 original well working one
     if os.getenv('H2O_DEFAULT', '3') == '3':
         def _h2o_attention(
@@ -787,7 +839,7 @@ class H2OLlamaAttention(nn.Module):
             q_len = query_states.shape[-2]
             
             if decoding_loop_for_prefill:
-                assert compute_final_attn_output == True
+                # assert compute_final_attn_output == True
                 attention_mask = _make_causal_mask(
                     bsz=bsz,
                     tgt_len=q_len,
@@ -838,12 +890,14 @@ class H2OLlamaAttention(nn.Module):
                         cos, 
                         sin, 
                         position_ids[:, -q_len:],
+                        is_decoding=self.config.is_decoding
                     )
                     key_states = apply_rotary_pos_emb_single(
                         key_states, 
                         cos, 
                         sin, 
                         position_ids,
+                        is_decoding=self.config.is_decoding
                     )
                 else:
                     # cos, sin = self.rotary_emb(value_states, seq_len=position_length)
@@ -858,12 +912,14 @@ class H2OLlamaAttention(nn.Module):
                         cos, 
                         sin, 
                         torch.clamp_max(position_ids, kv_seq_len) if self.config.shift_q_pos else position_ids,
+                        is_decoding=self.config.is_decoding
                     )
                     key_states = apply_rotary_pos_emb_single(
                         key_states, 
                         cos, 
                         sin, 
                         position_ids,
+                        is_decoding=self.config.is_decoding
                     )
                     # os.makedirs('./cache/llama/h2o_5/', exist_ok=True)
                     # torch.save(
@@ -898,62 +954,20 @@ class H2OLlamaAttention(nn.Module):
             #     }
             #     ,f'./cache/llama/h2o_5/l{self.layer_idx}_i{i}_repeat.pth')
             ########
-            # print('kv_seq_len', kv_seq_len)
-            # print('q ', query_states)
-            # print('q ', query_states.shape)
-            # print('k ', key_states)
-            # print('k ', key_states.shape)
-            # print('v ', value_states)
-            # print('v ', value_states.shape)
-            attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(
-                self.head_dim
+            attn_output, attn_weights= self._h2o_attention_itself(
+                query_states,
+                key_states,
+                value_states,
+                
+                bsz, self.num_heads, self.head_dim, q_len, kv_seq_len,
+                attention_mask,
+                
+                past_key_value, 
+                self.num_key_value_groups,
+                reduction_for_gqa,
+                self.layer_idx,
             )
             
-            if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
-                raise ValueError(
-                    f"Attention weights should be of size {(bsz, self.num_heads, q_len, kv_seq_len)}, but is"
-                    f" {attn_weights.size()}"
-                )
-
-            if attention_mask is not None:
-                if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
-                    raise ValueError(
-                        f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
-                    )
-                attn_weights = attn_weights + attention_mask
-            
-            # upcast attention to fp32
-            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(
-                query_states.dtype
-            )
-            
-            # print('attn_w ', attn_weights)
-            # print('attn_w ', attn_weights.shape)
-
-            kv_hh = self.kv_cache(past_key_value, attn_weights.detach().clone(), self.num_key_value_groups, reduction_for_gqa, self.layer_idx) # , hh_score TODO check
-            
-            # torch.save(
-            #     {
-            #         'k':key_states,
-            #         'v':value_states
-            #     }
-            #     ,f'./cache/llama/h2o_5/l{self.layer_idx}_i{i}_kvhh.pth')
-            
-            if kv_hh[0] == True:
-                _, k_hh_recent, v_hh_recent = kv_hh
-                # breakpoint()
-                
-                past_key_value.key_cache[self.layer_idx] = k_hh_recent
-                past_key_value.value_cache[self.layer_idx] = v_hh_recent
-                # breakpoint()
-                
-            # torch.save(
-            #     {
-            #         'k':key_states,
-            #         'v':value_states
-            #     }
-            #     ,f'./cache/llama/h2o_5/l{self.layer_idx}_i{i}_pkw_update.pth')
-            attn_output = torch.matmul(attn_weights, value_states)
             #######
             if compute_final_attn_output:
                 if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
