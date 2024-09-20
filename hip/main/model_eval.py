@@ -172,7 +172,7 @@ def load_model(args):
     config.shift_q_pos = args.shift_q_pos
     config.streaming = args.streaming
     config.reduction_for_gqa = args.reduce_for_gqa
-    if args.job not in ['generation', 'stream']:
+    if args.job not in ['generation', 'stream', 'passkey']:
         config.is_decoding = False
     else:
         config.is_decoding = True
