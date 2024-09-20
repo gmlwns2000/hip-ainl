@@ -1721,12 +1721,12 @@ def main_latency_benchmark():
         k = k.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).contiguous()
         v = v.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).contiguous()
     elif METHOD in ['h2o', 'h2o_stream']: # TODO NOTE args.head_groups automatically detected??
+        k = k.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).repeat(1, q.shape[0] // k.shape[0], 1, 1).contiguous() # [128, 8, 32k, 128]
+        v = v.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).repeat(1, q.shape[0] // v.shape[0], 1, 1).contiguous() # [128, 8, 32k, 128]
         q = q.view(BSIZE, -1, QUERY_SIZE, HID).contiguous() # [128, 32, 32k, 128]
-        k = k.view(BSIZE, -1, CHUNK_LEN * DUPS, HID)[:, ::args.head_groups, :, :].contiguous() # [128, 8, 32k, 128]
-        v = v.view(BSIZE, -1, CHUNK_LEN * DUPS, HID)[:, ::args.head_groups, :, :].contiguous() # [128, 8, 32k, 128]
-    elif METHOD in ['streaming', 'hyper']:
-        k = k.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).repeat(q.shape[0] // k.shape[0], 1, 1, 1).view(q.shape[0], -1, q.shape[2])
-        v = v.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).repeat(q.shape[0] // v.shape[0], 1, 1, 1).view(q.shape[0], -1, q.shape[2])
+    elif METHOD in ['streaming', 'hyper',]:
+        k = k.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).repeat(1, q.shape[0] // k.shape[0], 1, 1).view(q.shape[0], -1, q.shape[2])
+        v = v.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).repeat(1, q.shape[0] // v.shape[0], 1, 1).view(q.shape[0], -1, q.shape[2])
     
     q = q.cuda()
     k = k.cuda()
@@ -1772,7 +1772,8 @@ def main_latency_benchmark():
         else:
             config.is_decoding=False
         
-        attention_mask = torch.zeros(bsz, 1, q_len, kv_seq_len).to(q.device)
+        # attention_mask = torch.zeros(bsz, 1, q_len, kv_seq_len).to(q.device)
+        attention_mask = None
         num_key_value_groups = num_heads // kv_num_heads
         
         from transformers import DynamicCache
@@ -1836,7 +1837,8 @@ def main_latency_benchmark():
                 
                 if os.getenv('H2O_DEFAULT', '3')=='5':
                     q_len = QUERY_SIZE
-                    if q_len > mask_k:
+                    measure_decode_style = False
+                    if (q_len > mask_k) and measure_decode_style:
                         assert QUERY_SIZE > 1
                         assert QUERY_SIZE == CHUNK_LEN * DUPS
 
