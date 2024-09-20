@@ -725,13 +725,14 @@ class H2OLlamaAttention(nn.Module):
             
             if decoding_loop_for_prefill:
                 assert compute_final_attn_output == True
-                attention_mask = _make_causal_mask(
-                    bsz=bsz,
-                    tgt_len=q_len,
-                    past_key_values_length=past_key_value[self.layer_idx][0].shape[-2] if (past_key_value is not None and len(past_key_value) > self.layer_idx) else 0,
-                    dtype=query_states.dtype,
-                    device=query_states.device,
-                )
+                # attention_mask = _make_causal_mask(
+                #     bsz=bsz,
+                #     tgt_len=q_len,
+                #     past_key_values_length=past_key_value[self.layer_idx][0].shape[-2] if (past_key_value is not None and len(past_key_value) > self.layer_idx) else 0,
+                #     dtype=query_states.dtype,
+                #     device=query_states.device,
+                # )
+                attention_mask = None
                 
                 kv_seq_len = key_states.shape[-2]
             
