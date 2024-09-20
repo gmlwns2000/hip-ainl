@@ -668,7 +668,7 @@ class H2OLlamaAttention(nn.Module):
             attn_output_final.index_copy_(
                 dim=2,
                 index=torch.arange(i_tdst_start, i_tdst_end, device=attn_output.device),
-                source=attn_output
+                source=attn_output.to(attn_output_final.dtype)
             )
             attn_output_final = attn_output
 
