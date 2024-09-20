@@ -9,6 +9,7 @@ import torch.utils.checkpoint
 import torch.nn.functional as F
 
 # from transformers.models.llama.configuration_llama import LlamaConfig
+import tqdm
 from transformers.models.llama.modeling_llama import (
     LlamaAttention,
     rotate_half,
@@ -644,7 +645,7 @@ class H2OLlamaAttention(nn.Module):
         
         attn_output_final = torch.empty_like(query_states)
         
-        for i_tdst_start in range(0, TDST, chunk_size):
+        for i_tdst_start in tqdm.tqdm(range(0, TDST, chunk_size), leave=False, delay=1):
             i_tdst_end = min(i_tdst_start + chunk_size, TDST)
             attn_weights = torch.matmul(
                 query_states[:, :, i_tdst_start:i_tdst_end], 
@@ -654,7 +655,7 @@ class H2OLlamaAttention(nn.Module):
                 idx_tdst = torch.arange(i_tdst_start, i_tdst_end, device=query_states.device)
                 idx_tsrc = torch.arange(0, i_tdst_end, device=query_states.device) + TSRC - TDST
                 attn_weights = torch.where(
-                    idx_tsrc[None, None, :, None] <= idx_tdst[None, None, :, None],
+                    idx_tsrc[None, None, None, :] <= idx_tdst[None, None, :, None],
                     attn_weights,
                     -32000.0
                 )
@@ -665,12 +666,13 @@ class H2OLlamaAttention(nn.Module):
                 dtype=torch.float32
             ).to(query_states.dtype)
             attn_output = torch.matmul(attn_weights, value_states[:, :, :i_tdst_end + TSRC - TDST])
+            
             attn_output_final.index_copy_(
                 dim=2,
                 index=torch.arange(i_tdst_start, i_tdst_end, device=attn_output.device),
                 source=attn_output.to(attn_output_final.dtype)
             )
-            attn_output_final = attn_output
+            # attn_output_final = attn_output
 
         attn_weights = attn_weight_accumulator
         attn_output = attn_output_final
