@@ -674,6 +674,8 @@ class H2OLlamaAttention(nn.Module):
             )
             # attn_output_final = attn_output
 
+        print(attn_weights.shape)
+        
         attn_weights = attn_weight_accumulator
         attn_output = attn_output_final
         
