@@ -1750,6 +1750,7 @@ def main_latency_benchmark():
     # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     # os.environ["TORCH_USE_CUDA_DSA"] = '1'
     
+    past_key_value = None
     if METHOD in ['h2o', 'h2o_stream'] and os.getenv('H2O_DEFAULT', '3') =='5':
         config = LlamaConfig.from_pretrained(model_id)
         config.hh_size = 4
@@ -1789,7 +1790,10 @@ def main_latency_benchmark():
                 
         h2o_attention = H2OLlamaAttention(config, layer_idx=0).to(q.device).to(q.dtype) # TODO set layer_idx?
         
-        h2o_attention.o_proj = torch.nn.Identity
+        h2o_attention.q_proj = torch.nn.Identity()
+        h2o_attention.k_proj = torch.nn.Identity()
+        h2o_attention.v_proj = torch.nn.Identity()
+        h2o_attention.o_proj = torch.nn.Identity()
         
         bsz, num_heads, q_len, head_dim = q.shape
         cos = sin = torch.randn(bsz, q_len, head_dim).to('cuda').to(q.dtype)
@@ -2047,20 +2051,20 @@ def main_latency_benchmark():
         
         if i < 5:
             s.wait_stream(torch.cuda.current_stream())
-            state = sample(past_key_value)
+            state = sample(past_key_value=past_key_value)
             if args.refresh_interval > 0:
                 sample(state, past_key_value)
             torch.cuda.current_stream().wait_stream(s)
         elif args.trace:
-            sample(past_key_value)
+            sample(past_key_value=past_key_value)
         elif graph is None:
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
-                state = sample(past_key_value)
+                state = sample(past_key_value=past_key_value)
             if args.refresh_interval > 0:
                 graph_stateful = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(graph_stateful):
-                    sample(state, past_key_value)
+                    sample(state, past_key_value=past_key_value)
         else:
             if args.refresh_interval > 0:
                 if (i % args.refresh_interval) == 0:
