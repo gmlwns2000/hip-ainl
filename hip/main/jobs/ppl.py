@@ -16,6 +16,9 @@ from peft import get_peft_model, prepare_model_for_kbit_training
 from hip.models.modeling_llama import LlamaForCausalLM, LlamaConfig
 from hip.utils import seed, get_bench
 
+def safe_name(txt: str):
+    return txt.replace('\\', '_').replace('/', '_').replace('.', '_')
+
 @torch.inference_mode
 def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, visualize, quite=False):
     try:
@@ -25,9 +28,9 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, visuali
         warnings.warn('vllm is not installed, this may cause error when you gave vLLM LLM')
     
     if not args.ensemble:
-        outfile = f'./cache/llama_eval/{args.name}/ppl_{args.method}_{args.model}_s{args.stride}_dl{args.dense_layers}_k{args.k}_bq{args.block_size_q}_bk{args.block_size_k}_ckpt{args.checkpoint is not None}.json'
+        outfile = f'./cache/llama_eval/{args.name}/ppl_{args.dataset}_{args.method}_{safe_name(args.model)}_s{args.stride}_dl{args.dense_layers}_k{args.k}_bq{args.block_size_q}_bk{args.block_size_k}_ckpt{args.checkpoint is not None}.json'
     else:
-        outfile = f'./cache/llama_eval/{args.name}/ppl_{args.method}_{args.model}_s{args.stride}_dl{args.dense_layers}_k{args.k}_bq{args.block_size_q}_bk{args.block_size_k}_ckpt{args.checkpoint is not None}_ensbn{args.ensemble_model_n}_{args.ensemble_method_final}_mft{args.ensemble_method_final_inter_thresh}_bmk{args.ensemble_method_final_bdd_mask_k}_lt{args.ensemble_layer_till}_r{args.ensemble_randomness}_twd{args.ensemble_timedim_wd}.json'
+        outfile = f'./cache/llama_eval/{args.name}/ppl_{args.dataset}_{args.method}_{safe_name(args.model)}_s{args.stride}_dl{args.dense_layers}_k{args.k}_bq{args.block_size_q}_bk{args.block_size_k}_ckpt{args.checkpoint is not None}_ensbn{args.ensemble_model_n}_{args.ensemble_method_final}_mft{args.ensemble_method_final_inter_thresh}_bmk{args.ensemble_method_final_bdd_mask_k}_lt{args.ensemble_layer_till}_r{args.ensemble_randomness}_twd{args.ensemble_timedim_wd}.json'
 
     pathlib.Path(outfile).parent.mkdir(parents=True, exist_ok=True)
     if not quite:
@@ -37,7 +40,7 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, visuali
         return
 
     os.makedirs('./cache', exist_ok=True)
-    cache_path = f'./cache/llama_eval_{args.dataset}_{args.model}.pth'
+    cache_path = f'./cache/llama_eval_{args.dataset}_{safe_name(args.model)}.pth'
     PG19_BOOK_INDEX = int(os.getenv('PG19_BOOK_INDEX', '-1'))
     if PG19_BOOK_INDEX >= 0:
         cache_path = 'none'
@@ -110,29 +113,60 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, visuali
                     samples = []
                     with tqdm(range(sample_counts), dynamic_ncols=True, position=1, disable=sample_counts <= 1) as pbar_sample:
                         for _ in pbar_sample:
-                            if args.method == 'h2o':
+                            if args.method in ['h2o', 'tova']:
                                 loss_sum = 0
                                 loss_count = 0
                                 prompt_ids = input_ids[:, :args.k]
                                 prompt_target_ids = target_ids[:, :args.k]
                                 decode_ids = input_ids[:, args.k:]
-                                # decode_target_ids = target_ids[:, args.k:]
+                                
+                                kwargs = {
+                                    'output_logits': True
+                                }
+                                
+                                past_key_values = None
+                                if args.method == 'tova':
+                                    from hip.models.tova.tova_cache import TOVACache
+                                    past_key_values = TOVACache(args.k)
+                                    del kwargs['output_logits']
+                                    prompt_ids = input_ids[:, :2]
+                                    prompt_target_ids = target_ids[:, :2]
+                                    decode_ids = input_ids[:, 2:]
+                                
                                 outputs = model(
                                     prompt_ids,
                                     labels=prompt_target_ids,
-                                    output_logits=True,
+                                    past_key_values=past_key_values,
+                                    **kwargs,
                                 )
                                 loss_sum += outputs.loss * prompt_ids.shape[-1]
                                 loss_count += prompt_ids.shape[-1]
                                 tqdm.write(f'H2O Loss: {math.exp(loss_sum / loss_count)}')
-                                for curr_idx in tqdm(range(decode_ids.shape[-1]), dynamic_ncols=True):
+                                
+                                for curr_idx in tqdm(range(decode_ids.shape[-1]-1), dynamic_ncols=True):
                                     curr_token = decode_ids[:, curr_idx:curr_idx+1]
+                                    if args.method == 'tova':
+                                        position_ids = torch.arange(
+                                            curr_idx, 
+                                            curr_idx+1, 
+                                            device=curr_token.device
+                                        )[None, :]
+                                    elif args.method == 'h2o':
+                                        position_ids = torch.arange(
+                                            prompt_ids.shape[1]+curr_idx, 
+                                            prompt_ids.shape[1]+curr_idx+1, 
+                                            device=curr_token.device
+                                        )[None, :]
+                                    else:
+                                        raise Exception()
+
                                     outputs = model(
                                         curr_token,
                                         # labels=curr_target,
-                                        output_logits=True,
-                                        position_ids=torch.arange(curr_idx, curr_idx+1, device=curr_token.device)[None, :],
-                                        past_key_values=outputs.past_key_values
+                                        # output_logits=True,
+                                        position_ids=position_ids,
+                                        past_key_values=outputs.past_key_values,
+                                        **kwargs,
                                     )
                                     loss = torch.nn.functional.cross_entropy(
                                         outputs.logits.view(-1, model.config.vocab_size), 
@@ -140,20 +174,26 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, visuali
                                     )
                                     loss_sum += loss * curr_token.shape[-1]
                                     loss_count += curr_token.shape[-1]
-                                    tqdm.write(f'H2O Loss idx={args.k+curr_idx+1}: {math.exp(loss_sum / loss_count)}')
+                                    tqdm.write(f'H2O Loss idx={prompt_ids.shape[1]+curr_idx+1}: {math.exp(loss_sum / loss_count)}')
+                                    
                                 for m in model.modules():
                                     if hasattr(m, '_clean_cache'):
                                         m._clean_cache()
+                                final_loss = loss_sum / loss_count
+                                samples.append(final_loss)
+                                pbar_sample.set_description(
+                                    f'ppl: {torch.exp(torch.stack(nlls + [final_loss.cpu()]).mean()).item():.6f}'
+                                )
                             else:
                                 outputs = model(
                                     input_ids,
                                     labels=target_ids,
                                     output_logits=False,
                                 )
-                            samples.append(outputs.loss)
-                            pbar_sample.set_description(
-                                f'ppl: {torch.exp(torch.stack(nlls + [outputs.loss.cpu()]).mean()).item():.6f}'
-                            )
+                                samples.append(outputs.loss)
+                                pbar_sample.set_description(
+                                    f'ppl: {torch.exp(torch.stack(nlls + [outputs.loss.cpu()]).mean()).item():.6f}'
+                                )
                     if len(samples) > 1:
                         print([f'{x.item():.5f}' for x in samples])
                     neg_log_likelihood = min(samples)

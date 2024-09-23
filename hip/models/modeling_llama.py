@@ -415,7 +415,9 @@ class LlamaCustomAttention(LlamaAttention):
         self.attention_method = 'none'
         self.tree_k = 512
         self.tree_block_size_q = 32
+        self.tree_block_stride_q = 2
         self.tree_block_size_k = 2
+        self.tree_block_stride_k = 1
         self.tree_using_context_avg = False
         self.tree_dense_queries = 0
         self.tree_last_dense_queries = None
@@ -631,7 +633,10 @@ class LlamaCustomAttention(LlamaAttention):
 
             # hip parameters
             tree_k=mask_k,
-            tree_block_size_q=self.tree_block_size_q, tree_block_size_k=self.tree_block_size_k,
+            tree_block_size_q=self.tree_block_size_q,
+            tree_block_stride_q=self.tree_block_stride_q, 
+            tree_block_size_k=self.tree_block_size_k,
+            tree_block_stride_k=self.tree_block_stride_k, 
             tree_dense_queries=self.tree_dense_queries,
             tree_last_dense_queries=self.tree_last_dense_queries,
             tree_sampling_method=self.tree_sampling_method,
@@ -1563,6 +1568,11 @@ class LlamaModel(LlamaPreTrainedModel):
             if attention_mask is not None and 0.0 in attention_mask:
                 return attention_mask
             return None
+        
+        # NOTE: NO NO NO ATTENTION MASK.
+        if attention_mask is not None and 0.0 in attention_mask:
+            return attention_mask
+        return None 
 
         # For SDPA, when possible, we will rely on its `is_causal` argument instead of its `attn_mask` argument, in
         # order to dispatch on Flash Attention 2. This feature is not compatible with static cache, as SDPA will fail

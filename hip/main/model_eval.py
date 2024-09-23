@@ -29,6 +29,7 @@ from hip.utils import seed
 
 def load_vllm_model(args: ArgsType):
     from vllm import LLM
+    from vllm.config import ObservabilityConfig
     
     if int(os.getenv('HIP_K', '512')) != args.k:
         warnings.warn(f'WARN!!! your command line argument of hip_k is {args.k} but environment variable is {os.getenv("HIP_K", "512")}. OS environment is higher priority.')
@@ -63,6 +64,8 @@ def load_vllm_model(args: ArgsType):
         'vllm_luxia21.4b': 'saltlux/luxia-21.4b-alignment-v1.1',
         "vllm_llama3_8b": 'unsloth/llama-3-8b-Instruct',
         'vllm_yi1.5_9b_32k': '01-ai/Yi-1.5-9B-32K',
+        "vllm_llama3.1_8b_instruct": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+        "vllm_llama3.1_8b_instruct_awq": "hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4",
     }
     if args.model in MODELS:
         model_id = MODELS[args.model]
@@ -81,12 +84,18 @@ def load_vllm_model(args: ArgsType):
         max_seq_len_to_capture=seq_len,
         max_model_len=seq_len,
         swap_space=0,
-        kv_cache_dtype='fp8_e5m2',
+        kv_cache_dtype=os.getenv('KV_CACHE_DTYPE', 'fp8_e5m2'),
         dtype='half',
-        gpu_memory_utilization=0.9,
+        gpu_memory_utilization=float(os.getenv('MEM_UTIL', '0.9')),
         tensor_parallel_size=torch.cuda.device_count(),
-        enforce_eager=os.environ.get('FORCE_EAGER','0')=='1',
+        enforce_eager=os.environ.get('ENFORCE_EAGER','0')=='1',
         trust_remote_code=True,
+        max_num_batched_tokens=seq_len,
+        enable_chunked_prefill=False,
+        # observability_config=ObservabilityConfig(
+        #     collect_model_forward_time=True, 
+        #     collect_model_execute_time=True
+        # )
     )
     
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
@@ -151,11 +160,15 @@ def load_model(args):
     if args.model.startswith('qwen'):
         ModelClass = Qwen2ForCausalLM
     if args.method == 'h2o':
-        from hip.models.h2o_llama import H2OLlamaForCausalLM
+        # from hip.models.h2o_llama_masked import H2OLlamaForCausalLM # this file does not use H2O, use this for validation
+        from hip.models.h2o_llama import H2OLlamaForCausalLM # this is real H2O
         ModelClass = H2OLlamaForCausalLM
-        config.hh_size = args.k // 2
-        config.recent_size = args.k // 2
+        config.hh_size = 4
+        config.recent_size = args.k
         config._attn_implementation = config.attn_implementation = 'eager'
+    if args.method == 'tova':
+        from transformers.models.llama.modeling_llama import LlamaForCausalLM as OriginalLlamaForCausalLM
+        ModelClass = OriginalLlamaForCausalLM
 
     model = ModelClass.from_pretrained(
         model_id,
@@ -176,13 +189,20 @@ def load_model(args):
         trust_remote_code=True,
     )
     
+    if args.method == 'tova':
+        from hip.models.tova.tova_cache import TOVACache
+        from hip.models.tova.convert_tova import enable_tova_caching
+        enable_tova_caching(model)
+    
     for m in model.modules():
         if hasattr(m, 'attention_method'):
             m.attention_method = args.method
             m.tree_k = args.k
             m.tree_block_size_q = args.block_size_q
+            m.tree_block_stride_q = args.block_stride_q
             m.tree_block_size_k = args.block_size_k
-            m.tree_using_context_avg = True
+            m.tree_block_stride_k = args.block_stride_k
+            m.tree_using_context_avg = False
             m.tree_dense_queries = args.dense_queries
             # m.tree_stride = args.stride
 

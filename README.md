@@ -8,7 +8,7 @@
 
 After installation, you can access to `hip` package from any project. `hip` is code name of HiP attention.
 
-[vLLM Implementation](https://github.com/DeepAuto-AI/vllm)
+[vLLM Implementation]({VLLM URL})
 
 ## TL;DR
 
@@ -95,7 +95,7 @@ output, _ = paged_hip_attention(
 ## How to clone the repository
 
 ```bash
-git clone git@github.com:DeepAuto-AI/hip-attention.git
+git clone {REPO URL}
 cd hip-attention
 ```
 
@@ -112,7 +112,7 @@ docker run --runtime nvidia --rm -it --ipc=host \
     -e 'HIP_K=512' \
     -e 'HIP_REFRESH_INTERVAL=8' \
     -e 'HIP_DENSE_LAYERS=4' \
-    deepauto/vllm-hip-openai:latest \
+    hip/vllm-hip-openai:latest \
         --port 8001 \
         --model Qwen/Qwen2-1.5B-Instruct \
         --tensor-parallel-size 1 \
@@ -127,9 +127,9 @@ Run commands below:
 
 ```bash
 cd ../
-git clone git@github.com:DeepAuto-AI/vllm.git
+git clone {REPO URL}
 cd vllm
-docker build . --build-context hip=../hip-attention --target vllm-openai --tag deepauto/vllm-hip-openai
+docker build . --build-context hip=../hip-attention --target vllm-openai --tag hip/vllm-hip-openai
 ```
 
 ## Setup without docker
@@ -290,6 +290,8 @@ python examples/openai_chat_image_stress.py --image-file="images/cherry_blossom.
 MEASURE_PEAK_MEMORY=0 DISABLE_SAMPLING=1 BENCHMARK_RUNNER=1 VLLM_ATTENTION_BACKEND=HIP_ATTN HIP_K=512 HIP_REFRESH_INTERVAL=8 HIP_DENSE_LAYERS=4 CUDA_VISIBLE_DEVICES=0,2 python3 -m vllm.entrypoints.openai.api_server --model microsoft/Phi-3-vision-128k-instruct --download-dir $HF_HOME --tensor-parallel-size 2 --kv-cache-dtype fp8_e5m2 --dtype half --gpu-memory-utilization 0.7 --max-model-len 32000 --max-num-seq 256 --trust-remote-code --image-input-type pixel_values --image-token-id -1 --image-input-shape "1008, 1344" --fake-image-input-shape "1, 16, 3, 336, 336" --image-feature-size 1921 --disable-log-request --max-seq-len-to-capture 32000 --swap-space 4 --port 8888
 
 python examples/openai_chat_image_client.py --image-file="images/cherry_blossom.jpg" --model="microsoft/Phi-3-vision-128k-instruct" --endpoint="http://localhost:8888/v1" --token="token-blw7qUu6tFQeO9Ch5LVrIBWN3PEx2isaf4Xp" --max-tokens 512
+
+VLLM_ATTENTION_BACKEND=HIP_ATTN CUDA_VISIBLE_DEVICES=1 python -c "import vllm; x=vllm.LLM('meta-llama/Meta-Llama-3.1-8B', enforce_eager=True, gpu_memory_utilization=0.7, max_model_len=1024).generate('User: hello, world\nAssistant: '); print(x[0].outputs[0].text)"
 ```
 
 ## Example training command

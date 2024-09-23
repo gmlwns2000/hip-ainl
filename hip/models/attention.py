@@ -21,10 +21,12 @@ def custom_attention(
     # hip parameters
     tree_k=512, 
     tree_block_size_q=32, 
+    tree_block_stride_q=2, 
     tree_block_size_k=2,
+    tree_block_stride_k=1,
     tree_dense_queries=0, 
     tree_last_dense_queries=0,
-    tree_sampling_method='first',
+    tree_sampling_method='last',
     tree_branching_method='half',
 
     # Latency optimization tweaks
@@ -285,6 +287,16 @@ def custom_attention(
             attn_output = tree_performer(q.to(torch.float32), k.to(torch.float32), v.to(torch.float32))
         attn_output = attn_output.to(q.dtype)
 
+    elif attention_method == 'dynamic_sparse_flash_attention':
+        from hip.models.dynamic_sparse_flash_attention import attention_fn as dynamic_sparse_flash
+        q = query_states  # / (query_states.shape[-1] ** 0.5)
+        k = key_states
+        v = value_states
+        
+        attn_output = dynamic_sparse_flash(
+            q[:, :, :, :128], k[:, :, :, :128], v[:, :, :, :128], nb_hash=16, attention_dropout=0
+        )
+
     elif attention_method == 'hip' or attention_method == 'hip' or attention_method == 'tree':
         q = query_states / (query_states.shape[-1] ** 0.5)
         k = key_states
@@ -380,7 +392,8 @@ def custom_attention(
                 # from hip.models.hip_attention.attention2_draft_causal_batch import hip_attention as hip_attention_draft_cpu
                 # from hip.models.hip_attention.attention2_draft_causal_batch_gpu import hip_attention as hip_attention_draft
                 # from hip.models.hip_attention.attention2_draft_causal_batch_gpu_fused import hip_attention as hip_attention_draft
-                from hip.models.hip_attention.attention2_draft_causal_batch_gpu_fused_vec import hip_attention as hip_attention_draft
+                # from hip.models.hip_attention.attention2_draft_causal_batch_gpu_fused_vec import hip_attention as hip_attention_draft
+                from hip import hip_attention_11
                 
                 # attn_output_hip, _ = hip_attention_draft_cpu(
                 #     q_hip,
@@ -420,20 +433,20 @@ def custom_attention(
                 if multi_branch_layer_list is not None: # TODO should not use list?
                     multi_branch_layer_list = torch.tensor(multi_branch_layer_list.replace(" ", "").split(","))
 
-                attn_output_hip, _ = hip_attention_draft(
+                attn_output_hip, _ = hip_attention_11(
                     q, k, v,
                     
                     mask_k=tree_k,
                     
                     block_size_q=tree_block_size_q,
-                    block_stride_q=2,
+                    block_stride_q=tree_block_stride_q,
                     block_size_k=tree_block_size_k,
-                    block_stride_k=max(2, tree_block_size_k // 2),
+                    block_stride_k=tree_block_stride_k,
                     # block_stride_k=1,
                     block_size_k_group=1,
                     
-                    sliding_window_size=int(os.getenv('HIP_DRAFT_SLIDING_WINDOW', '512')),
-                    sink_token_size=32,
+                    sliding_window_size=int(os.getenv('HIP_DRAFT_SLIDING_WINDOW', '256')),
+                    sink_token_size=16,
                     
                     using_extend=False,
                     rope_cos=rope_cos.squeeze(0) if rope_cos is not None else None,
@@ -442,7 +455,7 @@ def custom_attention(
                     self_extend_group_size=4,
                     
                     topk_head_group_size=1,
-                    sample_method=tree_sampling_method, # os.getenv('HIP_DRAFT_SAMPLING_METHOD', 'first'),
+                    sample_method=tree_sampling_method, # os.getenv('HIP_DRAFT_SAMPLING_METHOD', 'center'),
                     branch_method=tree_branching_method,# os.getenv('HIP_DRAFT_BRANCH_METHOD', 'half'),
                     
                     # this may good or not, but definatly great with self-extend
@@ -451,6 +464,7 @@ def custom_attention(
                     num_samples=1,
                     # NOTE: this is significant when topk_head_group_size > 1. otherwise, this make worse result
                     chunk_size=None,
+                    # BUG: union has bug now...
                     num_unions=1,
                     
                     score_head_group_size=1,
