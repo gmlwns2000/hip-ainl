@@ -1879,129 +1879,129 @@ def masking_iteration_draft_cuda_dup_and_score(
         dupped_indices_for_keys = dupped_indices
         # TODO random_per_iter
         if SAMPLE_METHOD == 'random':
-        offsets = tl.where(
-            dupped_group_sizes > 4,
-            0,
-            (
-                tl.randint(
-                    RAND_SEED, 
-                    dupped_indices + \
-                        tl.program_id(0) * 31 + \
-                        tl.program_id(1) * 7 + \
-                        tl.program_id(2) * 1371
-                    ) % dupped_group_sizes.to(tl.uint32)
-            ).to(tl.int32)
-        )
-        dupped_indices_for_keys += offsets
-    elif SAMPLE_METHOD == 'last':
-        dupped_indices_for_keys = dupped_indices + tl.where(
-            dupped_group_sizes == 0,
-            0,
-            dupped_group_sizes - 1,
-        )
-    elif SAMPLE_METHOD == 'center':
-        dupped_indices_for_keys = dupped_indices + tl.maximum(
-            0, dupped_group_sizes // 2
-        )
-    elif SAMPLE_METHOD == 'sqrt2':
-        dupped_indices_for_keys = dupped_indices + tl.maximum(
-            0, tl.extra.cuda.libdevice.round(dupped_group_sizes * 0.55).to(tl.int32)
-        )
-    elif SAMPLE_METHOD == 'oracle':
-        # NOTE: perform linear scan inside of the chunk, this will cost O(T^2)
-        dupped_indices_for_keys_start = dupped_indices_for_keys
-        dupped_indices_for_keys_end = dupped_indices_for_keys + tl.maximum(dupped_group_sizes - 1, 0)
-        max_scores = tl.zeros((BLOCK_BK * 2, ), dtype=tl.float16) - 32000.0
-        for i_shift in range(0, tl.cdiv(BSRC, mask_block_k)):
-            t_dupped_indices_for_keys = tl.where(
-                i_shift < dupped_group_sizes,
-                dupped_indices_for_keys_start + i_shift,
-                dupped_indices_for_keys_end
-            ).to(tl.int32)
-            t_scores = masking_iteration_draft_cuda_dup_and_score_calc_score(
-                t_dupped_indices_for_keys,
-                
-                Q, stride_q_bsz, stride_q_tdst, stride_q_bh, stride_q_g, stride_q_hid,
-                K, stride_k_bsz, stride_k_tsrc, stride_k_head, stride_k_hid,
-                COS, stride_cos_t, stride_cos_hid,
-                SIN, stride_sin_t, stride_sin_hid,
-                
-                KEY_ACCESS_LOG, 
-                stride_key_access_log_b, 
-                stride_key_access_log_bdst, 
-                stride_key_access_log_t,
-                KEY_ACCESS_COUNT,
-                stride_key_access_count_b,
-                stride_key_access_count_bdst,
-                MAX_ACCESS_COUNT,
-                
-                BLOCK_ACCESS_LOG,
-                stride_block_access_log_b,
-                stride_block_access_log_bdst,
-                stride_block_access_log_t,
-                BLOCK_ACCESS_SCORE,
-                stride_block_access_score_b,
-                stride_block_access_score_bdst,
-                stride_block_access_score_t,
-                BLOCK_ACCESS_COUNT,
-                stride_block_access_count_b,
-                stride_block_access_count_bdst,
-                MAX_BLOCK_ACCESS_COUNT,
-                
-                idx_b, 
-                idx_bdst,
-                idx_tdst, mask_tdst, pos_tdst,
-                dupped_mask,
-                
-                sliding_window_size, BH, G, MAX_TSRC, HID, KV_HEAD_REPEAT,
-                
-                USING_EXTEND,
-                extend_window_size,
-                extend_group_size,
-                
-                USING_SPARQ,
-                SPARQ_HID,
-                Q_IND, 
-                stride_q_ind_b, 
-                stride_q_ind_g, 
-                stride_q_ind_bdst, 
-                stride_q_ind_k,
-                
-                # paged attention args template
-                USING_PAGES,
-                PAGE_SIZE,
-                K_CACHE, 
-                stride_k_cache_page, 
-                stride_k_cache_offset, 
-                stride_k_cache_kv_head, 
-                stride_k_cache_hid,
-                V_CACHE,
-                stride_v_cache_page,
-                stride_v_cache_offset,
-                stride_v_cache_kv_head,
-                stride_v_cache_hid,
-                BLOCK_TABLE,
-                stride_block_table_bsz,
-                stride_block_table_page,
-                CACHE_SEQ_LENS,
-                stride_cache_seq_lens_bsz,
-                
-                BLOCK_SIZE_Q,
-                BLOCK_STRIDE_Q,
-                BLOCK_SIZE_K,
-                BLOCK_STRIDE_K,
-                BLOCK_BK,
-                'max',
+            offsets = tl.where(
+                dupped_group_sizes > 4,
+                0,
+                (
+                    tl.randint(
+                        RAND_SEED, 
+                        dupped_indices + \
+                            tl.program_id(0) * 31 + \
+                            tl.program_id(1) * 7 + \
+                            tl.program_id(2) * 1371
+                        ) % dupped_group_sizes.to(tl.uint32)
+                ).to(tl.int32)
             )
-            dupped_indices_for_keys = tl.where(
-                t_scores > max_scores,
-                t_dupped_indices_for_keys,
-                dupped_indices_for_keys,
+            dupped_indices_for_keys += offsets
+        elif SAMPLE_METHOD == 'last':
+            dupped_indices_for_keys = dupped_indices + tl.where(
+                dupped_group_sizes == 0,
+                0,
+                dupped_group_sizes - 1,
             )
-            max_scores = tl.minimum(max_scores, t_scores)
-    else:
-        # this should be first
-        assert SAMPLE_METHOD == 'first'
+        elif SAMPLE_METHOD == 'center':
+            dupped_indices_for_keys = dupped_indices + tl.maximum(
+                0, dupped_group_sizes // 2
+            )
+        elif SAMPLE_METHOD == 'sqrt2':
+            dupped_indices_for_keys = dupped_indices + tl.maximum(
+                0, tl.extra.cuda.libdevice.round(dupped_group_sizes * 0.55).to(tl.int32)
+            )
+        elif SAMPLE_METHOD == 'oracle':
+            # NOTE: perform linear scan inside of the chunk, this will cost O(T^2)
+            dupped_indices_for_keys_start = dupped_indices_for_keys
+            dupped_indices_for_keys_end = dupped_indices_for_keys + tl.maximum(dupped_group_sizes - 1, 0)
+            max_scores = tl.zeros((BLOCK_BK * 2, ), dtype=tl.float16) - 32000.0
+            for i_shift in range(0, tl.cdiv(BSRC, mask_block_k)):
+                t_dupped_indices_for_keys = tl.where(
+                    i_shift < dupped_group_sizes,
+                    dupped_indices_for_keys_start + i_shift,
+                    dupped_indices_for_keys_end
+                ).to(tl.int32)
+                t_scores = masking_iteration_draft_cuda_dup_and_score_calc_score(
+                    t_dupped_indices_for_keys,
+                    
+                    Q, stride_q_bsz, stride_q_tdst, stride_q_bh, stride_q_g, stride_q_hid,
+                    K, stride_k_bsz, stride_k_tsrc, stride_k_head, stride_k_hid,
+                    COS, stride_cos_t, stride_cos_hid,
+                    SIN, stride_sin_t, stride_sin_hid,
+                    
+                    KEY_ACCESS_LOG, 
+                    stride_key_access_log_b, 
+                    stride_key_access_log_bdst, 
+                    stride_key_access_log_t,
+                    KEY_ACCESS_COUNT,
+                    stride_key_access_count_b,
+                    stride_key_access_count_bdst,
+                    MAX_ACCESS_COUNT,
+                    
+                    BLOCK_ACCESS_LOG,
+                    stride_block_access_log_b,
+                    stride_block_access_log_bdst,
+                    stride_block_access_log_t,
+                    BLOCK_ACCESS_SCORE,
+                    stride_block_access_score_b,
+                    stride_block_access_score_bdst,
+                    stride_block_access_score_t,
+                    BLOCK_ACCESS_COUNT,
+                    stride_block_access_count_b,
+                    stride_block_access_count_bdst,
+                    MAX_BLOCK_ACCESS_COUNT,
+                    
+                    idx_b, 
+                    idx_bdst,
+                    idx_tdst, mask_tdst, pos_tdst,
+                    dupped_mask,
+                    
+                    sliding_window_size, BH, G, MAX_TSRC, HID, KV_HEAD_REPEAT,
+                    
+                    USING_EXTEND,
+                    extend_window_size,
+                    extend_group_size,
+                    
+                    USING_SPARQ,
+                    SPARQ_HID,
+                    Q_IND, 
+                    stride_q_ind_b, 
+                    stride_q_ind_g, 
+                    stride_q_ind_bdst, 
+                    stride_q_ind_k,
+                    
+                    # paged attention args template
+                    USING_PAGES,
+                    PAGE_SIZE,
+                    K_CACHE, 
+                    stride_k_cache_page, 
+                    stride_k_cache_offset, 
+                    stride_k_cache_kv_head, 
+                    stride_k_cache_hid,
+                    V_CACHE,
+                    stride_v_cache_page,
+                    stride_v_cache_offset,
+                    stride_v_cache_kv_head,
+                    stride_v_cache_hid,
+                    BLOCK_TABLE,
+                    stride_block_table_bsz,
+                    stride_block_table_page,
+                    CACHE_SEQ_LENS,
+                    stride_cache_seq_lens_bsz,
+                    
+                    BLOCK_SIZE_Q,
+                    BLOCK_STRIDE_Q,
+                    BLOCK_SIZE_K,
+                    BLOCK_STRIDE_K,
+                    BLOCK_BK,
+                    'max',
+                )
+                dupped_indices_for_keys = tl.where(
+                    t_scores > max_scores,
+                    t_dupped_indices_for_keys,
+                    dupped_indices_for_keys,
+                )
+                max_scores = tl.minimum(max_scores, t_scores)
+        else:
+            # this should be first
+            assert SAMPLE_METHOD == 'first'
         
         # for dup_and_score_calc_score
         if multi_branch_on_layer and idx_iteration > multi_branch_true_iter:
