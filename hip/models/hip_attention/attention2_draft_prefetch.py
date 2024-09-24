@@ -3683,10 +3683,6 @@ def masking_iteration_draft_cuda_fused(
     BLOCK_SCORE: tl.constexpr,
     GROUP_BDST,
     GROUP_BH,
-    TDST_NEXT_POWER_OF_2,
-    
-    indices_bk_len: tl.constexpr,
-    probs_bk_len: tl.constexpr,
     
     # multi_branching
     multi_branch_ratio_per_layer,
@@ -3700,6 +3696,11 @@ def masking_iteration_draft_cuda_fused(
     multi_branch_ret_ratio,
     multi_branch_true_iter_cnt,
     multi_branch_on_layer,
+    
+    TDST_NEXT_POWER_OF_2,
+    
+    indices_bk_len: tl.constexpr,
+    probs_bk_len: tl.constexpr,
 ):
     """
     grid = (
@@ -3984,7 +3985,7 @@ def masking_iteration_draft_cuda_fused(
                 
                 MAX_BDST,
                 
-                BK
+                BK,
                 G,
                 BK * G * multi_branch_ratio_per_iter,
                 1,
@@ -5064,10 +5065,6 @@ def masking_iteration_draft(
             GROUP_BDST,
             GROUP_BH,
             
-            TDST_NEXT_POWER_OF_2=triton.next_power_of_2(TDST),
-            indices_bk_len=indices.shape[-1],
-            probs_bk_len=probs.shape[-1],
-            
             # multi-branching
             multi_branch_ratio_per_layer,
             multi_branch_particular_layer,
@@ -5080,6 +5077,10 @@ def masking_iteration_draft(
             multi_branch_ret_ratio,
             multi_branch_true_iter_cnt,
             multi_branch_on_layer,
+            
+            TDST_NEXT_POWER_OF_2=triton.next_power_of_2(TDST),
+            indices_bk_len=indices.shape[-1],
+            probs_bk_len=probs.shape[-1],
             
             # num_warps=4,
             # num_stages=2,
