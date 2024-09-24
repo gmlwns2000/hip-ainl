@@ -87,6 +87,7 @@ def custom_attention(
     multi_branch_ret_ratio: float = 1.0,
     multi_branch_ret_ratio_select_all : bool = False,
     multi_branch_true_iter_cnt : int = 1,
+    multi_branch_true_iter_str :str = None,
 
     k_ret_ratio = 1.0,
 
@@ -388,7 +389,6 @@ def custom_attention(
                     layer_id = layer_id,
                 )
             else:
-                # breakpoint()
                 # from hip.models.hip_attention.attention2_draft_causal_batch import hip_attention as hip_attention_draft_cpu
                 # from hip.models.hip_attention.attention2_draft_causal_batch_gpu import hip_attention as hip_attention_draft
                 # from hip.models.hip_attention.attention2_draft_causal_batch_gpu_fused import hip_attention as hip_attention_draft
@@ -434,7 +434,7 @@ def custom_attention(
                     multi_branch_layer_list = torch.tensor(multi_branch_layer_list.replace(" ", "").split(","))
 
                 attn_output_hip, _ = hip_attention_11(
-                    q, k, v,
+                    q, k, v, 
                     
                     mask_k=tree_k,
                     
@@ -490,10 +490,11 @@ def custom_attention(
                     multi_branch_ret_ratio = multi_branch_ret_ratio,
                     multi_branch_ret_ratio_select_all = multi_branch_ret_ratio_select_all,
                     multi_branch_true_iter_cnt = multi_branch_true_iter_cnt,
-
-                    k_ret_ratio = k_ret_ratio,
+                    multi_branch_true_iter_str = multi_branch_true_iter_str,
 
                     layer_id = layer_id,
+
+                    k_ret_ratio = k_ret_ratio,
                 )
                 attn_output_hip = attn_output_hip.permute(0, 2, 1, 3)#.contiguous()
         except RuntimeError as ex:
@@ -590,7 +591,6 @@ def custom_attention(
                     'stride' : tree_stride
                 }, f'./cache/llama/ensemble/qkvout_s{tree_stride}_k{tree_k}_ensbn{ensemble_model_n}_{ensemble_method_final}_mft{ensemble_method_final_inter_thresh}_bmk{ensemble_method_final_bdd_mask_k}_lt{ensemble_layer_till}_twd{ensemble_timedim_wd}_l{layer_id}.pth')
             else:
-                # breakpoint()
                 os.makedirs('./cache/llama/default', exist_ok=True)
                 torch.save({
                     'q': query_states,

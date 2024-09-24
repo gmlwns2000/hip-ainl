@@ -241,6 +241,7 @@ def load_model(args):
             m.multi_branch_ret_ratio = args.multi_branch_ret_ratio
             m.multi_branch_ret_ratio_select_all = args.multi_branch_ret_ratio_select_all
             m.multi_branch_true_iter_cnt = args.multi_branch_true_iter_cnt
+            m.multi_branch_true_iter_str = args.multi_branch_true_iter_str
 
             m.k_ret_ratio = args.k_ret_ratio
 

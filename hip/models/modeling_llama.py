@@ -476,6 +476,7 @@ class LlamaCustomAttention(LlamaAttention):
         self.multi_branch_ret_ratio = 1.0
         self.multi_branch_ret_ratio_select_all = False
         self.multi_branch_true_iter_cnt = 1
+        self.multi_branch_true_iter_str = None
 
         self.k_ret_ratio = 1.0
 
@@ -700,6 +701,7 @@ class LlamaCustomAttention(LlamaAttention):
             multi_branch_ret_ratio = self.multi_branch_ret_ratio,
             multi_branch_ret_ratio_select_all = self.multi_branch_ret_ratio_select_all,
             multi_branch_true_iter_cnt = self.multi_branch_true_iter_cnt,
+            multi_branch_true_iter_str = self.multi_branch_true_iter_str,
 
             k_ret_ratio = self.k_ret_ratio,
 
@@ -944,6 +946,7 @@ class LlamaCustomAttention(LlamaAttention):
             multi_branch_ret_ratio = self.multi_branch_ret_ratio,
             multi_branch_ret_ratio_select_all = self.multi_branch_ret_ratio_select_all,
             multi_branch_true_iter_cnt = self.multi_branch_true_iter_cnt,
+            multi_branch_true_iter_str = self.multi_branch_true_iter_str,
 
             k_ret_ratio = self.k_ret_ratio,
 

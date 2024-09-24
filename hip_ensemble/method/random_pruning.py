@@ -241,7 +241,6 @@ def ensemble_random_pruning(
             mask_k_i = -1  # If no such index is found
             k_final = ensemble_indices_k_size # CHECK - is it min(ensemble_indices_k_size, ensemble_filtered.shape[1])
         
-        # breakpoint()
 
         ensemble_filtered = ensemble_filtered[:, :k_final] # TODO is this meaningful??
         ensemble_cnt_filtered = ensemble_cnt_filtered[:, :k_final]
@@ -253,7 +252,6 @@ def ensemble_random_pruning(
         sparsity_per_layer = torch.sum(ensemble_filtered<9999999).item()
         sparsity_ratio = (sparsity_per_layer/origin_sparsity)
 
-        # breakpoint()
 
         # NOTE per_query_token_cnt_diclist is just for analysis
         if os.environ.get('ENSEMBLE_RESULT', '0') == '1':
@@ -297,7 +295,6 @@ def ensemble_random_pruning(
         #     ensembled_indices[:,:len_uf] = unique_filtered
 
         # assert k_size_max <= ensemble_indices_k_size
-        # # breakpoint()
         # assert torch.all(ensembled_indices[:, k_size_max:] == 9999999)
         # ensembled_indices = ensembled_indices[:, :k_size_max] # TODO : Is undoing better for padding's perspective?
         # ensembled_indices = ensembled_indices.view(_N_H, TDST_BQ, -1)
@@ -346,7 +343,5 @@ def ensemble_random_pruning(
     #     }, f'./cache/ensemble/llama13b_32k/method/{ensemble_model_setting}_{ensemble_method}_{ensemble_method_final}/l_{layer_id}_m_{ensemble_model_n}_pl_{ensemble_per_layer_n}_pat{ensemble_per_attn_iter}_ln{ensemble_layer_start}.pth')
     #     print(">>> STORED.")
         # input('stored. press enter to continue >>> ')
-    # breakpoint()
     ##########
-    # breakpoint()
     return ensemble_filtered, ks, origin_sparsity, sparsity_per_layer, sparsity_ratio, ensemble_cnt_filtered

@@ -4928,7 +4928,6 @@ def masking_iteration_draft(
                 if ks != None:
                     print("KS ", torch.sum(ks-ks_bef).item())
 
-            # breakpoint()
             i_iteration += 1
     
     indices.mul_(block_size_k)
@@ -4954,7 +4953,6 @@ def masking_iteration_draft(
     # print(t)
     # print(tu)
     # print(t.shape, tu.shape, c)
-    # breakpoint()
     
     return indices, ks, ks_count, ks_start_end, scores_final, group_sizes, key_access_log, key_access_count
 
