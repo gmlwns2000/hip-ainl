@@ -659,12 +659,12 @@ class H2OLlamaAttention(nn.Module):
                     attn_weights,
                     -32000.0
                 )
-            attn_weight_accumulator[:, :, :, :i_tdst_end + TSRC - TDST].add_(attn_weights.sum(2, keepdim=True))
             attn_weights = nn.functional.softmax(
                 attn_weights,
                 dim=-1, 
                 dtype=torch.float32
             ).to(query_states.dtype)
+            attn_weight_accumulator[:, :, :, :i_tdst_end + TSRC - TDST].add_(attn_weights.sum(2, keepdim=True))
             attn_output = torch.matmul(attn_weights, value_states[:, :, :i_tdst_end + TSRC - TDST])
             
             attn_output_final.index_copy_(
