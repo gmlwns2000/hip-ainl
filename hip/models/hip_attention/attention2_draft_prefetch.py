@@ -10943,6 +10943,14 @@ def hip_attention(
     )
     sparsity = indices.shape[-1] // (args.mask_k/args.block_size_k)
     
+    if os.getenv('DEBUG_MULTI_BRANCH', '0')== '1':
+        os.makedirs('./cache/llama/', exist_ok=True)
+        torch.save({
+            'metadata': metadata,
+            'context': context,
+        }, f'./cache/llama/metadata_l{args.layer_id}.pth')
+        print(f'l{args.layer_id} stored. press enter to continue >>> ')
+    
     return context, sparsity, metadata
 
 @nvtx.annotate('paged_hip_attention')

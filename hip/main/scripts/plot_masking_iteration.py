@@ -7,8 +7,27 @@ import numba
 from hip.utils import setup_seaborn
 setup_seaborn(axis_below=True)
 
-TDST = 2048
-TSRC = 4096
+"""
+--method hip 
+--k 512 
+--block_size_q 64 
+--block_stride_q 2 
+--block_size_k 2 
+--block_stride_k 1 
+--stride 8192 
+--dense_layers 0 
+--no_quantize 
+--overwrite 
+--model llama3.1_8b 
+--multi-branch-ratio 4 
+--multi-branch-layer-all 
+--multi-branch-ret-ratio-select-all 
+--branching_method random 
+--multi-branch-true-iter_str center
+"""
+
+TDST = 8192
+TSRC = 8192
 BQ = 32
 BK = 2
 MASK_K = 512
@@ -28,8 +47,10 @@ import matplotlib.cm as cm
 
 def render_plot(cache_path, name, iteration):
     data = torch.load(cache_path, map_location='cpu')
-    indices = data['indices'].numpy()
-    ks = data['ks'].numpy()
+    data = data['metatdata']
+    breakpoint()
+    indices = data.indices.numpy()
+    ks = data.ks.numpy()
     
     ws = np.full((TDST, ), MASK_K) * (2**max(0, iteration-1))
     tsrcs = np.arange(TSRC - TDST, TSRC)
@@ -39,6 +60,7 @@ def render_plot(cache_path, name, iteration):
     scales = tsrcs / ws
     
     mask = convert_to_dense(indices, ks, TDST, TSRC, BQ, BK, MASK_K)
+    breakpoint()
     
     for i in range(TDST):
         scale = scales[i]
@@ -57,8 +79,9 @@ def render_plot(cache_path, name, iteration):
     print('saved', path)
 
 if __name__ == '__main__':
-    render_plot('./saves/attention1_block_gpu/checkout_mask_0.pth', 'mask_0', 0)
-    render_plot('./saves/attention1_block_gpu/checkout_mask_1.pth', 'mask_1', 1)
-    render_plot('./saves/attention1_block_gpu/checkout_mask_2.pth', 'mask_2', 2)
-    render_plot('./saves/attention1_block_gpu/checkout_mask_3.pth', 'mask_3', 3)
-    render_plot('./saves/attention1_block_gpu/checkout_mask_4.pth', 'mask_4', 4)
+    for i in range(32):
+        render_plot(f'./cache/llama/metadata_l{i}.pth', f'mask_l{i}', 0)
+    # render_plot('./saves/attention1_block_gpu/checkout_mask_1.pth', 'mask_1', 1)
+    # render_plot('./saves/attention1_block_gpu/checkout_mask_2.pth', 'mask_2', 2)
+    # render_plot('./saves/attention1_block_gpu/checkout_mask_3.pth', 'mask_3', 3)
+    # render_plot('./saves/attention1_block_gpu/checkout_mask_4.pth', 'mask_4', 4)
