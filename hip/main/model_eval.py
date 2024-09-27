@@ -166,8 +166,8 @@ def load_model(args):
             # from hip.models.h2o_llama_masked import H2OLlamaForCausalLM # this file does not use H2O, use this for validation
             from hip.models.h2o_llama import H2OLlamaForCausalLM # this is real H2O
             ModelClass = H2OLlamaForCausalLM
-    config.hh_size = 4
-    config.recent_size = args.k
+    config.hh_size = args.k // 2
+    config.recent_size = args.k // 2
     config._attn_implementation = config.attn_implementation = 'eager'
     config.shift_q_pos = args.shift_q_pos
     config.streaming = args.streaming
