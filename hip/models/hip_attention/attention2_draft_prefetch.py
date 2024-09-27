@@ -352,6 +352,7 @@ def masking_iteration_draft_cuda_initialize(
     
     # multi_branch
     multi_branch_ratio_per_layer: tl.constexpr,
+    multi_branch_on_layer,
 ):
     idx_b = tl.program_id(0)
     idx_bdst = tl.program_id(1)
@@ -467,13 +468,22 @@ def masking_iteration_draft_cuda_initialize(
                 # )
             )
         if KS is not None:
-            tl.atomic_add(
-                KS +\
-                    idx_b * stride_ks_b +\
-                    idx_bdst * stride_ks_bdst,
-                val = mask_block_k,
-                # val = tl.sum((group_sizes > 0).to(tl.int32))
-            )
+            if not multi_branch_on_layer:
+                tl.atomic_add(
+                    KS +\
+                        idx_b * stride_ks_b +\
+                        idx_bdst * stride_ks_bdst,
+                    val = mask_block_k,
+                    # val = tl.sum((group_sizes > 0).to(tl.int32))
+                )
+            else:
+                tl.atomic_add(
+                    KS +\
+                        idx_b * stride_ks_b +\
+                        idx_bdst * stride_ks_bdst,
+                    val = mask_block_k * multi_branch_ratio_per_layer,
+                    # val = tl.sum((group_sizes > 0).to(tl.int32))
+                )
         
         indices = tl.broadcast_to(indices[None, :], (multi_branch_ratio_per_layer, BLOCK_MASK_BLOCK_K))
         indices = tl.ravel(tl.trans(indices))
@@ -7444,8 +7454,8 @@ def masking_iteration_draft_cuda_fused(
         # tl.static_print(multi_branch_on_layer)
         # tl.static_print(multi_branch_on_once)
 
-        if multi_branch_on_layer and not multi_branch_on_once:
-            tl.device_print("###### NO MULTI_BRANCH BUG ######")
+        # if multi_branch_on_layer and not multi_branch_on_once:
+        #     tl.device_print("###### NO MULTI_BRANCH BUG ######")
         """
         - INDICES [32, 1024, 256] = [B, cdiv_python(TDST, block_size_q), sample_n, G * mask_block_k]
         GROUP_SIZES [32, 1024, 256] = [B, cdiv_python(TDST, block_size_q), sample_n, G * mask_block_k]
@@ -7997,9 +8007,10 @@ def masking_iteration_draft(
         elif args.multi_branch_true_iter_str == 'center_last':
             multi_branch_true_iter = max(math.ceil(total_iteration * (3/4)), 1)
         elif args.multi_branch_true_iter_str == 'last_last':
-            multi_branch_true_iter = max(total_iteration - 5, 1)
+            assert total_iteration - 2 >= total_iteration // 2
+            multi_branch_true_iter = max(total_iteration - 2, 1)
         elif args.multi_branch_true_iter_str == 'last':
-            multi_branch_true_iter = max(total_iteration - 2, 1) # TODO check
+            multi_branch_true_iter = max(total_iteration - 1, 1) # TODO check
         else:
             raise Exception(multi_branch_true_iter_str)
     else:
@@ -8181,8 +8192,13 @@ def masking_iteration_draft(
     if group_size_seed is None:
         grid = (B, BDST, G)
         # print('init grid', grid)
+        
+        # for multi-branch current supporting
+        assert indices_seed == None
+        assert ks_seed == None
         pre_device = torch.get_default_device()
         torch.set_default_device(indices.device)
+        
         masking_iteration_draft_cuda_initialize[grid](
             indices_seed, *(indices_seed.stride() if indices_seed is not None else (0, 0, 0)),
             ks_seed, *(ks_seed.stride() if ks_seed is not None else (0, 0)),
@@ -8208,6 +8224,7 @@ def masking_iteration_draft(
             
             # multi_branch
             multi_branch_ratio_per_layer,
+            multi_branch_on_layer,
             
             # num_warps=min(max(cdiv_python(BLOCK_MASK_BLOCK_K, 32), 1), 32),
             num_warps=1,
@@ -8611,6 +8628,7 @@ def masking_iteration_draft(
     # TODO dynamic sparsity among each multi_branch_on_layer
     # TODO NOTE!!! include masks that assures * multi_branch_ratio < BSRC
     if multi_branch_on_layer or multi_branch_on_layer_first_iter:
+        assert args.multi_branch_ret_ratio_select_all == True
         if args.multi_branch_ret_ratio_select_all:
             args.multi_branch_ret_ratio = args.multi_branch_ratio
         else:
@@ -10729,8 +10747,9 @@ def hip_attention(
         
         args=args
     )
+    sparsity = indices.shape[-1] // (args.mask_k/args.block_size_k)
     
-    return context, metadata
+    return context, sparsity, metadata
 
 @nvtx.annotate('paged_hip_attention')
 def paged_hip_attention(

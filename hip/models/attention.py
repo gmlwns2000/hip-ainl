@@ -433,7 +433,7 @@ def custom_attention(
                 if multi_branch_layer_list is not None: # TODO should not use list?
                     multi_branch_layer_list = torch.tensor(multi_branch_layer_list.replace(" ", "").split(","))
 
-                attn_output_hip, _ = hip_attention_11(
+                attn_output_hip, sparsity, _ = hip_attention_11(
                     q, k, v, 
                     
                     mask_k=tree_k,
@@ -455,7 +455,7 @@ def custom_attention(
                     self_extend_group_size=4,
                     
                     topk_head_group_size=1,
-                    sample_method=tree_sampling_method, # os.getenv('HIP_DRAFT_SAMPLING_METHOD', 'center'),
+                    sample_method=os.getenv('HIP_DRAFT_SAMPLING_METHOD', 'center'),
                     branch_method=tree_branching_method,# os.getenv('HIP_DRAFT_BRANCH_METHOD', 'half'),
                     
                     # this may good or not, but definatly great with self-extend
