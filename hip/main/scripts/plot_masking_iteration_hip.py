@@ -67,7 +67,7 @@ def render_plot(cache_path, name, iteration):
         row_resize = cv2.resize(row, None, fx=1.0, fy=1.0, interpolation=cv2.INTER_NEAREST) # fx=scale, 
         mask[i:i+1, :] = row_resize[:, :TSRC]
     
-    root = './saves/plot_multi_branch'
+    root = './saves/plot_hip'
     path = os.path.join(root, f'{name}.png')
     os.makedirs(root, exist_ok=True)
     
