@@ -118,9 +118,9 @@ def custom_attention(
             if attention_method in ['none', 'fa2']:
                 assert causal_mask is None
                 attn_output = flash_attn_func(
-                    q=query_states.permute(0, 2, 1, 3),
-                    k=key_states.permute(0, 2, 1, 3),
-                    v=value_states.permute(0, 2, 1, 3),
+                    q=query_states.permute(0, 2, 1, 3).to(torch.bfloat16),
+                    k=key_states.permute(0, 2, 1, 3).to(torch.bfloat16),
+                    v=value_states.permute(0, 2, 1, 3).to(torch.bfloat16),
                     softmax_scale=None,
                     causal=True,
                 ).permute(0, 2, 1, 3)
@@ -140,9 +140,9 @@ def custom_attention(
         else:
             if attention_method in ['none', 'fa2']:
                 attn_output = flash_attn_with_kvcache(
-                    q=query_states.permute(0, 2, 1, 3),
-                    k_cache=key_states.permute(0, 2, 1, 3),
-                    v_cache=value_states.permute(0, 2, 1, 3),
+                    q=query_states.permute(0, 2, 1, 3).to(torch.bfloat16),
+                    k_cache=key_states.permute(0, 2, 1, 3).to(torch.bfloat16),
+                    v_cache=value_states.permute(0, 2, 1, 3).to(torch.bfloat16),
                     softmax_scale=None,
                     causal=True,
                 ).permute(0, 2, 1, 3)

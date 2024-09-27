@@ -559,8 +559,8 @@ class LlamaCustomAttention(LlamaAttention):
                 raise Exception()
                 # TODO LATER?
                 assert self.attention_method != 'h2o_stream'
-                assert self.config.hh_size == 4
-                assert self.config.recent_size == self.tree_k
+                assert self.config.hh_size == self.tree_k//2
+                assert self.config.recent_size == self.tree_k//2
                 assert self.config._attn_implementation == self.config.attn_implementation == 'eager'
                 assert self.config.shift_q_pos is not None
                 assert self.config.reduction_for_gqa is not None
@@ -766,8 +766,8 @@ class LlamaCustomAttention(LlamaAttention):
             if not output_attentions:
                 attn_weights = None
         elif self.attention_method in ['h2o', 'h2o_stream'] and os.getenv('H2O_DEFAULT', '3')=='3':
-            assert self.config.hh_size == 4
-            assert self.config.recent_size == self.tree_k
+            assert self.config.hh_size == self.tree_k//2
+            assert self.config.recent_size == self.tree_k//2
             assert self.config._attn_implementation == self.config.attn_implementation == 'eager'
             assert self.config.shift_q_pos is not None
             assert self.config.reduction_for_gqa is not None
@@ -884,8 +884,8 @@ class LlamaCustomAttention(LlamaAttention):
                     sin=sin
                 )
         elif self.attention_method in ['h2o', 'h2o_stream'] and os.getenv('H2O_DEFAULT', '3')=='5':
-            assert self.config.hh_size == 4
-            assert self.config.recent_size == self.tree_k
+            assert self.config.hh_size == self.tree_k//2
+            assert self.config.recent_size == self.tree_k//2
             assert self.config._attn_implementation == self.config.attn_implementation == 'eager'
             assert self.config.shift_q_pos is not None
             assert self.config.reduction_for_gqa is not None
@@ -1027,8 +1027,8 @@ class LlamaCustomAttention(LlamaAttention):
                     sin=sin
                 )
         elif self.attention_method in ['h2o', 'h2o_stream'] and os.getenv('H2O_DEFAULT', '3')=='6':
-            assert self.config.hh_size == 4
-            assert self.config.recent_size == self.tree_k
+            assert self.config.hh_size == self.tree_k//2
+            assert self.config.recent_size == self.tree_k//2
             assert self.config._attn_implementation == self.config.attn_implementation == 'eager'
             assert self.config.shift_q_pos is not None
             assert self.config.reduction_for_gqa is not None
@@ -1182,8 +1182,8 @@ class LlamaCustomAttention(LlamaAttention):
                 )
             
         elif self.attention_method in ['h2o', 'h2o_stream'] and os.getenv('H2O_DEFAULT', '3')=='4':
-            assert self.config.hh_size == 4
-            assert self.config.recent_size == self.tree_k
+            assert self.config.hh_size == self.tree_k//2
+            assert self.config.recent_size == self.tree_k//2
             assert self.config._attn_implementation == self.config.attn_implementation == 'eager'
             assert self.config.shift_q_pos is not None
             assert self.config.reduction_for_gqa is not None
@@ -1335,8 +1335,8 @@ class LlamaCustomAttention(LlamaAttention):
                 )
         
         else:
-            assert self.config.hh_size == 4
-            assert self.config.recent_size == self.tree_k
+            assert self.config.hh_size == self.tree_k//2
+            assert self.config.recent_size == self.tree_k//2
             assert self.config._attn_implementation == self.config.attn_implementation == 'eager'
             assert self.config.shift_q_pos is not None
             assert self.config.reduction_for_gqa is not None
