@@ -1421,6 +1421,7 @@ def multi_branch_masking_iteration_draft_cuda_dup_and_score_calc_score(
     VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
     DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
     
+    ACCESS_LOG_STORE_FROM,
     KEY_ACCESS_LOG, 
     stride_key_access_log_b, 
     stride_key_access_log_bdst, 
@@ -1506,6 +1507,7 @@ def multi_branch_masking_iteration_draft_cuda_dup_and_score_calc_score(
     
     # offload cache args template
     USING_OFFLOAD_CACHE: tl.constexpr,
+    OFFLOAD_CACHE_METHOD: tl.constexpr,
     OFFLOAD_CACHE_BUDGET: tl.constexpr,
     OFFLOAD_CACHE_KV_HEAD: tl.constexpr,
     OFFLOAD_CACHE_K_TABLES,
@@ -1548,16 +1550,17 @@ def multi_branch_masking_iteration_draft_cuda_dup_and_score_calc_score(
         block_access_location = tl.atomic_add(
             BLOCK_ACCESS_COUNT +\
                 idx_b * stride_block_access_count_b +\
-                idx_bdst * stride_block_access_count_bdst,
+                (idx_bdst - ACCESS_LOG_STORE_FROM) * stride_block_access_count_bdst,
             val=len_block_access,
+            mask=(idx_bdst - ACCESS_LOG_STORE_FROM) >= 0,
         )
         idx_block_access = (block_access_location + tl.cumsum(mask_block_access.to(tl.int32)) - 1) % MAX_BLOCK_ACCESS_COUNT
         tl.store(
             BLOCK_ACCESS_LOG +\
                 idx_b * stride_block_access_log_b +\
-                idx_bdst * stride_block_access_log_bdst +\
+                (idx_bdst - ACCESS_LOG_STORE_FROM) * stride_block_access_log_bdst +\
                 idx_block_access * stride_block_access_log_t,
-            mask=mask_block_access,
+            mask=mask_block_access & ((idx_bdst - ACCESS_LOG_STORE_FROM) >= 0),
             value=list_block_access,
         )
     
@@ -1607,18 +1610,19 @@ def multi_branch_masking_iteration_draft_cuda_dup_and_score_calc_score(
         key_access_location = tl.atomic_add(
             KEY_ACCESS_COUNT +\
                 idx_b * stride_key_access_count_b +\
-                idx_bdst * stride_key_access_count_bdst,
+                (idx_bdst - ACCESS_LOG_STORE_FROM) * stride_key_access_count_bdst,
             val=len_access,
+            mask=((idx_bdst - ACCESS_LOG_STORE_FROM) >= 0)
         )
         idx_access = (key_access_location + tl.cumsum(mask_access.to(tl.int32)) - 1) % MAX_ACCESS_COUNT
         # idx_access = tl.arange(0, BLOCK_BK * KEY_DUP * BLOCK_SIZE_K // BLOCK_STRIDE_K)
         tl.store(
             KEY_ACCESS_LOG +\
                 idx_b * stride_key_access_log_b +\
-                idx_bdst * stride_key_access_log_bdst +\
+                (idx_bdst - ACCESS_LOG_STORE_FROM) * stride_key_access_log_bdst +\
                 idx_access * stride_key_access_log_t,
             value=idx_tsrc_grouped,
-            mask=mask_access,
+            mask=mask_access & ((idx_bdst - ACCESS_LOG_STORE_FROM) >= 0),
             # eviction_policy='evict_first'
         )
     
@@ -1982,9 +1986,9 @@ def multi_branch_masking_iteration_draft_cuda_dup_and_score_calc_score(
             tl.store(
                 BLOCK_ACCESS_SCORE +\
                     idx_b * stride_block_access_score_b +\
-                    idx_bdst * stride_block_access_score_bdst +\
+                    (idx_bdst - ACCESS_LOG_STORE_FROM) * stride_block_access_score_bdst +\
                     idx_block_access * stride_block_access_score_t,
-                mask=mask_block_access,
+                mask=mask_block_access & ((idx_bdst - ACCESS_LOG_STORE_FROM) >= 0),
                 value=checkout_scores,
             )
     
@@ -2003,6 +2007,7 @@ def multi_branch_dupped_group_sizes_and_sampling_method_cal(
     stride_dupped_group_size_bdst, 
     stride_dupped_group_size_bk,
 
+    ACCESS_LOG_STORE_FROM,
     BLOCK_BK,
     BK,
     G,
@@ -2103,6 +2108,11 @@ def multi_branch_dupped_group_sizes_and_sampling_method_cal(
                     K, stride_k_bsz, stride_k_tsrc, stride_k_head, stride_k_hid,
                     COS, stride_cos_t, stride_cos_hid,
                     SIN, stride_sin_t, stride_sin_hid,
+                    
+                    VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
+                    DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
+
+                    ACCESS_LOG_STORE_FROM,
                     KEY_ACCESS_LOG, 
                     stride_key_access_log_b, 
                     stride_key_access_log_bdst, 
@@ -2857,6 +2867,7 @@ def masking_iteration_draft_cuda_dup_and_score_multi_branch_bef(
         assert SAMPLE_METHOD == 'first'
     
     if SCORES_CACHED:
+        raise Exception()
         cached_scores = tl.load(
             SCORES_FINAL +\
                 idx_b * stride_scores_final_b+\
@@ -3025,6 +3036,7 @@ def masking_iteration_draft_cuda_dup_and_score_multi_branch_bef(
             VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
             DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
             
+            ACCESS_LOG_STORE_FROM,
             KEY_ACCESS_LOG, 
             stride_key_access_log_b, 
             stride_key_access_log_bdst, 
@@ -3103,6 +3115,7 @@ def masking_iteration_draft_cuda_dup_and_score_multi_branch_bef(
             
             # offload cache args template
             USING_OFFLOAD_CACHE,
+            OFFLOAD_CACHE_METHOD,
             OFFLOAD_CACHE_BUDGET,
             OFFLOAD_CACHE_KV_HEAD,
             OFFLOAD_CACHE_K_TABLES,
@@ -3178,6 +3191,7 @@ def masking_iteration_draft_cuda_dup_and_score_multi_branch_curr(
     VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
     DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
     
+    ACCESS_LOG_STORE_FROM,
     KEY_ACCESS_LOG, 
     stride_key_access_log_b, 
     stride_key_access_log_bdst, 
@@ -3276,6 +3290,7 @@ def masking_iteration_draft_cuda_dup_and_score_multi_branch_curr(
     
     # offload cache args template
     USING_OFFLOAD_CACHE: tl.constexpr,
+    OFFLOAD_CACHE_METHOD: tl.constexpr,
     OFFLOAD_CACHE_BUDGET: tl.constexpr,
     OFFLOAD_CACHE_KV_HEAD: tl.constexpr,
     OFFLOAD_CACHE_K_TABLES,
@@ -3467,6 +3482,7 @@ def masking_iteration_draft_cuda_dup_and_score_multi_branch_curr(
             stride_dupped_group_size_bdst, 
             stride_dupped_group_size_bk,
 
+            ACCESS_LOG_STORE_FROM,
             BLOCK_BK,
             BK,
             G,
@@ -3511,6 +3527,7 @@ def masking_iteration_draft_cuda_dup_and_score_multi_branch_curr(
     )
     
     if SCORES_CACHED:
+        raise Exception()
         cached_scores = tl.load(
             SCORES_FINAL +\
                 idx_b * stride_scores_final_b+\
@@ -3533,6 +3550,7 @@ def masking_iteration_draft_cuda_dup_and_score_multi_branch_curr(
             COS, stride_cos_t, stride_cos_hid,
             SIN, stride_sin_t, stride_sin_hid,
             
+            ACCESS_LOG_STORE_FROM,
             KEY_ACCESS_LOG, 
             stride_key_access_log_b, 
             stride_key_access_log_bdst, 
@@ -3652,6 +3670,7 @@ def masking_iteration_draft_cuda_dup_and_score_multi_branch_curr(
             VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
             DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
             
+            ACCESS_LOG_STORE_FROM,
             KEY_ACCESS_LOG, 
             stride_key_access_log_b, 
             stride_key_access_log_bdst, 
@@ -3730,6 +3749,7 @@ def masking_iteration_draft_cuda_dup_and_score_multi_branch_curr(
             
             # offload cache args template
             USING_OFFLOAD_CACHE,
+            OFFLOAD_CACHE_METHOD,
             OFFLOAD_CACHE_BUDGET,
             OFFLOAD_CACHE_KV_HEAD,
             OFFLOAD_CACHE_K_TABLES,
@@ -3786,6 +3806,7 @@ def masking_iteration_draft_cuda_dup_and_score_multi_branch_aft(
     VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
     DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
     
+    ACCESS_LOG_STORE_FROM,
     KEY_ACCESS_LOG, 
     stride_key_access_log_b, 
     stride_key_access_log_bdst, 
@@ -3884,6 +3905,7 @@ def masking_iteration_draft_cuda_dup_and_score_multi_branch_aft(
     
     # offload cache args template
     USING_OFFLOAD_CACHE: tl.constexpr,
+    OFFLOAD_CACHE_METHOD: tl.constexpr,
     OFFLOAD_CACHE_BUDGET: tl.constexpr,
     OFFLOAD_CACHE_KV_HEAD: tl.constexpr,
     OFFLOAD_CACHE_K_TABLES,
@@ -4105,6 +4127,7 @@ def masking_iteration_draft_cuda_dup_and_score_multi_branch_aft(
             0, tl.extra.cuda.libdevice.round(dupped_group_sizes * 0.55).to(tl.int32)
         )
     elif SAMPLE_METHOD == 'oracle':
+        raise Exception()
         # NOTE: perform linear scan inside of the chunk, this will cost O(T^2)
         dupped_indices_for_keys_start = dupped_indices_for_keys
         dupped_indices_for_keys_end = dupped_indices_for_keys + tl.maximum(dupped_group_sizes - 1, 0)
@@ -4126,6 +4149,7 @@ def masking_iteration_draft_cuda_dup_and_score_multi_branch_aft(
                 VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
                 DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
                 
+                ACCESS_LOG_STORE_FROM,
                 KEY_ACCESS_LOG, 
                 stride_key_access_log_b, 
                 stride_key_access_log_bdst, 
@@ -4251,6 +4275,7 @@ def masking_iteration_draft_cuda_dup_and_score_multi_branch_aft(
     )
     
     if SCORES_CACHED:
+        raise Exception()
         cached_scores = tl.load(
             SCORES_FINAL +\
                 idx_b * stride_scores_final_b+\
@@ -4273,6 +4298,7 @@ def masking_iteration_draft_cuda_dup_and_score_multi_branch_aft(
             COS, stride_cos_t, stride_cos_hid,
             SIN, stride_sin_t, stride_sin_hid,
             
+            ACCESS_LOG_STORE_FROM,
             KEY_ACCESS_LOG, 
             stride_key_access_log_b, 
             stride_key_access_log_bdst, 
@@ -4393,6 +4419,7 @@ def masking_iteration_draft_cuda_dup_and_score_multi_branch_aft(
             VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
             DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
             
+            ACCESS_LOG_STORE_FROM,
             KEY_ACCESS_LOG, 
             stride_key_access_log_b, 
             stride_key_access_log_bdst, 
@@ -4471,6 +4498,7 @@ def masking_iteration_draft_cuda_dup_and_score_multi_branch_aft(
             
             # offload cache args template
             USING_OFFLOAD_CACHE,
+            OFFLOAD_CACHE_METHOD,
             OFFLOAD_CACHE_BUDGET,
             OFFLOAD_CACHE_KV_HEAD,
             OFFLOAD_CACHE_K_TABLES,
@@ -4527,6 +4555,7 @@ def masking_iteration_draft_cuda_dup_and_score_single(
     VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
     DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
     
+    ACCESS_LOG_STORE_FROM,
     KEY_ACCESS_LOG, 
     stride_key_access_log_b, 
     stride_key_access_log_bdst, 
@@ -4625,6 +4654,7 @@ def masking_iteration_draft_cuda_dup_and_score_single(
     
     # offload cache args template
     USING_OFFLOAD_CACHE: tl.constexpr,
+    OFFLOAD_CACHE_METHOD: tl.constexpr,
     OFFLOAD_CACHE_BUDGET: tl.constexpr,
     OFFLOAD_CACHE_KV_HEAD: tl.constexpr,
     OFFLOAD_CACHE_K_TABLES,
@@ -4844,6 +4874,7 @@ def masking_iteration_draft_cuda_dup_and_score_single(
             0, tl.extra.cuda.libdevice.round(dupped_group_sizes * 0.55).to(tl.int32)
         )
     elif SAMPLE_METHOD == 'oracle':
+        raise Exception()
         # NOTE: perform linear scan inside of the chunk, this will cost O(T^2)
         dupped_indices_for_keys_start = dupped_indices_for_keys
         dupped_indices_for_keys_end = dupped_indices_for_keys + tl.maximum(dupped_group_sizes - 1, 0)
@@ -4865,6 +4896,7 @@ def masking_iteration_draft_cuda_dup_and_score_single(
                 VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
                 DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
                 
+                ACCESS_LOG_STORE_FROM,
                 KEY_ACCESS_LOG, 
                 stride_key_access_log_b, 
                 stride_key_access_log_bdst, 
@@ -4970,6 +5002,7 @@ def masking_iteration_draft_cuda_dup_and_score_single(
         assert SAMPLE_METHOD == 'first'
         
     if SCORES_CACHED:
+        raise Exception()
         cached_scores = tl.load(
             SCORES_FINAL +\
                 idx_b * stride_scores_final_b+\
@@ -5138,6 +5171,7 @@ def masking_iteration_draft_cuda_dup_and_score_single(
             VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
             DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
             
+            ACCESS_LOG_STORE_FROM,
             KEY_ACCESS_LOG, 
             stride_key_access_log_b, 
             stride_key_access_log_bdst, 
@@ -5216,6 +5250,7 @@ def masking_iteration_draft_cuda_dup_and_score_single(
             
             # offload cache args template
             USING_OFFLOAD_CACHE,
+            OFFLOAD_CACHE_METHOD,
             OFFLOAD_CACHE_BUDGET,
             OFFLOAD_CACHE_KV_HEAD,
             OFFLOAD_CACHE_K_TABLES,
@@ -5291,6 +5326,7 @@ def masking_iteration_draft_cuda_dup_and_score(
     VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
     DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
     
+    ACCESS_LOG_STORE_FROM,
     KEY_ACCESS_LOG, 
     stride_key_access_log_b, 
     stride_key_access_log_bdst, 
@@ -5389,6 +5425,7 @@ def masking_iteration_draft_cuda_dup_and_score(
     
     # offload cache args template
     USING_OFFLOAD_CACHE: tl.constexpr,
+    OFFLOAD_CACHE_METHOD: tl.constexpr,
     OFFLOAD_CACHE_BUDGET: tl.constexpr,
     OFFLOAD_CACHE_KV_HEAD: tl.constexpr,
     OFFLOAD_CACHE_K_TABLES,
@@ -5501,6 +5538,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
             DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
             
+            ACCESS_LOG_STORE_FROM,
             KEY_ACCESS_LOG, 
             stride_key_access_log_b, 
             stride_key_access_log_bdst, 
@@ -5599,6 +5637,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             
             # offload cache args template
             USING_OFFLOAD_CACHE,
+            OFFLOAD_CACHE_METHOD,
             OFFLOAD_CACHE_BUDGET,
             OFFLOAD_CACHE_KV_HEAD,
             OFFLOAD_CACHE_K_TABLES,
@@ -5672,6 +5711,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
             DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
             
+            ACCESS_LOG_STORE_FROM,
             KEY_ACCESS_LOG, 
             stride_key_access_log_b, 
             stride_key_access_log_bdst, 
@@ -5770,6 +5810,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             
             # offload cache args template
             USING_OFFLOAD_CACHE,
+            OFFLOAD_CACHE_METHOD,
             OFFLOAD_CACHE_BUDGET,
             OFFLOAD_CACHE_KV_HEAD,
             OFFLOAD_CACHE_K_TABLES,
@@ -5843,6 +5884,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
             DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
             
+            ACCESS_LOG_STORE_FROM,
             KEY_ACCESS_LOG, 
             stride_key_access_log_b, 
             stride_key_access_log_bdst, 
@@ -5941,6 +5983,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             
             # offload cache args template
             USING_OFFLOAD_CACHE,
+            OFFLOAD_CACHE_METHOD,
             OFFLOAD_CACHE_BUDGET,
             OFFLOAD_CACHE_KV_HEAD,
             OFFLOAD_CACHE_K_TABLES,
@@ -6011,6 +6054,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
             DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
             
+            ACCESS_LOG_STORE_FROM,
             KEY_ACCESS_LOG, 
             stride_key_access_log_b, 
             stride_key_access_log_bdst, 
@@ -6109,6 +6153,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             
             # offload cache args template
             USING_OFFLOAD_CACHE,
+            OFFLOAD_CACHE_METHOD,
             OFFLOAD_CACHE_BUDGET,
             OFFLOAD_CACHE_KV_HEAD,
             OFFLOAD_CACHE_K_TABLES,
@@ -9220,7 +9265,7 @@ def block_sparse_attention_cuda(
     
     if BLOCK_SIZE_Q < 16:
         acc = tl.zeros((16, HID), dtype=tl.bfloat16)
-        m_i = tl.full((16, 1), -float("inf"), dtype=tl.float32)
+        m_i = tl.full((16, 1), -float("inf"), dtype=tl.bfloat16)
         l_i = tl.full((16, 1), 1.0, dtype=tl.float32)
     else:
         acc = tl.zeros((BLOCK_SIZE_Q, HID), dtype=tl.bfloat16)
