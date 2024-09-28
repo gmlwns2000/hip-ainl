@@ -1753,8 +1753,8 @@ def main_latency_benchmark():
     past_key_value = None
     if METHOD in ['h2o', 'h2o_stream'] and os.getenv('H2O_DEFAULT', '3') =='5':
         config = LlamaConfig.from_pretrained(model_id)
-        config.hh_size = 4
-        config.recent_size = args.k
+        config.hh_size = args.k // 2
+        config.recent_size = args.k // 2
         config._attn_implementation = config.attn_implementation = 'eager'
         config.shift_q_pos = args.shift_q_pos
         config.streaming = args.streaming
@@ -1782,8 +1782,8 @@ def main_latency_benchmark():
         if QUERY_SIZE == 1:
             past_key_value = DynamicCache()
             for i in range(config.num_hidden_layers):
-                past_key_value.key_cache.append(k)
-                past_key_value.value_cache.append(v)
+                past_key_value.key_cache.append(k[:, :, -mask_k:, :].clone())
+                past_key_value.value_cache.append(v[:, :, -mask_k:, :].clone())
             
             from hip.models.h2o_llama import repeat_kv
             k = repeat_kv(k, num_key_value_groups)
@@ -1918,6 +1918,7 @@ def main_latency_benchmark():
                     else:
                         # compute_final_attn_output = False
                         k_cache, v_cache = past_key_value[0]
+                        # print(k_cache.shape, v_cache.shape)
                         attn_output, attn_weights= h2o_attention._h2o_attention_itself(
                             q,
                             torch.cat([k_cache, k[:, :, -1:, :]], dim=2),
