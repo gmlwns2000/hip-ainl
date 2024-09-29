@@ -20,6 +20,8 @@ output*.txt
 !./saves/README.md
 
 saves/
+saves_/
+saves__/
 cache/
 .torch/
 wandb/

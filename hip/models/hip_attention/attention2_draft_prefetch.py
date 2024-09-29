@@ -8095,7 +8095,7 @@ def masking_iteration_draft(
                 mask_k = args.mask_k * args.multi_branch_ratio # TODO check
                 multi_branch_ratio_per_layer = 1
         else:
-            raise Exception(multi_branch_true_iter_cnt)
+            raise Exception()
     else:
         multi_branch_on_layer = False
         multi_branch_ratio_per_layer = 1
@@ -8378,6 +8378,9 @@ def masking_iteration_draft(
         pre_device = torch.get_default_device()
         torch.set_default_device(indices.device)
         
+        # NOTE KS : * multi_branch_ratio_per_layer
+        if multi_branch_on_layer:
+            assert args.multi_branch_ret_ratio_select_all == True
         masking_iteration_draft_cuda_initialize[grid](
             indices_seed, *(indices_seed.stride() if indices_seed is not None else (0, 0, 0)),
             ks_seed, *(ks_seed.stride() if ks_seed is not None else (0, 0)),
@@ -8895,6 +8898,15 @@ def masking_iteration_draft(
     # print(t)
     # print(tu)
     # print(t.shape, tu.shape, c)
+    
+    unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
+    indices = torch.where(unique_mask, indices, torch.iinfo(indices.dtype).max)
+    indices = indices.sort(dim=-1).values
+    # active_mask = unique_mask
+    active_mask = indices < (args.position_ids[:, ::args.block_size_q, None].repeat_interleave(HEAD, 0) + args.block_size_q)
+    ks = active_mask.int().sum(-1)
+    ks_count = ks.unsqueeze(-1)
+    ks_start_end[:, :, -1] = ks
     
     return (
         indices, 
@@ -10945,10 +10957,11 @@ def hip_attention(
     
     if os.getenv('DEBUG_MULTI_BRANCH', '0')== '1':
         os.makedirs('./cache/llama_default/', exist_ok=True)
+        os.makedirs('./cache/llama_multi/', exist_ok=True)
         torch.save({
             'metadata': metadata,
             'context': context,
-        }, f'./cache/llama_default/metadata_l{args.layer_id}.pth')
+        }, f'./cache/llama_default/metadata_l{args.layer_id}_t{context.shape[1]}.pth')
         print(f'l{args.layer_id} stored. press enter to continue >>> ')
     
     return context, sparsity, metadata

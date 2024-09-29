@@ -28,16 +28,21 @@ setup_seaborn(axis_below=True)
 
 TDST = 8192
 TSRC = 8192
-BQ = 32
+BQ = 64
 BK = 2
 MASK_K = 512
+MULTI_BRANCH_ON_LAYER = 4
 
 @numba.njit
 def convert_to_dense(indices, ks, TDST, TSRC, BQ, BK, MASK_K):
+    # NOTE only print 0th head
+    # indices : [BSZ * BH, TDST//BQ, MASK_K//BK * MULTI_BRANCH_ON_LAYER]
+    # ks : [BSZ * BH, TDST//BQ] <- values till MASK_K//BK * MULTI_BRANCH_ON_LAYER
+    
     mask = np.zeros((TDST, TSRC))
     for i in range(TDST // BQ):
         kk = ks[0, i]
-        for j in range(MASK_K // BK):
+        for j in range(MASK_K // BK * MULTI_BRANCH_ON_LAYER):
             if j < kk:
                 t = indices[0, i, j]
                 mask[i*BQ:i*BQ+BQ, t:t+BK] = 1
@@ -45,41 +50,45 @@ def convert_to_dense(indices, ks, TDST, TSRC, BQ, BK, MASK_K):
 
 import matplotlib.cm as cm
 
-def render_plot(cache_path, name, iteration):
+from hip.models.hip_attention.attention1_block_gpu import to_dense
+
+def render_plot(cache_path, layer, name):
     data = torch.load(cache_path, map_location='cpu')
     data = data['metadata']
 
     indices = data.indices.numpy()
     ks = data.ks.numpy()
+
+    mask = to_dense(indices, ks, None, ks.shape[0], TDST, TSRC, BQ, BK)
     
-    ws = np.full((TDST, ), MASK_K) * (2**max(0, iteration-1))
-    tsrcs = np.arange(TSRC - TDST, TSRC)
-    tsrcs = tsrcs - (tsrcs % BQ) + BQ
-    ws = np.minimum(tsrcs, ws)
+    mask_image = mask * 255
     
-    # scales = tsrcs / ws
+    # for i in range(TDST):
+    #     # scale = scales[i]
+    #     row = mask[i:i+1, :]
+    #     row_resize = cv2.resize(row, None, fx=1.0, fy=1.0, interpolation=cv2.INTER_NEAREST) # fx=scale, 
+    #     mask[i:i+1, :] = row_resize[:, :TSRC]
     
-    mask = convert_to_dense(indices, ks, TDST, TSRC, BQ, BK, MASK_K)
-    
-    for i in range(TDST):
-        # scale = scales[i]
-        row = mask[i:i+1, :]
-        row_resize = cv2.resize(row, None, fx=1.0, fy=1.0, interpolation=cv2.INTER_NEAREST) # fx=scale, 
-        mask[i:i+1, :] = row_resize[:, :TSRC]
-    
-    root = './saves/plot_hip'
-    path = os.path.join(root, f'{name}.png')
+    root = f'./saves__/plot_l{layer}'
     os.makedirs(root, exist_ok=True)
     
-    plt.figure(figsize=(4, 3))
-    plt.imshow(mask, cmap='summer')
-    plt.savefig(path, dpi=400, bbox_inches='tight')
+    for i in range(mask.shape[0]):
+        img_path = os.path.join(root, f'{name}_t8192_{i}.png')
+        
+        cv2.imwrite(img_path, mask_image[i])
     
-    print('saved', path)
+    tensor_path = os.path.join(root, f'{name}_t8192.pth')
+    torch.save({
+        # 'mask':mask,
+        'sum':mask.sum()
+    }, tensor_path)
+    
+    print('saved', img_path)
 
 if __name__ == '__main__':
-    for i in range(32):
-        render_plot(f'./cache/llama/metadata_l{i}.pth', f'mask_l{i}', 0)
+    for s in ['multi', 'default']: # 'multi', 
+        for i in range(3):
+            render_plot(f'./cache/llama_{s}/metadata_l{i}_t8192.pth', i, f'hip_{s}')
     # render_plot('./saves/attention1_block_gpu/checkout_mask_1.pth', 'mask_1', 1)
     # render_plot('./saves/attention1_block_gpu/checkout_mask_2.pth', 'mask_2', 2)
     # render_plot('./saves/attention1_block_gpu/checkout_mask_3.pth', 'mask_3', 3)
