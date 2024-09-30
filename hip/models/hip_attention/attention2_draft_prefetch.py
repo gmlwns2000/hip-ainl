@@ -8189,7 +8189,7 @@ def masking_iteration_draft(
         elif args.multi_branch_true_iter_str == 'last':
             multi_branch_true_iter = max(total_iteration - 1, 1) # TODO check
         else:
-            raise Exception(multi_branch_true_iter_str)
+            raise Exception(args.multi_branch_true_iter_str)
     else:
         multi_branch_true_iter = -1 # TODO change later
     
