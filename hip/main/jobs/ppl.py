@@ -198,6 +198,7 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, visuali
                         print([f'{x.item():.5f}' for x in samples])
                     neg_log_likelihood = min(samples)
 
+            breakpoint()
             nlls.append(neg_log_likelihood.cpu())
 
             prev_end_loc = end_loc

@@ -2025,6 +2025,7 @@ def multi_branch_dupped_group_sizes_and_sampling_method_cal(
     mask_bk_dup,
     idx_iteration,
     grid_i,
+    mask=None,
 
     pid_0=None,
     pid_1=None,
@@ -2034,32 +2035,38 @@ def multi_branch_dupped_group_sizes_and_sampling_method_cal(
     branch_location = grid_i
     # idx_bk_dup : idx_bk_dup = pid_bbk * BLOCK_BK * 2 * multi_branch_ratio + tl.arange(0, BLOCK_BK * 2 * multi_branch_ratio)
     
-    # load only those indices
-    idx_bk_dup_bl = tl.arange(0, BLOCK_BK) * (2 * multi_branch_ratio) + branch_location
-    idx_bk_dup_bl_1 = tl.arange(0, BLOCK_BK) * (2 * multi_branch_ratio) + branch_location + 1
+    if mask is None:
+        mask = tl.full((BLOCK_BK,), 1, dtype=tl.int8) # [BLOCK_BK]
+        mask = mask.to(tl.int1)
+    else:
+        mask = ~mask.reshape(BLOCK_BK) # [BLOCK_BK] # mask = tl.expand_dims(group_sizes, axis=1) <= M2; False have to compute as usual
     
-    dupped_indices_bl = tl.load( # BLOCK_BK
+    # load only those indices
+    idx_bk_dup_bl = tl.arange(0, BLOCK_BK) * (2 * multi_branch_ratio * G) + branch_location
+    idx_bk_dup_bl_1 = tl.arange(0, BLOCK_BK) * (2 * multi_branch_ratio * G) + branch_location + 1
+    
+    dupped_indices_bl = tl.load( # BLOCK_BK or less
         DUPPED_INDICES +\
             idx_b * stride_dupped_indices_b +\
             idx_bdst * stride_dupped_indices_bdst +\
             idx_bk_dup_bl * stride_dupped_indices_bk,
-        mask = idx_bk_dup_bl < (BK * 2 * G * multi_branch_ratio),
+        mask = (idx_bk_dup_bl < (BK * 2 * G * multi_branch_ratio)) & mask,
         cache_modifier=DEFAULT_CACHE_MODIFIER,
     )
     
     # dupped_group_sizes
     if branch_location != 2 * multi_branch_ratio -1:
         # in (branch_location) idx, dupped_group_sizes stores (branch_location + 1)_dupped_indices - (branch_location)_dupped_indices
-        dupped_indices_bl_1 = tl.load( # BLOCK_BK
+        dupped_indices_bl_1 = tl.load( # BLOCK_BK or less
             DUPPED_INDICES +\
                 idx_b * stride_dupped_indices_b +\
                 idx_bdst * stride_dupped_indices_bdst +\
                 idx_bk_dup_bl_1 * stride_dupped_indices_bk,
-            mask = idx_bk_dup_bl_1 < (BK * 2 * G * multi_branch_ratio),
+            mask = (idx_bk_dup_bl_1 < (BK * 2 * G * multi_branch_ratio)) & mask,
             cache_modifier=DEFAULT_CACHE_MODIFIER,
         )
         
-        dupped_group_sizes_temp = dupped_indices_bl_1 - dupped_indices_bl # BLOCK_BK
+        dupped_group_sizes_temp = dupped_indices_bl_1 - dupped_indices_bl # BLOCK_BK or less
         # TODO NOTE : not using dupped_mask here; but original HiP needs dupped_mask when SAMPLING_METHOD == oracle
         dupped_indices_for_keys_bl = dupped_indices_bl
 
@@ -2155,7 +2162,7 @@ def multi_branch_dupped_group_sizes_and_sampling_method_cal(
             assert SAMPLE_METHOD == 'first'
 
     else:
-        dupped_group_sizes_temp = tl.full((BLOCK_BK, ), 2 * multi_branch_ratio, dupped_indices_bl.dtype) - dupped_indices_bl
+        dupped_group_sizes_temp = tl.full((dupped_indices_bl.shape[0], ), 2 * multi_branch_ratio, dupped_indices_bl.dtype) - dupped_indices_bl
 
         dupped_indices_for_keys_bl = dupped_indices_bl
 
@@ -2251,7 +2258,7 @@ def multi_branch_dupped_group_sizes_and_sampling_method_cal(
             idx_bdst * stride_dupped_indices_bdst +\
             idx_bk_dup_bl * stride_dupped_indices_bk,
         value = dupped_indices_for_keys_bl,
-        mask = idx_bk_dup_bl < (BK * 2 * G * multi_branch_ratio),
+        mask = (idx_bk_dup_bl < (BK * 2 * G * multi_branch_ratio)) & mask,
         cache_modifier=DEFAULT_CACHE_MODIFIER,
     )
 
@@ -2261,7 +2268,7 @@ def multi_branch_dupped_group_sizes_and_sampling_method_cal(
             idx_bdst * stride_dupped_group_size_bdst +\
             idx_bk_dup_bl * stride_dupped_group_size_bk,
         value = dupped_group_sizes_temp,
-        mask = idx_bk_dup_bl < (BK * 2 * G * multi_branch_ratio),
+        mask = (idx_bk_dup_bl < (BK * 2 * G * multi_branch_ratio)) & mask,
         cache_modifier=DEFAULT_CACHE_MODIFIER,
     )
 
@@ -2275,6 +2282,9 @@ def multi_branch_dupped_indices_cal(
     stride_dupped_group_size_b, 
     stride_dupped_group_size_bdst, 
     stride_dupped_group_size_bk,
+    
+    CONDITION,
+    stride_condition_size_bk_mul,
 
     BLOCK_BK,
     BK,
@@ -2293,6 +2303,7 @@ def multi_branch_dupped_indices_cal(
     mask_bk_dup,
     idx_iteration,
     grid_i,
+    mask=None,
 
     pid_0 = None,
     pid_1 = None,
@@ -2300,36 +2311,65 @@ def multi_branch_dupped_indices_cal(
 ):
     # two indices are done together for dupped_group_sizes
     branch_location = grid_i + 1 # 1 ~ 2 * multi_branch_ratio - 1
+    
+    if mask is None:
+        mask = tl.full((BLOCK_BK * 2 * multi_branch_ratio * G,), 1, dtype=tl.int8)
+        mask = mask.to(tl.int1)
+    else:
+        # mask = tl.expand_dims(group_sizes, axis=1) <= M2 [BLOCK_BK, 1]
+        mask = tl.broadcast_to(mask, (BLOCK_BK, 2 * multi_branch_ratio * G)).reshape(BLOCK_BK * 2 * multi_branch_ratio * G)
+        mask = ~mask # True if group_sizes is greated than M2
+    
+    # mask : [BLOCK_BK * 2 * multi_branch_ratio * G]
+    # mask_bk_dup : [BLOCK_BK * 2 * multi_branch_ratio]
 
-    dupped_indices = tl.load(
+    dupped_indices = tl.load( # BLOCK_BK * 2 * multi_branch_ratio or less (those chunks that need computation)
         DUPPED_INDICES +\
             idx_b * stride_dupped_indices_b +\
             idx_bdst * stride_dupped_indices_bdst +\
             idx_bk_dup * stride_dupped_indices_bk,
-        mask=mask_bk_dup,
+        mask=mask_bk_dup & mask, # NOTE need to load all?
         cache_modifier=DEFAULT_CACHE_MODIFIER,
     )
-    dupped_group_sizes = tl.load(
+    dupped_group_sizes = tl.load( # TTTTTTTTFFF & TTTFFFTTTFFF
         DUPPED_GROUP_SIZE +\
             idx_b * stride_dupped_group_size_b +\
             idx_bdst * stride_dupped_group_size_bdst +\
             idx_bk_dup * stride_dupped_group_size_bk,
-        mask=mask_bk_dup,
+        mask=mask_bk_dup & mask, # NOTE need to load all?
         cache_modifier=DEFAULT_CACHE_MODIFIER,
     )
 
     tl.device_assert(BRANCH_METHOD != 'half')
     
+    idx_bk_mul = tl.arange(0, BLOCK_BK * 2 * multi_branch_ratio)
+    branch_condition = (idx_bk_mul % (2 * multi_branch_ratio)) == branch_location
+    
+    tl.store(
+        CONDITION +\
+            idx_bk_mul * stride_condition_size_bk_mul,
+        value=branch_condition,
+        mask=mask_bk_dup & mask,
+        cache_modifier=DEFAULT_CACHE_MODIFIER,
+    )
+    
+    branch_condition = tl.load(
+        CONDITION +\
+            idx_bk_mul * stride_condition_size_bk_mul,
+        mask=mask_bk_dup & mask,
+        cache_modifier=DEFAULT_CACHE_MODIFIER,
+    )
+    
     if branch_location != 0 and BRANCH_METHOD == 'equal_size':
-        dupped_indices = tl.where(
-            (tl.arange(0, BLOCK_BK * 2 * multi_branch_ratio) % (2 * multi_branch_ratio)) == branch_location,
+        dupped_indices = tl.where( # BLOCK_BK * 2 * multi_branch_ratio * G
+            branch_condition,
             (dupped_indices + dupped_group_sizes * (1/(2 * multi_branch_ratio)) * branch_location).to(tl.int32),
             dupped_indices
         )
     # TODO check pids
     elif branch_location != 0 and BRANCH_METHOD == 'random':
         dupped_indices = tl.where(
-            (tl.arange(0, BLOCK_BK * 2 * multi_branch_ratio) % (2 * multi_branch_ratio)) == branch_location,
+            branch_condition,
             tl.where(
                 dupped_group_sizes == 0,
                 dupped_indices,
@@ -2352,7 +2392,7 @@ def multi_branch_dupped_indices_cal(
 
     elif branch_location != 0 and BRANCH_METHOD == 'random_per_iter':
         dupped_indices = tl.where(
-            (tl.arange(0, BLOCK_BK * 2 * multi_branch_ratio) % (2 * multi_branch_ratio)) == branch_location,
+            branch_condition,
             tl.where(
                 dupped_group_sizes == 0,
                 dupped_indices,
@@ -2379,7 +2419,7 @@ def multi_branch_dupped_indices_cal(
             idx_bdst * stride_dupped_indices_bdst +\
             idx_bk_dup * stride_dupped_indices_bk,
         value=dupped_indices,
-        mask=mask_bk_dup,
+        mask=mask_bk_dup & mask, # TODO check
         cache_modifier=DEFAULT_CACHE_MODIFIER,
     )    
 
@@ -3340,6 +3380,9 @@ def masking_iteration_draft_cuda_dup_and_score_multi_branch_curr(
     idx_tdst_no_proj,
     mask_tdst,
     
+    CONDITION, 
+    stride_condition_size_bk_mul,
+    
     # pid_0=None,
     # pid_1=None,
     # pid_2=None,
@@ -3399,401 +3442,882 @@ def masking_iteration_draft_cuda_dup_and_score_multi_branch_curr(
         cache_modifier=DEFAULT_CACHE_MODIFIER,
     )
     
-    # TODO NOTE current implementation doesn't support multi multi_branching
-
-    # duplicate (2 * multi_branch_ratio_per_iter) times -> broadcast
-    # TODO NOTE!!! check if tl.trans works well
-    # [BLOCK_BK] -> [BLOCK_BK * 2 * multi_branch_ratio]
-    indices_ = tl.broadcast_to(indices[None, :], (2 * multi_branch_ratio_per_layer, BLOCK_BK)) # multi_branch_ratio_per_iter
-    group_sizes_ = tl.broadcast_to(group_sizes[None, :], (2 * multi_branch_ratio_per_layer, BLOCK_BK))
-
-    dupped_indices = tl.reshape(
-        tl.trans(indices_), # BLOCK_BK x (2 * multi_branch_ratio)
-        (BLOCK_BK * 2 * multi_branch_ratio_per_layer,),
-    )
-    dupped_group_sizes = tl.reshape(
-        tl.trans(group_sizes_),
-        (BLOCK_BK * 2 * multi_branch_ratio_per_layer,)
-    )
-
-    # TODO can we discard these??
-    tl.store(
-        DUPPED_INDICES +\
-            idx_b * stride_dupped_indices_b +\
-            idx_bdst * stride_dupped_indices_bdst +\
-            idx_bk_dup * stride_dupped_indices_bk,
-        value=dupped_indices,
-        mask=mask_bk_dup,
-        cache_modifier=DEFAULT_CACHE_MODIFIER,
-    )
-    tl.store(
-        DUPPED_GROUP_SIZE +\
-            idx_b * stride_dupped_group_size_b +\
-            idx_bdst * stride_dupped_group_size_bdst +\
-            idx_bk_dup * stride_dupped_group_size_bk,
-        value=dupped_group_sizes,
-        mask=mask_bk_dup,
-        cache_modifier=DEFAULT_CACHE_MODIFIER,
-    )
+    M2:tl.constexpr = tl.constexpr(2 * multi_branch_ratio_per_layer)
     
-    for grid_i in range(0, 2 * multi_branch_ratio_per_layer - 1): # 0th index should not be changed
-        multi_branch_dupped_indices_cal(
-            DUPPED_INDICES, 
-            stride_dupped_indices_b, 
-            stride_dupped_indices_bdst, 
-            stride_dupped_indices_bk,
-            DUPPED_GROUP_SIZE, 
-            stride_dupped_group_size_b, 
-            stride_dupped_group_size_bdst, 
-            stride_dupped_group_size_bk,
+    if t_group_size <= M2:
+        garbage_value = MAX_TSRC + 1
+        dupped_indices = tl.full((BLOCK_BK, M2), garbage_value, dtype=indices.dtype)
+        group_indices = tl.broadcast_to(tl.expand_dims(tl.arange(0, M2), axis=0), (BLOCK_BK, M2))  # Shape (1, t_group_size)
 
-            BLOCK_BK,
-            BK,
-            G,
-            RAND_SEED,
+        group_indices = group_indices + tl.expand_dims(indices, axis=1)
+        scatter_indices = tl.broadcast_to(tl.expand_dims(tl.arange(0, M2), axis=0), (BLOCK_BK, M2))
 
-            BRANCH_METHOD,
-
-            # multi_branch
-            multi_branch_ratio_per_layer,
-
-            idx_b,
-            idx_bdst,
-            # pid_bbk,
-            idx_bk_dup, # TODO check : can we send tensor?
-            mask_bk_dup,
-            idx_iteration,
-            grid_i,
-
-            pid_0=tl.program_id(0), # TODO !!!! tl.program_id seem to be a bug
-            pid_1=tl.program_id(1),
-            pid_2=tl.program_id(2),
-        )
-
-    # TODO more efficient??? - doing load store for each grid element
-    for grid_i in range(0, 2 * multi_branch_ratio_per_layer):
-        multi_branch_dupped_group_sizes_and_sampling_method_cal(
-            DUPPED_INDICES, 
-            stride_dupped_indices_b, 
-            stride_dupped_indices_bdst, 
-            stride_dupped_indices_bk,
-            DUPPED_GROUP_SIZE, 
-            stride_dupped_group_size_b, 
-            stride_dupped_group_size_bdst, 
-            stride_dupped_group_size_bk,
-
-            ACCESS_LOG_STORE_FROM,
-            BLOCK_BK,
-            BK,
-            G,
-            RAND_SEED,
-
-            SAMPLE_METHOD,
-
-            # multi_branch
-            multi_branch_ratio_per_layer,
-
-            idx_b,
-            idx_bdst,
-            # pid_bbk,
-            idx_bk_dup, # TODO check : can we send tensor?
-            mask_bk_dup,
-            idx_iteration,
-            grid_i,
-
-            pid_0=tl.program_id(0), # TODO !!!! tl.program_id seem to be a bug
-            pid_1=tl.program_id(1),
-            pid_2=tl.program_id(2),
-        )
-    
-    dupped_group_sizes = tl.load(
-        DUPPED_GROUP_SIZE +\
-            idx_b * stride_dupped_group_size_b +\
-            idx_bdst * stride_dupped_group_size_bdst +\
-            idx_bk_dup * stride_dupped_group_size_bk,
-        mask=mask_bk_dup,
-        cache_modifier=DEFAULT_CACHE_MODIFIER,
-    )
-    
-    dupped_mask = (dupped_group_sizes > 0) & mask_bk_dup
-    
-    dupped_indices_for_keys = tl.load(
-        DUPPED_INDICES +\
-            idx_b * stride_dupped_indices_b +\
-            idx_bdst * stride_dupped_indices_bdst +\
-            idx_bk_dup * stride_dupped_indices_bk,
-        mask=mask_bk_dup,
-        cache_modifier=DEFAULT_CACHE_MODIFIER,
-    )
-    
-    if SCORES_CACHED:
-        raise Exception()
-        cached_scores = tl.load(
-            SCORES_FINAL +\
-                idx_b * stride_scores_final_b+\
-                idx_bdst * stride_scores_final_bdst+\
-                idx_bk * stride_scores_final_bk,
-            mask = mask_bk,
-            cache_modifier=DEFAULT_CACHE_MODIFIER,
-        )
-    
-        # dupped_indices_for_keys = dupped_indices <- before applying SAMPLING_METHOD
-        # dupped_indices_for_keys : BLOCK_BK * 2 * multi_branch_ratio
-        # 1, 2 * multi_branch_ratio - 1
-        # TODO can we do it all 2* multi_branch_ratio together at once? would it be better? -> can use return. if not, have to store
-        # TODO check all arange start, end
-        scores_sampled = multi_branch_masking_iteration_draft_cuda_dup_and_score_calc_score(
-            2 * multi_branch_ratio_per_layer - 1,
-            
-            Q, stride_q_bsz, stride_q_tdst, stride_q_bh, stride_q_g, stride_q_hid,
-            K, stride_k_bsz, stride_k_tsrc, stride_k_head, stride_k_hid,
-            COS, stride_cos_t, stride_cos_hid,
-            SIN, stride_sin_t, stride_sin_hid,
-            
-            ACCESS_LOG_STORE_FROM,
-            KEY_ACCESS_LOG, 
-            stride_key_access_log_b, 
-            stride_key_access_log_bdst, 
-            stride_key_access_log_t,
-            KEY_ACCESS_COUNT,
-            stride_key_access_count_b,
-            stride_key_access_count_bdst,
-            MAX_ACCESS_COUNT,
-
-            DUPPED_INDICES,
-            stride_dupped_indices_b,
-            stride_dupped_indices_bdst,
-            stride_dupped_indices_bk,
-
-            DUPPED_GROUP_SIZE,
-            stride_dupped_group_size_b,
-            stride_dupped_group_size_bdst,
-            stride_dupped_group_size_bk,
-
-            SCORES,
-            stride_scores_b,
-            stride_scores_bdst,
-            stride_scores_bk,
-            SCORES_CACHED,
-            
-            BLOCK_ACCESS_LOG,
-            stride_block_access_log_b,
-            stride_block_access_log_bdst,
-            stride_block_access_log_t,
-            BLOCK_ACCESS_SCORE,
-            stride_block_access_score_b,
-            stride_block_access_score_bdst,
-            stride_block_access_score_t,
-            BLOCK_ACCESS_COUNT,
-            stride_block_access_count_b,
-            stride_block_access_count_bdst,
-            MAX_BLOCK_ACCESS_COUNT,
-            
-            idx_b, 
-            idx_bdst,
-            idx_tdst, mask_tdst, pos_tdst,
-            mask_to_sample,
-            
-            sliding_window_size, BH, BK, G, MAX_TSRC, HID, KV_HEAD_REPEAT,
-            
-            USING_EXTEND,
-            extend_window_size,
-            extend_group_size,
-            
-            USING_SPARQ,
-            SPARQ_HID,
-            Q_IND, 
-            stride_q_ind_b, 
-            stride_q_ind_g, 
-            stride_q_ind_bdst, 
-            stride_q_ind_k,
-            
-            # paged attention args template
-            USING_PAGES,
-            PAGE_SIZE,
-            K_CACHE, 
-            stride_k_cache_page, 
-            stride_k_cache_offset, 
-            stride_k_cache_kv_head, 
-            stride_k_cache_hid,
-            V_CACHE,
-            stride_v_cache_page,
-            stride_v_cache_offset,
-            stride_v_cache_kv_head,
-            stride_v_cache_hid,
-            BLOCK_TABLE,
-            stride_block_table_bsz,
-            stride_block_table_page,
-            CACHE_SEQ_LENS,
-            stride_cache_seq_lens_bsz,
-            
-            BLOCK_SIZE_Q,
-            BLOCK_STRIDE_Q,
-            BLOCK_SIZE_K,
-            BLOCK_STRIDE_K,
-            BLOCK_BK,
-            # BLOCK_BK // 2,
-            'max',
-
-            # multi_branching
-            multi_branch_ratio_per_layer,
-            idx_iteration,
-            multi_branch_true_iter,
-            multi_branch_on_layer,
-        )
-
-        idx_dup_bk_cached_score = tl.arange(0, BLOCK_BK) * (2 * multi_branch_ratio_per_layer)
-        mask_dup_bk_cached_score = idx_dup_bk_cached_score < (BK * 2 * G * multi_branch_ratio_per_layer)
-        # store cached_scores; non cached_scores are already stored TODO check
-        tl.store(
-            SCORES +\
-                idx_b * stride_scores_b +\
-                idx_bdst * stride_scores_bdst +\
-                idx_dup_bk_cached_score * stride_scores_bk,
-            value = cached_scores,
-            mask = mask_dup_bk_cached_score,
-            cache_modifier=DEFAULT_CACHE_MODIFIER,
-        )
-    else: # no caching
-        indices_to_sample = dupped_indices_for_keys # BLOCK_BK * 2 * multi_branch_ratio_per_iter
-        mask_to_sample = dupped_mask # BLOCK_BK * 2 * multi_branch_ratio_per_iter
-
-        scores_sampled = masking_iteration_draft_cuda_dup_and_score_calc_score(
-            indices_to_sample,
-            2 * multi_branch_ratio_per_layer,
-            
-            Q, stride_q_bsz, stride_q_tdst, stride_q_bh, stride_q_g, stride_q_hid,
-            K, stride_k_bsz, stride_k_tsrc, stride_k_head, stride_k_hid,
-            COS, stride_cos_t, stride_cos_hid,
-            SIN, stride_sin_t, stride_sin_hid,
-            
-            VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
-            DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
-            
-            ACCESS_LOG_STORE_FROM,
-            KEY_ACCESS_LOG, 
-            stride_key_access_log_b, 
-            stride_key_access_log_bdst, 
-            stride_key_access_log_t,
-            KEY_ACCESS_COUNT,
-            stride_key_access_count_b,
-            stride_key_access_count_bdst,
-            MAX_ACCESS_COUNT,
-            
-            DUPPED_INDICES,
-            stride_dupped_indices_b,
-            stride_dupped_indices_bdst,
-            stride_dupped_indices_bk,
-
-            DUPPED_GROUP_SIZE,
-            stride_dupped_group_size_b,
-            stride_dupped_group_size_bdst,
-            stride_dupped_group_size_bk,
-
-            SCORES,
-            stride_scores_b,
-            stride_scores_bdst,
-            stride_scores_bk,
-            SCORES_CACHED,
-            
-            BLOCK_ACCESS_LOG,
-            stride_block_access_log_b,
-            stride_block_access_log_bdst,
-            stride_block_access_log_t,
-            BLOCK_ACCESS_SCORE,
-            stride_block_access_score_b,
-            stride_block_access_score_bdst,
-            stride_block_access_score_t,
-            BLOCK_ACCESS_COUNT,
-            stride_block_access_count_b,
-            stride_block_access_count_bdst,
-            MAX_BLOCK_ACCESS_COUNT,
-            
-            idx_b, 
-            idx_bdst,
-            idx_tdst, mask_tdst, pos_tdst,
-            mask_to_sample,
-            
-            sliding_window_size, BH, BK, G, MAX_TDST, MAX_TSRC, HID, KV_HEAD_REPEAT,
-            
-            USING_EXTEND,
-            extend_window_size,
-            extend_group_size,
-            
-            USING_SPARQ,
-            SPARQ_HID,
-            Q_IND, 
-            stride_q_ind_b, 
-            stride_q_ind_g, 
-            stride_q_ind_bdst, 
-            stride_q_ind_k,
-            
-            # paged attention args template
-            USING_PAGES,
-            PAGE_SIZE,
-            K_CACHE, 
-            stride_k_cache_page, 
-            stride_k_cache_offset, 
-            stride_k_cache_kv_head, 
-            stride_k_cache_hid,
-            V_CACHE,
-            stride_v_cache_page,
-            stride_v_cache_offset,
-            stride_v_cache_kv_head,
-            stride_v_cache_hid,
-            BLOCK_TABLE,
-            stride_block_table_bsz,
-            stride_block_table_page,
-            CACHE_SEQ_LENS,
-            stride_cache_seq_lens_bsz,
-            
-            # offload cache args template
-            USING_OFFLOAD_CACHE,
-            OFFLOAD_CACHE_METHOD,
-            OFFLOAD_CACHE_BUDGET,
-            OFFLOAD_CACHE_KV_HEAD,
-            OFFLOAD_CACHE_K_TABLES,
-            stride_offload_cache_k_tables_n,
-            stride_offload_cache_k_tables_t,
-            OFFLOAD_CACHE_K_BANKS,
-            stride_offload_cache_k_banks_n,
-            stride_offload_cache_k_banks_page,
-            stride_offload_cache_k_banks_offset,
-            stride_offload_cache_k_banks_hid,
-            OFFLOAD_CACHE_K_BANK_STATS,
-            stride_offload_cache_k_bank_stats_n,
-            stride_offload_cache_k_bank_stats_page,
-            stride_offload_cache_k_bank_stats_k,
-            OFFLOAD_CACHE_COUNTERS,
-            stride_offload_cache_counters_n,
-            stride_offload_cache_counters_k,
-            
-            IS_CAUSAL,
-            BLOCK_SIZE_Q,
-            BLOCK_STRIDE_Q,
-            BLOCK_SIZE_K,
-            BLOCK_STRIDE_K,
-            BLOCK_BK,
-            # BLOCK_BK // 2,
-            'max',
-            
-            # multi_branching
-            multi_branch_ratio_per_layer,
-            idx_iteration,
-            multi_branch_true_iter,
-            multi_branch_on_layer,
-        )
-        scores = scores_sampled.to(SCORES.dtype.element_ty)
+        valid_mask = scatter_indices < tl.expand_dims(group_sizes, axis=1)
+        
+        dupped_indices = tl.where(valid_mask, group_indices, dupped_indices)
+        dupped_group_sizes = tl.full((BLOCK_BK, M2), 1, dtype=group_sizes.dtype)
+        # dupped_group_sizes = torch.ones((BLOCK_BK, M2), dtype=group_sizes.dtype)
+        
+        dupped_indices = tl.reshape(dupped_indices, (BLOCK_BK * M2))
+        dupped_group_sizes = tl.reshape(dupped_group_sizes, (BLOCK_BK * M2))
+        
+        # mask_bk_dup = mask_bk_dup & (dupped_indices < garbage_value) # TODO check whether garbage value is managed well
         
         tl.store(
-            SCORES +\
-                idx_b * stride_scores_b +\
-                idx_bdst * stride_scores_bdst +\
-                idx_bk_dup * stride_scores_bk,
-            value=scores,
+            DUPPED_INDICES +\
+                idx_b * stride_dupped_indices_b +\
+                idx_bdst * stride_dupped_indices_bdst +\
+                idx_bk_dup * stride_dupped_indices_bk,
+            value=dupped_indices,
             mask=mask_bk_dup,
             cache_modifier=DEFAULT_CACHE_MODIFIER,
         )
+        tl.store(
+            DUPPED_GROUP_SIZE +\
+                idx_b * stride_dupped_group_size_b +\
+                idx_bdst * stride_dupped_group_size_bdst +\
+                idx_bk_dup * stride_dupped_group_size_bk,
+            value=dupped_group_sizes,
+            mask=mask_bk_dup,
+            cache_modifier=DEFAULT_CACHE_MODIFIER,
+        )
+        
+        dupped_indices_for_keys = dupped_indices
+        dupped_mask = (dupped_group_sizes > 0) & mask_bk_dup
+        
+        if SCORES_CACHED:
+            raise Exception()
+        else:
+            indices_to_sample = dupped_indices_for_keys
+            mask_to_sample = dupped_mask
+            
+            # TODO check handling garbage_value
+            scores_sampled = masking_iteration_draft_cuda_dup_and_score_calc_score(
+                indices_to_sample,
+                2 * multi_branch_ratio_per_layer,
+                
+                Q, stride_q_bsz, stride_q_tdst, stride_q_bh, stride_q_g, stride_q_hid,
+                K, stride_k_bsz, stride_k_tsrc, stride_k_head, stride_k_hid,
+                COS, stride_cos_t, stride_cos_hid,
+                SIN, stride_sin_t, stride_sin_hid,
+                
+                VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
+                DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
+                
+                ACCESS_LOG_STORE_FROM,
+                KEY_ACCESS_LOG, 
+                stride_key_access_log_b, 
+                stride_key_access_log_bdst, 
+                stride_key_access_log_t,
+                KEY_ACCESS_COUNT,
+                stride_key_access_count_b,
+                stride_key_access_count_bdst,
+                MAX_ACCESS_COUNT,
+                
+                DUPPED_INDICES,
+                stride_dupped_indices_b,
+                stride_dupped_indices_bdst,
+                stride_dupped_indices_bk,
+
+                DUPPED_GROUP_SIZE,
+                stride_dupped_group_size_b,
+                stride_dupped_group_size_bdst,
+                stride_dupped_group_size_bk,
+
+                SCORES,
+                stride_scores_b,
+                stride_scores_bdst,
+                stride_scores_bk,
+                SCORES_CACHED,
+                
+                BLOCK_ACCESS_LOG,
+                stride_block_access_log_b,
+                stride_block_access_log_bdst,
+                stride_block_access_log_t,
+                BLOCK_ACCESS_SCORE,
+                stride_block_access_score_b,
+                stride_block_access_score_bdst,
+                stride_block_access_score_t,
+                BLOCK_ACCESS_COUNT,
+                stride_block_access_count_b,
+                stride_block_access_count_bdst,
+                MAX_BLOCK_ACCESS_COUNT,
+                
+                idx_b, 
+                idx_bdst,
+                idx_tdst, mask_tdst, pos_tdst,
+                mask_to_sample,
+                
+                sliding_window_size, BH, BK, G, MAX_TDST, MAX_TSRC, HID, KV_HEAD_REPEAT,
+                
+                USING_EXTEND,
+                extend_window_size,
+                extend_group_size,
+                
+                USING_SPARQ,
+                SPARQ_HID,
+                Q_IND, 
+                stride_q_ind_b, 
+                stride_q_ind_g, 
+                stride_q_ind_bdst, 
+                stride_q_ind_k,
+                
+                # paged attention args template
+                USING_PAGES,
+                PAGE_SIZE,
+                K_CACHE, 
+                stride_k_cache_page, 
+                stride_k_cache_offset, 
+                stride_k_cache_kv_head, 
+                stride_k_cache_hid,
+                V_CACHE,
+                stride_v_cache_page,
+                stride_v_cache_offset,
+                stride_v_cache_kv_head,
+                stride_v_cache_hid,
+                BLOCK_TABLE,
+                stride_block_table_bsz,
+                stride_block_table_page,
+                CACHE_SEQ_LENS,
+                stride_cache_seq_lens_bsz,
+                
+                # offload cache args template
+                USING_OFFLOAD_CACHE,
+                OFFLOAD_CACHE_METHOD,
+                OFFLOAD_CACHE_BUDGET,
+                OFFLOAD_CACHE_KV_HEAD,
+                OFFLOAD_CACHE_K_TABLES,
+                stride_offload_cache_k_tables_n,
+                stride_offload_cache_k_tables_t,
+                OFFLOAD_CACHE_K_BANKS,
+                stride_offload_cache_k_banks_n,
+                stride_offload_cache_k_banks_page,
+                stride_offload_cache_k_banks_offset,
+                stride_offload_cache_k_banks_hid,
+                OFFLOAD_CACHE_K_BANK_STATS,
+                stride_offload_cache_k_bank_stats_n,
+                stride_offload_cache_k_bank_stats_page,
+                stride_offload_cache_k_bank_stats_k,
+                OFFLOAD_CACHE_COUNTERS,
+                stride_offload_cache_counters_n,
+                stride_offload_cache_counters_k,
+                
+                IS_CAUSAL,
+                BLOCK_SIZE_Q,
+                BLOCK_STRIDE_Q,
+                BLOCK_SIZE_K,
+                BLOCK_STRIDE_K,
+                BLOCK_BK,
+                # BLOCK_BK // 2,
+                'max',
+                
+                # multi_branching
+                multi_branch_ratio_per_layer,
+                idx_iteration,
+                multi_branch_true_iter,
+                multi_branch_on_layer,
+            )
+            scores = scores_sampled.to(SCORES.dtype.element_ty)
+            
+            tl.store(
+                SCORES +\
+                    idx_b * stride_scores_b +\
+                    idx_bdst * stride_scores_bdst +\
+                    idx_bk_dup * stride_scores_bk,
+                value=scores,
+                mask=mask_bk_dup,
+                cache_modifier=DEFAULT_CACHE_MODIFIER,
+            )
+            
+        return
+    
+    elif tl.min(group_sizes) <= M2:
+        garbage_value = MAX_TSRC + 1
+        dupped_indices = tl.full((BLOCK_BK, M2), garbage_value, dtype=indices.dtype)
+        group_indices = tl.broadcast_to(tl.expand_dims(tl.arange(0, M2), axis=0), (BLOCK_BK, M2))  # Shape (1, t_group_size)
+
+        group_indices = group_indices + tl.expand_dims(indices, axis=1)
+        scatter_indices = tl.broadcast_to(tl.expand_dims(tl.arange(0, M2), axis=0), (BLOCK_BK, M2))
+        
+        mask = tl.expand_dims(group_sizes, axis=1) <= M2
+
+        valid_mask = scatter_indices < tl.expand_dims(group_sizes, axis=1)
+        
+        dupped_indices = tl.where(valid_mask & mask, group_indices, dupped_indices) # TODO check
+        # dupped_indices.scatter_(1, scatter_indices, tl.where(valid_mask & mask, group_indices, dupped_indices))
+        dupped_group_sizes = tl.where(mask, tl.full((BLOCK_BK, M2), 1, dtype=group_sizes.dtype),
+                                tl.broadcast_to(tl.expand_dims(group_sizes, axis=1), (BLOCK_BK, M2)))
+        
+        dupped_indices = tl.where(mask, dupped_indices, tl.broadcast_to(tl.expand_dims(indices, axis=1), (BLOCK_BK, M2)))
+        
+        dupped_indices = tl.reshape(dupped_indices, (BLOCK_BK * M2))
+        dupped_group_sizes = tl.reshape(dupped_group_sizes, (BLOCK_BK * M2))
+        
+        # mask_bk_dup = mask_bk_dup & (dupped_indices < garbage_value) # TODO check : then it should ignore MAX_TSRC 
+        
+        tl.store(
+            DUPPED_INDICES +\
+                idx_b * stride_dupped_indices_b +\
+                idx_bdst * stride_dupped_indices_bdst +\
+                idx_bk_dup * stride_dupped_indices_bk,
+            value=dupped_indices,
+            mask=mask_bk_dup,
+            cache_modifier=DEFAULT_CACHE_MODIFIER,
+        )
+        tl.store(
+            DUPPED_GROUP_SIZE +\
+                idx_b * stride_dupped_group_size_b +\
+                idx_bdst * stride_dupped_group_size_bdst +\
+                idx_bk_dup * stride_dupped_group_size_bk,
+            value=dupped_group_sizes,
+            mask=mask_bk_dup,
+            cache_modifier=DEFAULT_CACHE_MODIFIER,
+        )
+        
+        for grid_i in range(0, 2 * multi_branch_ratio_per_layer - 1): # 0th index should not be changed
+            multi_branch_dupped_indices_cal(
+                DUPPED_INDICES, 
+                stride_dupped_indices_b, 
+                stride_dupped_indices_bdst, 
+                stride_dupped_indices_bk,
+                DUPPED_GROUP_SIZE, 
+                stride_dupped_group_size_b, 
+                stride_dupped_group_size_bdst, 
+                stride_dupped_group_size_bk,
+                
+                CONDITION, 
+                stride_condition_size_bk_mul,
+
+                BLOCK_BK,
+                BK,
+                G,
+                RAND_SEED,
+
+                BRANCH_METHOD,
+
+                # multi_branch
+                multi_branch_ratio_per_layer,
+
+                idx_b,
+                idx_bdst,
+                # pid_bbk,
+                idx_bk_dup, # TODO check : can we send tensor?
+                mask_bk_dup,
+                idx_iteration,
+                grid_i,
+                mask,
+
+                pid_0=tl.program_id(0), # TODO !!!! tl.program_id seem to be a bug
+                pid_1=tl.program_id(1),
+                pid_2=tl.program_id(2),
+            )
+
+        # TODO more efficient??? - doing load store for each grid element
+        for grid_i in range(0, 2 * multi_branch_ratio_per_layer):
+            multi_branch_dupped_group_sizes_and_sampling_method_cal(
+                DUPPED_INDICES, 
+                stride_dupped_indices_b, 
+                stride_dupped_indices_bdst, 
+                stride_dupped_indices_bk,
+                DUPPED_GROUP_SIZE, 
+                stride_dupped_group_size_b, 
+                stride_dupped_group_size_bdst, 
+                stride_dupped_group_size_bk,
+
+                ACCESS_LOG_STORE_FROM,
+                BLOCK_BK,
+                BK,
+                G,
+                RAND_SEED,
+
+                SAMPLE_METHOD,
+
+                # multi_branch
+                multi_branch_ratio_per_layer,
+
+                idx_b,
+                idx_bdst,
+                # pid_bbk,
+                idx_bk_dup, # TODO check : can we send tensor?
+                mask_bk_dup,
+                idx_iteration,
+                grid_i,
+                mask,
+
+                pid_0=tl.program_id(0), # TODO !!!! tl.program_id seem to be a bug
+                pid_1=tl.program_id(1),
+                pid_2=tl.program_id(2),
+            )
+        
+        # load all to calculate score
+        dupped_group_sizes = tl.load(
+            DUPPED_GROUP_SIZE +\
+                idx_b * stride_dupped_group_size_b +\
+                idx_bdst * stride_dupped_group_size_bdst +\
+                idx_bk_dup * stride_dupped_group_size_bk,
+            mask=mask_bk_dup,
+            cache_modifier=DEFAULT_CACHE_MODIFIER,
+        )
+        
+        dupped_mask = (dupped_group_sizes > 0) & mask_bk_dup
+        
+        dupped_indices_for_keys = tl.load(
+            DUPPED_INDICES +\
+                idx_b * stride_dupped_indices_b +\
+                idx_bdst * stride_dupped_indices_bdst +\
+                idx_bk_dup * stride_dupped_indices_bk,
+            mask=mask_bk_dup,
+            cache_modifier=DEFAULT_CACHE_MODIFIER,
+        )
+        
+        dupped_indices_for_keys = dupped_indices
+        dupped_mask = (dupped_group_sizes > 0) & mask_bk_dup
+        
+        if SCORES_CACHED:
+            raise Exception()
+        else:
+            indices_to_sample = dupped_indices_for_keys
+            mask_to_sample = dupped_mask
+            
+            # TODO check handling garbage_value
+            scores_sampled = masking_iteration_draft_cuda_dup_and_score_calc_score(
+                indices_to_sample,
+                2 * multi_branch_ratio_per_layer,
+                
+                Q, stride_q_bsz, stride_q_tdst, stride_q_bh, stride_q_g, stride_q_hid,
+                K, stride_k_bsz, stride_k_tsrc, stride_k_head, stride_k_hid,
+                COS, stride_cos_t, stride_cos_hid,
+                SIN, stride_sin_t, stride_sin_hid,
+                
+                VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
+                DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
+                
+                ACCESS_LOG_STORE_FROM,
+                KEY_ACCESS_LOG, 
+                stride_key_access_log_b, 
+                stride_key_access_log_bdst, 
+                stride_key_access_log_t,
+                KEY_ACCESS_COUNT,
+                stride_key_access_count_b,
+                stride_key_access_count_bdst,
+                MAX_ACCESS_COUNT,
+                
+                DUPPED_INDICES,
+                stride_dupped_indices_b,
+                stride_dupped_indices_bdst,
+                stride_dupped_indices_bk,
+
+                DUPPED_GROUP_SIZE,
+                stride_dupped_group_size_b,
+                stride_dupped_group_size_bdst,
+                stride_dupped_group_size_bk,
+
+                SCORES,
+                stride_scores_b,
+                stride_scores_bdst,
+                stride_scores_bk,
+                SCORES_CACHED,
+                
+                BLOCK_ACCESS_LOG,
+                stride_block_access_log_b,
+                stride_block_access_log_bdst,
+                stride_block_access_log_t,
+                BLOCK_ACCESS_SCORE,
+                stride_block_access_score_b,
+                stride_block_access_score_bdst,
+                stride_block_access_score_t,
+                BLOCK_ACCESS_COUNT,
+                stride_block_access_count_b,
+                stride_block_access_count_bdst,
+                MAX_BLOCK_ACCESS_COUNT,
+                
+                idx_b, 
+                idx_bdst,
+                idx_tdst, mask_tdst, pos_tdst,
+                mask_to_sample,
+                
+                sliding_window_size, BH, BK, G, MAX_TDST, MAX_TSRC, HID, KV_HEAD_REPEAT,
+                
+                USING_EXTEND,
+                extend_window_size,
+                extend_group_size,
+                
+                USING_SPARQ,
+                SPARQ_HID,
+                Q_IND, 
+                stride_q_ind_b, 
+                stride_q_ind_g, 
+                stride_q_ind_bdst, 
+                stride_q_ind_k,
+                
+                # paged attention args template
+                USING_PAGES,
+                PAGE_SIZE,
+                K_CACHE, 
+                stride_k_cache_page, 
+                stride_k_cache_offset, 
+                stride_k_cache_kv_head, 
+                stride_k_cache_hid,
+                V_CACHE,
+                stride_v_cache_page,
+                stride_v_cache_offset,
+                stride_v_cache_kv_head,
+                stride_v_cache_hid,
+                BLOCK_TABLE,
+                stride_block_table_bsz,
+                stride_block_table_page,
+                CACHE_SEQ_LENS,
+                stride_cache_seq_lens_bsz,
+                
+                # offload cache args template
+                USING_OFFLOAD_CACHE,
+                OFFLOAD_CACHE_METHOD,
+                OFFLOAD_CACHE_BUDGET,
+                OFFLOAD_CACHE_KV_HEAD,
+                OFFLOAD_CACHE_K_TABLES,
+                stride_offload_cache_k_tables_n,
+                stride_offload_cache_k_tables_t,
+                OFFLOAD_CACHE_K_BANKS,
+                stride_offload_cache_k_banks_n,
+                stride_offload_cache_k_banks_page,
+                stride_offload_cache_k_banks_offset,
+                stride_offload_cache_k_banks_hid,
+                OFFLOAD_CACHE_K_BANK_STATS,
+                stride_offload_cache_k_bank_stats_n,
+                stride_offload_cache_k_bank_stats_page,
+                stride_offload_cache_k_bank_stats_k,
+                OFFLOAD_CACHE_COUNTERS,
+                stride_offload_cache_counters_n,
+                stride_offload_cache_counters_k,
+                
+                IS_CAUSAL,
+                BLOCK_SIZE_Q,
+                BLOCK_STRIDE_Q,
+                BLOCK_SIZE_K,
+                BLOCK_STRIDE_K,
+                BLOCK_BK,
+                # BLOCK_BK // 2,
+                'max',
+                
+                # multi_branching
+                multi_branch_ratio_per_layer,
+                idx_iteration,
+                multi_branch_true_iter,
+                multi_branch_on_layer,
+            )
+            scores = scores_sampled.to(SCORES.dtype.element_ty)
+            
+            tl.store(
+                SCORES +\
+                    idx_b * stride_scores_b +\
+                    idx_bdst * stride_scores_bdst +\
+                    idx_bk_dup * stride_scores_bk,
+                value=scores,
+                mask=mask_bk_dup,
+                cache_modifier=DEFAULT_CACHE_MODIFIER,
+            )
+        
+        return
+    
+    else:
+        # TODO NOTE current implementation doesn't support multi multi_branching
+
+        # duplicate (2 * multi_branch_ratio_per_iter) times -> broadcast
+        # TODO NOTE!!! check if tl.trans works well
+        # [BLOCK_BK] -> [BLOCK_BK * 2 * multi_branch_ratio]
+        indices_ = tl.broadcast_to(indices[None, :], (2 * multi_branch_ratio_per_layer, BLOCK_BK)) # multi_branch_ratio_per_iter
+        group_sizes_ = tl.broadcast_to(group_sizes[None, :], (2 * multi_branch_ratio_per_layer, BLOCK_BK))
+
+        dupped_indices = tl.reshape(
+            tl.trans(indices_), # BLOCK_BK x (2 * multi_branch_ratio)
+            (BLOCK_BK * 2 * multi_branch_ratio_per_layer,),
+        )
+        dupped_group_sizes = tl.reshape(
+            tl.trans(group_sizes_),
+            (BLOCK_BK * 2 * multi_branch_ratio_per_layer,)
+        )
+        
+        # TODO can we discard these??
+        tl.store(
+            DUPPED_INDICES +\
+                idx_b * stride_dupped_indices_b +\
+                idx_bdst * stride_dupped_indices_bdst +\
+                idx_bk_dup * stride_dupped_indices_bk,
+            value=dupped_indices,
+            mask=mask_bk_dup,
+            cache_modifier=DEFAULT_CACHE_MODIFIER,
+        )
+        tl.store(
+            DUPPED_GROUP_SIZE +\
+                idx_b * stride_dupped_group_size_b +\
+                idx_bdst * stride_dupped_group_size_bdst +\
+                idx_bk_dup * stride_dupped_group_size_bk,
+            value=dupped_group_sizes,
+            mask=mask_bk_dup,
+            cache_modifier=DEFAULT_CACHE_MODIFIER,
+        )
+        
+        for grid_i in range(0, 2 * multi_branch_ratio_per_layer - 1): # 0th index should not be changed
+            multi_branch_dupped_indices_cal(
+                DUPPED_INDICES, 
+                stride_dupped_indices_b, 
+                stride_dupped_indices_bdst, 
+                stride_dupped_indices_bk,
+                DUPPED_GROUP_SIZE, 
+                stride_dupped_group_size_b, 
+                stride_dupped_group_size_bdst, 
+                stride_dupped_group_size_bk,
+                
+                CONDITION, 
+                stride_condition_size_bk_mul,
+
+                BLOCK_BK,
+                BK,
+                G,
+                RAND_SEED,
+
+                BRANCH_METHOD,
+
+                # multi_branch
+                multi_branch_ratio_per_layer,
+
+                idx_b,
+                idx_bdst,
+                # pid_bbk,
+                idx_bk_dup, # TODO check : can we send tensor?
+                mask_bk_dup,
+                idx_iteration,
+                grid_i,
+
+                pid_0=tl.program_id(0), # TODO !!!! tl.program_id seem to be a bug
+                pid_1=tl.program_id(1),
+                pid_2=tl.program_id(2),
+            )
+
+        # TODO more efficient??? - doing load store for each grid element
+        for grid_i in range(0, 2 * multi_branch_ratio_per_layer):
+            multi_branch_dupped_group_sizes_and_sampling_method_cal(
+                DUPPED_INDICES, 
+                stride_dupped_indices_b, 
+                stride_dupped_indices_bdst, 
+                stride_dupped_indices_bk,
+                DUPPED_GROUP_SIZE, 
+                stride_dupped_group_size_b, 
+                stride_dupped_group_size_bdst, 
+                stride_dupped_group_size_bk,
+
+                ACCESS_LOG_STORE_FROM,
+                BLOCK_BK,
+                BK,
+                G,
+                RAND_SEED,
+
+                SAMPLE_METHOD,
+
+                # multi_branch
+                multi_branch_ratio_per_layer,
+
+                idx_b,
+                idx_bdst,
+                # pid_bbk,
+                idx_bk_dup, # TODO check : can we send tensor?
+                mask_bk_dup,
+                idx_iteration,
+                grid_i,
+
+                pid_0=tl.program_id(0), # TODO !!!! tl.program_id seem to be a bug
+                pid_1=tl.program_id(1),
+                pid_2=tl.program_id(2),
+            )
+        
+        dupped_group_sizes = tl.load(
+            DUPPED_GROUP_SIZE +\
+                idx_b * stride_dupped_group_size_b +\
+                idx_bdst * stride_dupped_group_size_bdst +\
+                idx_bk_dup * stride_dupped_group_size_bk,
+            mask=mask_bk_dup,
+            cache_modifier=DEFAULT_CACHE_MODIFIER,
+        )
+        
+        dupped_mask = (dupped_group_sizes > 0) & mask_bk_dup
+        
+        dupped_indices_for_keys = tl.load(
+            DUPPED_INDICES +\
+                idx_b * stride_dupped_indices_b +\
+                idx_bdst * stride_dupped_indices_bdst +\
+                idx_bk_dup * stride_dupped_indices_bk,
+            mask=mask_bk_dup,
+            cache_modifier=DEFAULT_CACHE_MODIFIER,
+        )
+        
+        if SCORES_CACHED:
+            raise Exception()
+            cached_scores = tl.load(
+                SCORES_FINAL +\
+                    idx_b * stride_scores_final_b+\
+                    idx_bdst * stride_scores_final_bdst+\
+                    idx_bk * stride_scores_final_bk,
+                mask = mask_bk,
+                cache_modifier=DEFAULT_CACHE_MODIFIER,
+            )
+        
+            # dupped_indices_for_keys = dupped_indices <- before applying SAMPLING_METHOD
+            # dupped_indices_for_keys : BLOCK_BK * 2 * multi_branch_ratio
+            # 1, 2 * multi_branch_ratio - 1
+            # TODO can we do it all 2* multi_branch_ratio together at once? would it be better? -> can use return. if not, have to store
+            # TODO check all arange start, end
+            scores_sampled = multi_branch_masking_iteration_draft_cuda_dup_and_score_calc_score(
+                2 * multi_branch_ratio_per_layer - 1,
+                
+                Q, stride_q_bsz, stride_q_tdst, stride_q_bh, stride_q_g, stride_q_hid,
+                K, stride_k_bsz, stride_k_tsrc, stride_k_head, stride_k_hid,
+                COS, stride_cos_t, stride_cos_hid,
+                SIN, stride_sin_t, stride_sin_hid,
+                
+                ACCESS_LOG_STORE_FROM,
+                KEY_ACCESS_LOG, 
+                stride_key_access_log_b, 
+                stride_key_access_log_bdst, 
+                stride_key_access_log_t,
+                KEY_ACCESS_COUNT,
+                stride_key_access_count_b,
+                stride_key_access_count_bdst,
+                MAX_ACCESS_COUNT,
+
+                DUPPED_INDICES,
+                stride_dupped_indices_b,
+                stride_dupped_indices_bdst,
+                stride_dupped_indices_bk,
+
+                DUPPED_GROUP_SIZE,
+                stride_dupped_group_size_b,
+                stride_dupped_group_size_bdst,
+                stride_dupped_group_size_bk,
+
+                SCORES,
+                stride_scores_b,
+                stride_scores_bdst,
+                stride_scores_bk,
+                SCORES_CACHED,
+                
+                BLOCK_ACCESS_LOG,
+                stride_block_access_log_b,
+                stride_block_access_log_bdst,
+                stride_block_access_log_t,
+                BLOCK_ACCESS_SCORE,
+                stride_block_access_score_b,
+                stride_block_access_score_bdst,
+                stride_block_access_score_t,
+                BLOCK_ACCESS_COUNT,
+                stride_block_access_count_b,
+                stride_block_access_count_bdst,
+                MAX_BLOCK_ACCESS_COUNT,
+                
+                idx_b, 
+                idx_bdst,
+                idx_tdst, mask_tdst, pos_tdst,
+                mask_to_sample,
+                
+                sliding_window_size, BH, BK, G, MAX_TSRC, HID, KV_HEAD_REPEAT,
+                
+                USING_EXTEND,
+                extend_window_size,
+                extend_group_size,
+                
+                USING_SPARQ,
+                SPARQ_HID,
+                Q_IND, 
+                stride_q_ind_b, 
+                stride_q_ind_g, 
+                stride_q_ind_bdst, 
+                stride_q_ind_k,
+                
+                # paged attention args template
+                USING_PAGES,
+                PAGE_SIZE,
+                K_CACHE, 
+                stride_k_cache_page, 
+                stride_k_cache_offset, 
+                stride_k_cache_kv_head, 
+                stride_k_cache_hid,
+                V_CACHE,
+                stride_v_cache_page,
+                stride_v_cache_offset,
+                stride_v_cache_kv_head,
+                stride_v_cache_hid,
+                BLOCK_TABLE,
+                stride_block_table_bsz,
+                stride_block_table_page,
+                CACHE_SEQ_LENS,
+                stride_cache_seq_lens_bsz,
+                
+                BLOCK_SIZE_Q,
+                BLOCK_STRIDE_Q,
+                BLOCK_SIZE_K,
+                BLOCK_STRIDE_K,
+                BLOCK_BK,
+                # BLOCK_BK // 2,
+                'max',
+
+                # multi_branching
+                multi_branch_ratio_per_layer,
+                idx_iteration,
+                multi_branch_true_iter,
+                multi_branch_on_layer,
+            )
+
+            idx_dup_bk_cached_score = tl.arange(0, BLOCK_BK) * (2 * multi_branch_ratio_per_layer)
+            mask_dup_bk_cached_score = idx_dup_bk_cached_score < (BK * 2 * G * multi_branch_ratio_per_layer)
+            # store cached_scores; non cached_scores are already stored TODO check
+            tl.store(
+                SCORES +\
+                    idx_b * stride_scores_b +\
+                    idx_bdst * stride_scores_bdst +\
+                    idx_dup_bk_cached_score * stride_scores_bk,
+                value = cached_scores,
+                mask = mask_dup_bk_cached_score,
+                cache_modifier=DEFAULT_CACHE_MODIFIER,
+            )
+        else: # no caching
+            indices_to_sample = dupped_indices_for_keys # BLOCK_BK * 2 * multi_branch_ratio_per_iter
+            mask_to_sample = dupped_mask # BLOCK_BK * 2 * multi_branch_ratio_per_iter
+
+            scores_sampled = masking_iteration_draft_cuda_dup_and_score_calc_score(
+                indices_to_sample,
+                2 * multi_branch_ratio_per_layer,
+                
+                Q, stride_q_bsz, stride_q_tdst, stride_q_bh, stride_q_g, stride_q_hid,
+                K, stride_k_bsz, stride_k_tsrc, stride_k_head, stride_k_hid,
+                COS, stride_cos_t, stride_cos_hid,
+                SIN, stride_sin_t, stride_sin_hid,
+                
+                VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
+                DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
+                
+                ACCESS_LOG_STORE_FROM,
+                KEY_ACCESS_LOG, 
+                stride_key_access_log_b, 
+                stride_key_access_log_bdst, 
+                stride_key_access_log_t,
+                KEY_ACCESS_COUNT,
+                stride_key_access_count_b,
+                stride_key_access_count_bdst,
+                MAX_ACCESS_COUNT,
+                
+                DUPPED_INDICES,
+                stride_dupped_indices_b,
+                stride_dupped_indices_bdst,
+                stride_dupped_indices_bk,
+
+                DUPPED_GROUP_SIZE,
+                stride_dupped_group_size_b,
+                stride_dupped_group_size_bdst,
+                stride_dupped_group_size_bk,
+
+                SCORES,
+                stride_scores_b,
+                stride_scores_bdst,
+                stride_scores_bk,
+                SCORES_CACHED,
+                
+                BLOCK_ACCESS_LOG,
+                stride_block_access_log_b,
+                stride_block_access_log_bdst,
+                stride_block_access_log_t,
+                BLOCK_ACCESS_SCORE,
+                stride_block_access_score_b,
+                stride_block_access_score_bdst,
+                stride_block_access_score_t,
+                BLOCK_ACCESS_COUNT,
+                stride_block_access_count_b,
+                stride_block_access_count_bdst,
+                MAX_BLOCK_ACCESS_COUNT,
+                
+                idx_b, 
+                idx_bdst,
+                idx_tdst, mask_tdst, pos_tdst,
+                mask_to_sample,
+                
+                sliding_window_size, BH, BK, G, MAX_TDST, MAX_TSRC, HID, KV_HEAD_REPEAT,
+                
+                USING_EXTEND,
+                extend_window_size,
+                extend_group_size,
+                
+                USING_SPARQ,
+                SPARQ_HID,
+                Q_IND, 
+                stride_q_ind_b, 
+                stride_q_ind_g, 
+                stride_q_ind_bdst, 
+                stride_q_ind_k,
+                
+                # paged attention args template
+                USING_PAGES,
+                PAGE_SIZE,
+                K_CACHE, 
+                stride_k_cache_page, 
+                stride_k_cache_offset, 
+                stride_k_cache_kv_head, 
+                stride_k_cache_hid,
+                V_CACHE,
+                stride_v_cache_page,
+                stride_v_cache_offset,
+                stride_v_cache_kv_head,
+                stride_v_cache_hid,
+                BLOCK_TABLE,
+                stride_block_table_bsz,
+                stride_block_table_page,
+                CACHE_SEQ_LENS,
+                stride_cache_seq_lens_bsz,
+                
+                # offload cache args template
+                USING_OFFLOAD_CACHE,
+                OFFLOAD_CACHE_METHOD,
+                OFFLOAD_CACHE_BUDGET,
+                OFFLOAD_CACHE_KV_HEAD,
+                OFFLOAD_CACHE_K_TABLES,
+                stride_offload_cache_k_tables_n,
+                stride_offload_cache_k_tables_t,
+                OFFLOAD_CACHE_K_BANKS,
+                stride_offload_cache_k_banks_n,
+                stride_offload_cache_k_banks_page,
+                stride_offload_cache_k_banks_offset,
+                stride_offload_cache_k_banks_hid,
+                OFFLOAD_CACHE_K_BANK_STATS,
+                stride_offload_cache_k_bank_stats_n,
+                stride_offload_cache_k_bank_stats_page,
+                stride_offload_cache_k_bank_stats_k,
+                OFFLOAD_CACHE_COUNTERS,
+                stride_offload_cache_counters_n,
+                stride_offload_cache_counters_k,
+                
+                IS_CAUSAL,
+                BLOCK_SIZE_Q,
+                BLOCK_STRIDE_Q,
+                BLOCK_SIZE_K,
+                BLOCK_STRIDE_K,
+                BLOCK_BK,
+                # BLOCK_BK // 2,
+                'max',
+                
+                # multi_branching
+                multi_branch_ratio_per_layer,
+                idx_iteration,
+                multi_branch_true_iter,
+                multi_branch_on_layer,
+            )
+            scores = scores_sampled.to(SCORES.dtype.element_ty)
+            
+            tl.store(
+                SCORES +\
+                    idx_b * stride_scores_b +\
+                    idx_bdst * stride_scores_bdst +\
+                    idx_bk_dup * stride_scores_bk,
+                value=scores,
+                mask=mask_bk_dup,
+                cache_modifier=DEFAULT_CACHE_MODIFIER,
+            )
 
 @triton.jit
 def masking_iteration_draft_cuda_dup_and_score_multi_branch_aft(
@@ -5464,6 +5988,9 @@ def masking_iteration_draft_cuda_dup_and_score(
     
     idx_iteration, # TODO vs i_iteration???
     
+    CONDITION, 
+    stride_condition_size_bk_mul,
+    
     pid_0=None,
     pid_1=None,
     pid_2=None,
@@ -5858,6 +6385,9 @@ def masking_iteration_draft_cuda_dup_and_score(
             idx_tdst,
             idx_tdst_no_proj,
             mask_tdst,
+            
+            CONDITION, 
+            stride_condition_size_bk_mul,
             
             # pid_0=i_program,
             # pid_1=pid_0,
@@ -7226,6 +7756,9 @@ def masking_iteration_draft_cuda_fused(
     multi_branch_true_iter_cnt: tl.constexpr,
     multi_branch_on_layer: tl.constexpr,
     
+    CONDITION, 
+    stride_condition_size_bk_mul,
+    
     TDST_NEXT_POWER_OF_2,
     
     indices_bk_len: tl.constexpr,
@@ -7458,6 +7991,9 @@ def masking_iteration_draft_cuda_fused(
                     multi_branch_on_layer,
 
                     idx_iteration,
+                    
+                    CONDITION, 
+                    stride_condition_size_bk_mul,
                     
                     pid_0=i_program,
                     pid_1=pid_0,
@@ -8087,7 +8623,7 @@ def masking_iteration_draft(
             if args.multi_branch_true_iter != 0 or (args.multi_branch_true_iter_str is not None and args.multi_branch_true_iter_str != 'first'):
                 multi_branch_on_layer = True
                 assert args.multi_branch_ratio > 1
-                multi_branch_ratio_per_layer = args.multi_branch_ratio
+                multi_branch_ratio_per_layer = args.multi_branch_ratio                
             else: # it's just same as increasing k
                 multi_branch_on_layer_first_iter = True
                 multi_branch_on_layer = False
@@ -8575,6 +9111,12 @@ def masking_iteration_draft(
         
         pre_device = torch.get_default_device()
         torch.set_default_device(q.device)
+        
+        if multi_branch_on_layer:
+            condition = torch.zeros(BLOCK_BK * 2 * multi_branch_ratio_per_layer)
+        else:
+            condition = None
+        
         masking_iteration_draft_cuda_fused[grid](
             q, *q.stride(),
             k, *args.safe_stride(k, 4),
@@ -8648,6 +9190,7 @@ def masking_iteration_draft(
             args.multi_branch_ret_ratio,
             args.multi_branch_true_iter_cnt,
             multi_branch_on_layer,
+            condition, *args.safe_stride(condition, 1),
             
             TDST_NEXT_POWER_OF_2=triton.next_power_of_2(TDST),
             indices_bk_len=indices.shape[-1],
@@ -8898,6 +9441,18 @@ def masking_iteration_draft(
     # print(t)
     # print(tu)
     # print(t.shape, tu.shape, c)
+    
+    if os.getenv('DEBUG_MULTI_BRANCH', '0')== '1':
+        os.makedirs('./cache/llama_default/', exist_ok=True)
+        os.makedirs('./cache/llama_multi/', exist_ok=True)
+        torch.save({
+            'indices': indices,
+            'ks':ks,
+            'ks_count':ks_count,
+            'ks_start_end':ks_start_end
+        }, f'./cache/llama_multi/metadata_l{args.layer_id}_t{TSRC}.pth')
+        print(f'l{args.layer_id} stored. press enter to continue >>> ')
+
     
     unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
     indices = torch.where(unique_mask, indices, torch.iinfo(indices.dtype).max)
@@ -10955,14 +11510,14 @@ def hip_attention(
     )
     sparsity = indices.shape[-1] // (args.mask_k/args.block_size_k)
     
-    if os.getenv('DEBUG_MULTI_BRANCH', '0')== '1':
-        os.makedirs('./cache/llama_default/', exist_ok=True)
-        os.makedirs('./cache/llama_multi/', exist_ok=True)
-        torch.save({
-            'metadata': metadata,
-            'context': context,
-        }, f'./cache/llama_default/metadata_l{args.layer_id}_t{context.shape[1]}.pth')
-        print(f'l{args.layer_id} stored. press enter to continue >>> ')
+    # if os.getenv('DEBUG_MULTI_BRANCH', '0')== '1':
+    #     os.makedirs('./cache/llama_default/', exist_ok=True)
+    #     os.makedirs('./cache/llama_multi/', exist_ok=True)
+    #     torch.save({
+    #         'metadata': metadata,
+    #         'context': context,
+    #     }, f'./cache/llama_default/metadata_l{args.layer_id}_t{context.shape[1]}.pth')
+    #     print(f'l{args.layer_id} stored. press enter to continue >>> ')
     
     return context, sparsity, metadata
 
