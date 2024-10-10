@@ -1069,11 +1069,13 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 # calib_new_std = tl.sqrt(tl.sum(tl.extra.cuda.libdevice.pow(t_calib_new - calib_new_mean[:, None], 2), axis=-1) / NUM_CALIB)
                 
                 t_window = tl.dot(
-                    queries, keys.to(queries.dtype),
+                    queries, 
+                    keys.to(queries.dtype),
                 )
                 
                 t_grouped = tl.dot(
-                    queries_grouped, keys.to(queries.dtype),
+                    queries_grouped, 
+                    keys.to(queries.dtype),
                 )
                 
                 # NOTE: this calibration trick is very important.
@@ -1089,8 +1091,8 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 ).to(tl.float32)
             else:
                 t = tl.dot(
-                    queries.to(tl.float16),
-                    keys.to(tl.float16),
+                    queries,
+                    keys.to(queries.dtype),
                     allow_tf32=True,
                     out_dtype=tl.float32,
                 ).to(tl.float32)
@@ -1104,8 +1106,8 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                     # BQ=64, BSQ=2
                     # 4090: 20 ms, A100: 34.81ms
                     t = tl.dot(
-                        queries.to(tl.float16), 
-                        keys.to(tl.float16),
+                        queries, 
+                        keys.to(queries.dtype),
                         out_dtype=tl.float32,
                         allow_tf32=True,
                     )
@@ -4256,11 +4258,13 @@ def block_sparse_attention_cuda_step(
         queries_grouped = queries_grouped * mask_tdst[:, None]
         
         t_window = tl.dot(
-            queries, keys.to(queries.dtype),
+            queries, 
+            keys.to(queries.dtype),
             allow_tf32=True,
         )
         t_grouped = tl.dot(
-            queries_grouped.to(queries.dtype), keys.to(queries.dtype),
+            queries_grouped.to(queries.dtype), 
+            keys.to(queries.dtype),
             allow_tf32=True,
         )
         qk = tl.where(
@@ -4270,8 +4274,8 @@ def block_sparse_attention_cuda_step(
         ).to(tl.float32) * 1.44269504
     else:
         qk = tl.dot(
-            queries.to(tl.float16), 
-            keys.to(tl.float16),
+            queries, 
+            keys.to(queries.dtype),
             allow_tf32=True,
             out_dtype=tl.float32,
         ).to(tl.float16) * 1.44269504
@@ -4337,7 +4341,12 @@ def block_sparse_attention_cuda_step(
     # )
     
     # update acc
-    acc += tl.dot(p.to(values.dtype), values).to(acc.dtype)
+    acc += tl.dot(
+        p.to(values.dtype), 
+        values,
+        allow_tf32=True,
+        out_dtype=tl.float32
+    ).to(acc.dtype)
     
     # update m_i and l_i
     m_i = m_ij.to(m_i.dtype)
