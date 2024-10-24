@@ -465,19 +465,6 @@ class H2OLlamaAttention(nn.Module):
         layer_idx,
     ):            
         
-        # if attn_weights.size() != (bsz, num_heads, q_len, kv_seq_len):
-        #     raise ValueError(
-        #         f"Attention weights should be of size {(bsz, num_heads, q_len, kv_seq_len)}, but is"
-        #         f" {attn_weights.size()}"
-        #     )
-
-        # if attention_mask is not None:
-        #     if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
-        #         raise ValueError(
-        #             f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
-        #         )
-        #     attn_weights = attn_weights + attention_mask
-        
         # upcast attention to fp32
         
         N, HEAD, TDST, HID = query_states.shape
@@ -524,8 +511,6 @@ class H2OLlamaAttention(nn.Module):
             )
             # attn_output_final = attn_output
 
-        # print(attn_weights.shape)
-        
         attn_weights = attn_weight_accumulator
         attn_output = attn_output_final
         
@@ -546,7 +531,6 @@ class H2OLlamaAttention(nn.Module):
         
         return attn_output, None
     
-    # NOTE DEFAULT 3 original well working one
     def _h2o_attention(
         self,
         query_states,
@@ -574,28 +558,12 @@ class H2OLlamaAttention(nn.Module):
         q_len = query_states.shape[-2]
         
         if decoding_loop_for_prefill:
-            # assert compute_final_attn_output == True
-            # attention_mask = _make_causal_mask(
-            #     bsz=bsz,
-            #     tgt_len=q_len,
-            #     past_key_values_length=past_key_value[self.layer_idx][0].shape[-2] if (past_key_value is not None and len(past_key_value) > self.layer_idx) else 0,
-            #     dtype=query_states.dtype,
-            #     device=query_states.device,
-            # )
             attention_mask = None
             
             kv_seq_len = key_states.shape[-2]
         
             if past_key_value is not None and len(past_key_value) > self.layer_idx: # TODO check this for decoding
                 kv_seq_len += past_key_value[self.layer_idx][0].shape[-2]
-
-            # position_length = kv_seq_len
-
-            # if not position_ids[0].nelement() > 1: # NOTE to support batch - check
-            #     # import warnings
-            #     # warnings.warn(f'pos_id {position_ids.shape}, pos_id_n_elem = {position_ids[0].nelement()}; assumed all batch contains same id')
-            #     if position_length < position_ids[0].item()+1: # NOTE can be greater than kv_seq_len, after eviction starts
-            #         position_length = position_ids[0].item()+1
             
             """
             NOTE: H2O has 3 variants
@@ -639,9 +607,6 @@ class H2OLlamaAttention(nn.Module):
                 # cos, sin = self.rotary_emb(value_states, seq_len=position_length)
                 # NOTE: grab all position embeddings
             
-                # TODO discard this part
-                # cos, sin = self.rotary_emb(value_states, torch.arange(0, position_length, device=key_states.device)[None, :])
-                
                 ### Shift Pos: query pos is min(cache_size, idx)
                 query_states = apply_rotary_pos_emb_single(
                     query_states, 
@@ -657,14 +622,6 @@ class H2OLlamaAttention(nn.Module):
                     position_ids,
                     is_decoding=self.config.is_decoding
                 )
-                # os.makedirs('./cache/llama/h2o_5/', exist_ok=True)
-                # torch.save(
-                #     {
-                #         'k':key_states,
-                #         'v':value_states
-                #     }
-                #     ,f'./cache/llama/h2o_5/l{self.layer_idx}_i{i}_rope.pth')
-
                 if past_key_value is not None: # and len(past_key_value) != 0:
                     # sin and cos are specific to RoPE models; cache_position needed for the static cache
                     cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
@@ -673,23 +630,10 @@ class H2OLlamaAttention(nn.Module):
                     # key_states = torch.cat([past_key_value[0], key_states], dim=2)
                     # value_states = torch.cat([past_key_value[1], value_states], dim=2)
                 # past_key_value = (key_states, value_states) if use_cache else None
-            # torch.save(
-            #     {
-            #         'k':key_states,
-            #         'v':value_states
-            #     }
-            #     ,f'./cache/llama/h2o_5/l{self.layer_idx}_i{i}_pkv.pth')
-            # repeat k/v heads if n_kv_heads < n_heads
+
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        # torch.save(
-        #     {
-        #         'k':key_states,
-        #         'v':value_states
-        #     }
-        #     ,f'./cache/llama/h2o_5/l{self.layer_idx}_i{i}_repeat.pth')
-        ########
         attn_output, attn_weights= self._h2o_attention_itself(
             query_states,
             key_states,
@@ -704,7 +648,6 @@ class H2OLlamaAttention(nn.Module):
             self.layer_idx,
         )
         
-        #######
         if compute_final_attn_output:
             if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
                 raise ValueError(
@@ -733,133 +676,8 @@ class H2OLlamaAttention(nn.Module):
 
             if not output_attentions:
                 attn_weights = None
-        if os.getenv('DEBUG', '0')=='1':
-            torch.save(
-                {'q': query_states,
-                'k':key_states,
-                'v':value_states,
-                'kv_seq_len': kv_seq_len,
-                'past_key_value':past_key_value,
-                'past_key_values_length':past_key_value[self.layer_idx][0].shape[-2],
-                'attention_mask':attention_mask,
-                'cache_kwargs':cache_kwargs,
-                'attn_weights':attn_weights,
-                'kv_hh':kv_hh,
-                'attn_output':attn_output,
-                'hh_score':self.kv_cache.hh_score,
-                },
-                f'./cache/llama/h2o_5/l{self.layer_idx}_i{i}.pth')
-            input(f'i{i} stored. press enter to continue >>> ')
-        # print('attn_output ', attn_output)
-        # print('attn_output ', attn_output.shape)
+        
         return attn_output, attn_weights, past_key_value # , hh_score
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        query_states: torch.Tensor=None,
-        key_states: torch.Tensor=None,
-        value_states: torch.Tensor=None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Tuple[torch.Tensor]] = None,
-        output_attentions: bool = False,
-        use_cache: bool = False,
-        kv_seq_len: int = None,
-        shift_q_pos: bool = False,
-        mask_k: int = 512,
-        reduction_for_gqa: str = 'average',
-        H2O_BENCHMARK : int = 0,
-        cache_position: Optional[torch.Tensor] = None,
-        position_embeddings: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        compute_final_attn_output = True
-        
-        assert output_attentions is False
-        
-        # TODO check how position_ids batch shape appears; linked with apply_rotary_pos_emb_single
-        # Assumed that postion_ids shape to be [bsz, seq_len], not [1, seq_len]
-        
-        bsz, _, q_len, _ = query_states.shape
-        # prompting
-        if q_len > mask_k:
-            
-            position_ids_k = position_ids[:, :mask_k]
-            position_ids_loop = position_ids[:, mask_k:]
-            
-            query_states_k = query_states[:, :, :mask_k, :]
-            query_states_loop = query_states[:, :, mask_k:, :]
-            key_states_k = key_states[:, :, :mask_k, :]
-            key_states_loop = key_states[:, :, mask_k:, :]
-            value_states_k = value_states[:, :, :mask_k, :]
-            value_states_loop = value_states[:, :, mask_k:, :]
-            
-            # assert past_key_value is None # TODO CHECK
-            assert use_cache is True
-            
-            # print('========== prompt_attn')
-            attn_output, attn_weights, past_key_value = self._h2o_attention( # , hh_score
-                query_states_k,
-                key_states_k,
-                value_states_k,
-                
-                position_ids_k,
-                past_key_value=past_key_value,
-                output_attentions=output_attentions,
-                use_cache=use_cache,
-                # hh_score=hh_score,
-                bsz=bsz,
-                cache_position=cache_position,
-                reduction_for_gqa=reduction_for_gqa,
-                position_embeddings=position_embeddings
-            )
-            
-            # loop one by one
-            # print('========== prompt_loop_attn')
-            assert query_states_loop.shape[-2] == q_len - mask_k
-            for i in range(q_len - mask_k):
-                # print(f'>> loop {i}')
-                attn_output_, attn_weights_, past_key_value = self._h2o_attention( # , hh_score
-                    query_states_loop[:, :, i, :][:, :, None, :],
-                    key_states_loop[:, :, i, :][:, :, None, :],
-                    value_states_loop[:, :, i, :][:, :, None, :],
-                    
-                    position_ids_loop[:, i][:, None],
-                    past_key_value=past_key_value,
-                    output_attentions=output_attentions,
-                    use_cache=use_cache,
-                    # hh_score=hh_score,
-                    bsz=bsz,
-                    cache_position=cache_position,
-                    reduction_for_gqa=reduction_for_gqa,
-                    position_embeddings=position_embeddings
-                )
-                
-                attn_output = torch.cat((attn_output, attn_output_), dim=1)
-                if output_attentions:
-                    raise Exception()
-                    attn_weights = torch.cat((attn_weights, attn_weights_), dim=2)
-                    
-        else:
-            assert use_cache is True
-            
-            attn_output, attn_weights, past_key_value = self._h2o_attention( # , hh_score
-                query_states,
-                key_states,
-                value_states,
-                
-                position_ids,
-                past_key_value=past_key_value,
-                output_attentions=output_attentions,
-                use_cache=use_cache,
-                # hh_score=hh_score,
-                bsz=bsz,
-                cache_position=cache_position,
-                reduce_for_gqa=reduction_for_gqa,
-                position_embeddings=position_embeddings
-            )
-                
-        return attn_output, attn_weights, past_key_value# TODO LATER? , compute_final_attn_output
-
 
 class H2OLlamaForCausalLM(LlamaForCausalLM):
     def __init__(self, config):
@@ -867,8 +685,6 @@ class H2OLlamaForCausalLM(LlamaForCausalLM):
         num_layers = len(self.model.layers)
         for layer_idx in range(num_layers):
             self.model.layers[layer_idx].self_attn = H2OLlamaAttention(config)
-
-
 
 ## H2O KV Cache dropping with Position rolling
 class H2OLlamaAttention_streaming(nn.Module):

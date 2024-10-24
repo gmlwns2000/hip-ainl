@@ -798,7 +798,6 @@ class LlamaCustomAttention(LlamaAttention):
                 # assert past_key_value is None # TODO CHECK
                 assert use_cache is True
                 
-                # print('========== prompt_attn')
                 attn_output, attn_weights, past_key_value = self.h2o_attention._h2o_attention( # , hh_score
                     query_states_k,
                     key_states_k,
@@ -823,12 +822,8 @@ class LlamaCustomAttention(LlamaAttention):
                     (attn_output.shape[0], q_len - mask_k, attn_output.shape[-1]), 
                     dtype=attn_output.dtype, device=attn_output.device
                 )
-                # print(f'l{self.layer_idx} ---------')
-                # print('attn_output ', attn_output)
-                # print('attn_output ', attn_output.shape)
                 
                 # loop one by one
-                # print('========== prompt_loop_attn')
                 assert query_states_loop.shape[-2] == q_len - mask_k
                 for i in range(q_len - mask_k):
                     # print(f'>> loop {i}')
@@ -856,28 +851,12 @@ class LlamaCustomAttention(LlamaAttention):
                     
                     attn_output_loop[:, i:i+1, :].copy_(attn_output_, non_blocking=True)
                     
-                    # print('attn_output ', attn_output_)
-                    # print('attn_output ', attn_output_.shape)
-                    # if(i==4):
-                    #     breakpoint()
-                
                 attn_output = torch.cat((attn_output, attn_output_loop), dim=1)
-                
-                if os.getenv('FINAL_DEBUG', '0')=='1':
-                    torch.save(
-                        {'attn_output': attn_output,
-                         'past_key_value':past_key_value
-                        },
-                        f'./cache/llama/h2o_5/l{self.layer_idx}_final.pth')
-                    print(f'l{self.layer_idx}_final stored. press enter to continue >>> ')
+            
                 if output_attentions:
                     raise Exception()
                     attn_weights = torch.cat((attn_weights, attn_weigth_loop), dim=-2)
                 
-                # print(f'[5] l{self.layer_idx}-------')
-                # print('>> attn_output ', attn_output)
-                # print('>> shape ', attn_output.shape)
-                        
             else:
                 assert use_cache is True
                 # compute_final_attn_output = False
