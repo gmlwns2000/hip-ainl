@@ -812,7 +812,7 @@ class LlamaCustomAttention(LlamaAttention):
                     bsz=bsz,
                     cache_position=cache_position,
                     reduction_for_gqa=self.config.reduction_for_gqa,
-                    kv_seq_len=kv_seq_len,
+                    kv_seq_len=None,
                     decoding_loop_for_prefill=True,
                     compute_final_attn_output=True,
                     
@@ -845,7 +845,7 @@ class LlamaCustomAttention(LlamaAttention):
                         bsz=bsz,
                         cache_position=cache_position,
                         reduction_for_gqa=self.config.reduction_for_gqa,
-                        kv_seq_len=kv_seq_len,
+                        kv_seq_len=None,
                         decoding_loop_for_prefill=True,
                         compute_final_attn_output=True,
                         
@@ -895,7 +895,7 @@ class LlamaCustomAttention(LlamaAttention):
                     bsz=bsz,
                     cache_position=cache_position,
                     reduction_for_gqa=self.config.reduction_for_gqa,
-                    kv_seq_len=kv_seq_len,
+                    kv_seq_len=None,
                     decoding_loop_for_prefill=True,
                     compute_final_attn_output=True, # compute_final_attn_output
                     

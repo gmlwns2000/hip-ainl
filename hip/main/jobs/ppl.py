@@ -173,6 +173,20 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=o
                                 for m in model.modules():
                                     if hasattr(m, '_clean_cache'):
                                         m._clean_cache()
+                            elif args.method in ['h2o', 'h2o_stream']:
+                                # NOTE h2o use_cahe == True
+                                outputs = model(
+                                input_ids,
+                                labels=target_ids,
+                                output_logits=False,
+                                )
+                                samples.append(outputs.loss)
+                                pbar_sample.set_description(
+                                    f'ppl: {torch.exp(torch.stack(nlls + [outputs.loss.cpu()]).mean()).item():.6f}'
+                                )
+                                for m in model.modules():
+                                    if hasattr(m, '_clean_cache'):
+                                        m._clean_cache()
                             else: # TODO NOTE currently pass_key_values are passed as a tuple
                                 outputs = model(
                                     input_ids,
@@ -194,10 +208,6 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=o
                                 # pbar_sample.set_description(
                                 #     f'ppl: {torch.exp(torch.stack(nlls + [outputs.loss.cpu()]).mean()).item():.6f}, top: {torch.exp(topk_nlls.mean()).item()}'
                                 # )
-                                if args.method in ['h2o', 'h2o_stream', 'tova']:
-                                    for m in model.modules():
-                                        if hasattr(m, '_clean_cache'):
-                                            m._clean_cache()
                     if len(samples) > 1:
                         print([f'{x.item():.5f}' for x in samples])
                     neg_log_likelihood = min(samples)
