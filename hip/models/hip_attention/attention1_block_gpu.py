@@ -1751,7 +1751,7 @@ def main_latency_benchmark():
     # os.environ["TORCH_USE_CUDA_DSA"] = '1'
     
     past_key_value = None
-    if METHOD in ['h2o', 'h2o_stream'] and os.getenv('H2O_DEFAULT', '3') =='5':
+    if METHOD in ['h2o', 'h2o_stream']:
         config = LlamaConfig.from_pretrained(model_id)
         config.hh_size = args.k // 2
         config.recent_size = args.k // 2
@@ -1833,36 +1833,64 @@ def main_latency_benchmark():
                     scale=1
                 )
             elif METHOD in ['h2o', 'h2o_stream']:                
-                
-                
-                if os.getenv('H2O_DEFAULT', '3')=='5':
-                    q_len = QUERY_SIZE
-                    measure_decode_style = False
-                    if (q_len > mask_k) and measure_decode_style:
-                        assert QUERY_SIZE > 1
-                        assert QUERY_SIZE == CHUNK_LEN * DUPS
+                q_len = QUERY_SIZE
+                measure_decode_style = False
+                if (q_len > mask_k) and measure_decode_style:
+                    assert QUERY_SIZE > 1
+                    assert QUERY_SIZE == CHUNK_LEN * DUPS
 
-                        # compute_final_attn_output = True
-                        
-                        position_ids_k = position_ids[:, :mask_k]
-                        position_ids_loop = position_ids[:, mask_k:]
-                        
-                        query_states_k = q[:, :, :mask_k, :]
-                        query_states_loop = q[:, :, mask_k:, :]
-                        key_states_k = k[:, :, :mask_k, :]
-                        key_states_loop = k[:, :, mask_k:, :]
-                        value_states_k = v[:, :, :mask_k, :]
-                        value_states_loop = v[:, :, mask_k:, :]
+                    # compute_final_attn_output = True
+                    
+                    position_ids_k = position_ids[:, :mask_k]
+                    position_ids_loop = position_ids[:, mask_k:]
+                    
+                    query_states_k = q[:, :, :mask_k, :]
+                    query_states_loop = q[:, :, mask_k:, :]
+                    key_states_k = k[:, :, :mask_k, :]
+                    key_states_loop = k[:, :, mask_k:, :]
+                    value_states_k = v[:, :, :mask_k, :]
+                    value_states_loop = v[:, :, mask_k:, :]
 
-                        # assert past_key_value is None # TODO CHECK
-                        past_key_value = DynamicCache()
-                        # print('========== prompt_attn')
-                        attn_output, attn_weights, past_key_value = h2o_attention._h2o_attention( # , hh_score
-                            query_states_k,
-                            key_states_k,
-                            value_states_k,
+                    # assert past_key_value is None # TODO CHECK
+                    past_key_value = DynamicCache()
+                    # print('========== prompt_attn')
+                    attn_output, attn_weights, past_key_value = h2o_attention._h2o_attention( # , hh_score
+                        query_states_k,
+                        key_states_k,
+                        value_states_k,
+                        
+                        position_ids_k,
+                        past_key_value=past_key_value,
+                        output_attentions=False,
+                        use_cache=True,
+                        # hh_score=hh_score,
+                        bsz=bsz,
+                        cache_position=cache_position,
+                        reduction_for_gqa=h2o_attention.config.reduction_for_gqa,
+                        kv_seq_len=None,
+                        decoding_loop_for_prefill=True,
+                        compute_final_attn_output=False,
+                        
+                        cos=cos,
+                        sin=sin,
+                    )
+                    # attn_output_loop = torch.zeros(
+                    #     (attn_output.shape[0], q_len - mask_k, attn_output.shape[-1]), 
+                    #     dtype=attn_output.dtype, device=attn_output.device
+                    # )
+                    
+                    
+                    # loop one by one
+                    # print('========== prompt_loop_attn')
+                    assert query_states_loop.shape[-2] == q_len - mask_k
+                    for i in range(q_len - mask_k):
+                        # print(f'>> loop {i}')
+                        attn_output_, attn_weights_, past_key_value = h2o_attention._h2o_attention( # , hh_score
+                            query_states_loop[:, :, i, :][:, :, None, :],
+                            key_states_loop[:, :, i, :][:, :, None, :],
+                            value_states_loop[:, :, i, :][:, :, None, :],
                             
-                            position_ids_k,
+                            position_ids_loop[:, i][:, None],
                             past_key_value=past_key_value,
                             output_attentions=False,
                             use_cache=True,
@@ -1876,99 +1904,68 @@ def main_latency_benchmark():
                             
                             cos=cos,
                             sin=sin,
+                            i=i
                         )
-                        # attn_output_loop = torch.zeros(
-                        #     (attn_output.shape[0], q_len - mask_k, attn_output.shape[-1]), 
-                        #     dtype=attn_output.dtype, device=attn_output.device
-                        # )
                         
-                        
-                        # loop one by one
-                        # print('========== prompt_loop_attn')
-                        assert query_states_loop.shape[-2] == q_len - mask_k
-                        for i in range(q_len - mask_k):
-                            # print(f'>> loop {i}')
-                            attn_output_, attn_weights_, past_key_value = h2o_attention._h2o_attention( # , hh_score
-                                query_states_loop[:, :, i, :][:, :, None, :],
-                                key_states_loop[:, :, i, :][:, :, None, :],
-                                value_states_loop[:, :, i, :][:, :, None, :],
-                                
-                                position_ids_loop[:, i][:, None],
-                                past_key_value=past_key_value,
-                                output_attentions=False,
-                                use_cache=True,
-                                # hh_score=hh_score,
-                                bsz=bsz,
-                                cache_position=cache_position,
-                                reduction_for_gqa=h2o_attention.config.reduction_for_gqa,
-                                kv_seq_len=None,
-                                decoding_loop_for_prefill=True,
-                                compute_final_attn_output=False,
-                                
-                                cos=cos,
-                                sin=sin,
-                                i=i
-                            )
-                            
-                        #     attn_output_loop[:, i:i+1, :].copy_(attn_output_, non_blocking=True)
-                        
-                        # attn_output = torch.cat((attn_output, attn_output_loop), dim=1)
-
-                                
-                    else:
-                        # compute_final_attn_output = False
-                        k_cache, v_cache = past_key_value[0]
-                        # print(k_cache.shape, v_cache.shape)
-                        attn_output, attn_weights= h2o_attention._h2o_attention_itself(
-                            q,
-                            torch.cat([k_cache, k[:, :, -1:, :]], dim=2),
-                            torch.cat([v_cache, v[:, :, -1:, :]], dim=2),
-                            
-                            bsz, num_heads, head_dim, q_len, kv_seq_len,
-                            attention_mask,
-                            
-                            past_key_value,
-                            num_key_value_groups,
-                            h2o_attention.config.reduction_for_gqa,
-                            layer_idx=0,
-                        )
-                        # past_key_value = DynamicCache()
-                        # attn_output, attn_weights, past_key_value = h2o_attention._h2o_attention( # , hh_score
-                        #     q,
-                        #     k,
-                        #     v,
-                            
-                        #     position_ids,
-                        #     past_key_value=past_key_value,
-                        #     output_attentions=False,
-                        #     use_cache=True,
-                        #     # hh_score=hh_score,
-                        #     bsz=bsz,
-                        #     cache_position=cache_position,
-                        #     reduction_for_gqa=h2o_attention.config.reduction_for_gqa,
-                        #     kv_seq_len=None,
-                        #     decoding_loop_for_prefill=True,
-                        #     compute_final_attn_output=True, # compute_final_attn_output
-                            
-                        #     cos=cos,
-                        #     sin=sin
-                        # )
+                    #     attn_output_loop[:, i:i+1, :].copy_(attn_output_, non_blocking=True)
                     
-                    # attn_output, attn_weights, past_key_value = h2o_attention._h2o_attention(
-                    #     q, k, v,
-                    #     attention_mask = None,
-                    #     position_ids = torch.arange(0, QUERY_SIZE).repeat(q.shape[0], 1).to(q.device), # TODO postiion_ids to batch size?
-                    #     past_key_value = DynamicCache(),
-                    #     output_attentions= False, # TODO check
-                    #     use_cache = True,
+                    # attn_output = torch.cat((attn_output, attn_output_loop), dim=1)
+
+                            
+                else:
+                    # compute_final_attn_output = False
+                    k_cache, v_cache = past_key_value[0]
+                    # print(k_cache.shape, v_cache.shape)
+                    attn_output, attn_weights= h2o_attention._h2o_attention_itself(
+                        q,
+                        torch.cat([k_cache, k[:, :, -1:, :]], dim=2),
+                        torch.cat([v_cache, v[:, :, -1:, :]], dim=2),
                         
-                    #     bsz=q.shape[0],
-                    #     cache_position=
-                    #     reduction_for_gqa = config.reduction_for_gqa,
-                    #     kv_seq_len =                         
-                    #     mask_k = args.k,
-                    #     # H2O_BENCHMARK = 1
+                        bsz, num_heads, head_dim, q_len, kv_seq_len,
+                        attention_mask,
+                        
+                        past_key_value,
+                        num_key_value_groups,
+                        h2o_attention.config.reduction_for_gqa,
+                        layer_idx=0,
+                    )
+                    # past_key_value = DynamicCache()
+                    # attn_output, attn_weights, past_key_value = h2o_attention._h2o_attention( # , hh_score
+                    #     q,
+                    #     k,
+                    #     v,
+                        
+                    #     position_ids,
+                    #     past_key_value=past_key_value,
+                    #     output_attentions=False,
+                    #     use_cache=True,
+                    #     # hh_score=hh_score,
+                    #     bsz=bsz,
+                    #     cache_position=cache_position,
+                    #     reduction_for_gqa=h2o_attention.config.reduction_for_gqa,
+                    #     kv_seq_len=None,
+                    #     decoding_loop_for_prefill=True,
+                    #     compute_final_attn_output=True, # compute_final_attn_output
+                        
+                    #     cos=cos,
+                    #     sin=sin
                     # )
+                
+                # attn_output, attn_weights, past_key_value = h2o_attention._h2o_attention(
+                #     q, k, v,
+                #     attention_mask = None,
+                #     position_ids = torch.arange(0, QUERY_SIZE).repeat(q.shape[0], 1).to(q.device), # TODO postiion_ids to batch size?
+                #     past_key_value = DynamicCache(),
+                #     output_attentions= False, # TODO check
+                #     use_cache = True,
+                    
+                #     bsz=q.shape[0],
+                #     cache_position=
+                #     reduction_for_gqa = config.reduction_for_gqa,
+                #     kv_seq_len =                         
+                #     mask_k = args.k,
+                #     # H2O_BENCHMARK = 1
+                # )
                 for m in h2o_attention.modules():
                     if hasattr(m, '_clean_cache'):
                         m._clean_cache()

@@ -100,7 +100,7 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=F
                     samples = []
                     with tqdm(range(sample_counts), dynamic_ncols=True, position=1, disable=sample_counts <= 1) as pbar_sample:
                         for _ in pbar_sample:
-                            if args.method in ['h2o', 'h2o_stream', 'tova'] and (os.getenv('H2O_DEFAULT', '3') == '1' or os.getenv('H2O_DEFAULT', '3') == '-1' or os.getenv('TOVA_DEFAULT', '0') == '1'):
+                            if args.method in ['tova'] and os.getenv('TOVA_DEFAULT', '0') == '1':
                                 loss_sum = 0
                                 loss_count = 0
                                 prompt_ids = input_ids[:, :args.k]
@@ -172,24 +172,11 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=F
                                     if hasattr(m, '_clean_cache'):
                                         m._clean_cache()
                             else: # TODO NOTE currently pass_key_values are passed as a tuple
-                                if args.method in ['h2o', 'h2o_stream'] and os.getenv("H2O_DEFAULT", '0') in ['4', '6']:
-                                    from transformers import StaticCache
-                                    max_cache_size = stride
-                                    past_key_values = StaticCache(config=model.config, max_batch_size=1, max_cache_len=max_cache_size, device=model.device, dtype=model.dtype)
-                                    outputs = model(
-                                        input_ids,
-                                        labels=target_ids,
-                                        output_logits=False,
-                                        past_key_values=past_key_values,
-                                        use_cache=True
-                                    )
-                                else:
-                                    outputs = model(
-                                    input_ids,
-                                    labels=target_ids,
-                                    output_logits=False,
-                                    )
-                                
+                                outputs = model(
+                                input_ids,
+                                labels=target_ids,
+                                output_logits=False,
+                                )
                                 samples.append(outputs.loss)
                                 pbar_sample.set_description(
                                     f'ppl: {torch.exp(torch.stack(nlls + [outputs.loss.cpu()]).mean()).item():.6f}'

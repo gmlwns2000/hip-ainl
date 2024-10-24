@@ -12,8 +12,8 @@ echo METHOD=${METHOD}
 # h2o
 if [ "${METHOD}" == "h2o" ]; then
 echo run h2o
-H2O_DEFAULT=3 python -m hip.main.model_eval --job mmlu --model llama3.1_8b --method h2o
+python -m hip.main.model_eval --job mmlu --model llama3.1_8b --method h2o
 elif [ "${METHOD}" == "h2o_stream" ]; then
 echo run h2o_stream
-H2O_DEFAULT=3 python -m hip.main.model_eval --job mmlu --model llama3.1_8b --method h2o_stream
+python -m hip.main.model_eval --job mmlu --model llama3.1_8b --method h2o_stream
 fi
