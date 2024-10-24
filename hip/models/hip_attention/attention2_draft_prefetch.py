@@ -32,7 +32,7 @@ import triton
 import triton.language as tl
 import torch
 import torch.nn.functional as F
-from typing import Optional, Tuple, List, Dict, Union
+from typing import Literal, Optional, Tuple, List, Dict, Union
 from torch import Tensor
 from hip.models.hip_attention.attention1_block_gpu import load_checkouts, to_dense
 import numpy as np
@@ -48,6 +48,8 @@ def cdiv_python(a, b):
     return math.ceil(float(a) / float(b))
 
 DEFAULT_CACHE_MODIFIER = tl.constexpr('.cg')
+EXPERIMENTAL_SAMPLING_POSITION: tl.constexpr = float(os.environ.get('HIP_EXPERIMENTAL_SAMPLING_POSITION', '0.5'))
+DEFAULT_EXTEND_BACKEND: tl.constexpr = os.environ.get('HIP_EXTEND_BACKEND', 'streaming')
 
 @dataclass
 class HiPAttentionOutputMetadata:
@@ -95,10 +97,11 @@ class HiPAttentionArgs:
     num_dense_queries: int = -1
     
     using_extend: bool = False
-    rope_cos: Optional[Tensor] = None
-    rope_sin: Optional[Tensor] = None
+    need_apply_rope: bool = False
     self_extend_neighboor_window: int = 1024
     self_extend_group_size: int = 8
+    rope_cos: Optional[Tensor] = None
+    rope_sin: Optional[Tensor] = None
     
     topk_head_group_size: int = 1
     sample_method: str = 'center'
@@ -121,6 +124,7 @@ class HiPAttentionArgs:
     
     output_key_access_log: bool = False
     output_block_access_log: bool = False
+    access_log_num_blocks_to_keep: Optional[int] = 987654321
     
     q_quant: Optional[Tensor] = None
     k_quant: Optional[Tensor] = None
@@ -135,6 +139,7 @@ class HiPAttentionArgs:
     # BUG(-): this nameing is wrong...
     position_ids: Optional[Tensor] = None
     
+    offload_cache_method: Optional[Literal['single_level', 'bloom']] = 'single_level'
     offload_cache_kv_heads: Optional[int] = None
     offload_cache_mask_k_tables: Optional[Tensor] = None
     offload_cache_mask_k_banks: Optional[Tensor] = None
@@ -145,8 +150,14 @@ class HiPAttentionArgs:
     offload_cache_sa_v_banks: Optional[Tensor] = None
     offload_cache_counters: Optional[Tensor] = None
     
+    # to support gemma2
+    logit_softcap: Optional[float] = None
+    
     # NOTE: this will be equivalant BigBird
     randomize_mask: bool = False
+    
+    # NOTE: for testing
+    decode_style_masking: bool = os.getenv('HIP_DECODE_STYLE_PPL', '0') == '1'
     
     def __post_init__(self):
         if self.rope_cos is not None and self.rope_cos.ndim == 3:
@@ -156,6 +167,8 @@ class HiPAttentionArgs:
             assert self.q_quant.ndim == 4
             assert self.k_quant.ndim == 4
         self.using_paged_cache = self.k_cache is not None
+        if self.logit_softcap == 0:
+            self.logit_softcap = None
 
     def clone(self):
         return copy.copy(self)
@@ -191,6 +204,7 @@ class HiPAttentionArgs:
     def args_extend(self):
         return (
             self.using_extend,
+            self.need_apply_rope,
             self.self_extend_neighboor_window,
             self.self_extend_group_size,
             *self.args_rope_cos(),
@@ -261,8 +275,11 @@ class HiPAttentionArgs:
             else:
                 offload_cache_budget = 0
             
+            # print(self.offload_cache_method)
+            
             return (
                 using_offload_cache,
+                self.offload_cache_method,
                 offload_cache_budget,
                 self.offload_cache_kv_heads,
                 self.offload_cache_mask_k_tables, *self.safe_stride(self.offload_cache_mask_k_tables, 2),
@@ -279,11 +296,15 @@ class HiPAttentionArgs:
                 assert self.offload_cache_sa_v_banks.ndim == 4
                 assert self.offload_cache_counters.ndim == 2
                 offload_cache_budget = self.offload_cache_sa_v_banks.shape[1]
+                assert self.offload_cache_sa_k_banks.shape[1] == offload_cache_budget
             else:
                 offload_cache_budget = 0
             
+            # print(self.offload_cache_method)
+            
             return (
                 using_offload_cache,
+                self.offload_cache_method,
                 offload_cache_budget,
                 self.offload_cache_kv_heads,
                 self.offload_cache_sa_k_tables, *self.safe_stride(self.offload_cache_sa_k_tables, 2),
@@ -317,21 +338,22 @@ def masking_iteration_draft_cuda_initialize(
     
     # param
     mask_k: int,
+    sliding_window_size: int,
+    sink_token_size: int,
+    max_group_size_seed: float,
+    G, MAX_TDST, MAX_TSRC, HEAD,
+    
     block_size_q: tl.constexpr,
     block_stride_q: tl.constexpr,
     block_size_k: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
     
-    sliding_window_size: int,
-    
-    G, MAX_TDST, MAX_TSRC, HEAD,
-    
     BLOCK_MASK_BLOCK_K: tl.constexpr,
 ):
-    idx_b = tl.program_id(0)
-    idx_bdst = tl.program_id(1)
-    idx_group = tl.program_id(2)
-    idx_tdst = tl.arange(0, block_size_q) + idx_bdst * block_size_q
+    idx_b = tl.program_id(0).to(tl.int64)
+    idx_bdst = tl.program_id(1).to(tl.int64)
+    idx_group = tl.program_id(2).to(tl.int64)
+    idx_tdst = tl.arange(0, block_size_q).to(tl.int64) + idx_bdst * block_size_q
     mask_tdst = idx_tdst < MAX_TDST
     
     mask_block_k = tl.cdiv(mask_k, block_size_k)
@@ -347,10 +369,10 @@ def masking_iteration_draft_cuda_initialize(
         pos_tdst = tl.full((block_size_q // block_stride_q,), value=MAX_TSRC, dtype=tl.int64)
     TSRC = tl.max(pos_tdst)
     tl.debug_barrier()
-    TSRC = tl.maximum(0, TSRC - sliding_window_size)
+    TSRC = tl.maximum(0, TSRC - sliding_window_size - sink_token_size)
     BSRC = tl.cdiv(TSRC, block_size_k)
     MAX_BSRC = tl.cdiv(MAX_TSRC, block_size_k)
-    
+    N_SINK_BLOCK = tl.cdiv(sink_token_size, block_size_k)
     
     if TSRC <= mask_k:
         idx_bk = tl.arange(0, BLOCK_MASK_BLOCK_K)
@@ -361,7 +383,7 @@ def masking_iteration_draft_cuda_initialize(
                     idx_b * stride_indices_b +\
                     idx_bdst * stride_indices_bdst +\
                     (idx_group * BSRC + idx_bk) * stride_indices_bk,
-                value = idx_group * MAX_BSRC + idx_bk,
+                value = idx_group * MAX_BSRC + idx_bk + N_SINK_BLOCK,
                 mask = mask_bk,
             )
         
@@ -394,11 +416,11 @@ def masking_iteration_draft_cuda_initialize(
         indices = tl.minimum(
             ((MAX_BSRC * idx_group + (BSRC / mask_block_k * idx_bk)).to(tl.int32) // ALIGN_STEP) * ALIGN_STEP, 
             (MAX_BSRC * idx_group + BSRC).to(tl.int32)
-        )
+        ) + N_SINK_BLOCK
         next_indices = tl.minimum(
             ((MAX_BSRC * idx_group + (BSRC / mask_block_k * (idx_bk + 1))).to(tl.int32) // ALIGN_STEP) * ALIGN_STEP, 
             (MAX_BSRC * idx_group + BSRC).to(tl.int32)
-        )
+        ) + N_SINK_BLOCK
         group_sizes = tl.maximum(0, tl.minimum(BSRC, next_indices - indices)).to(tl.int32)
         if INDICES_SEED is not None:
             if ks == (mask_block_k * G):
@@ -428,6 +450,8 @@ def masking_iteration_draft_cuda_initialize(
                     indices_next - indices,
                     indices_group_id * MAX_BSRC + BSRC - indices,
                 ).to(tl.int32)
+        if max_group_size_seed is not None:
+            group_sizes = tl.minimum(group_sizes, max_group_size_seed.to(group_sizes.dtype))
         
         if INDICES is not None:
             tl.store(
@@ -510,39 +534,142 @@ def adjust_rope(
     tokens: tl.tensor,
     old_t: tl.tensor,
     new_t: tl.tensor,
+    mask_t: tl.tensor,
     idx_hid: tl.tensor,
     
     COS, stride_cos_t, stride_cos_hid,
     SIN, stride_sin_t, stride_sin_hid,
     
-    T: tl.constexpr, HID: tl.constexpr,
+    T: tl.constexpr, 
+    HID: tl.constexpr,
+    NEED_APPLY_ROPE: tl.constexpr,
 ):
-    cos_old = tl.load(
-        COS +\
-            old_t[:, None] * stride_cos_t +\
-            idx_hid[None, :] * stride_cos_hid
-    )
-    sin_old = tl.load(
-        SIN +\
-            old_t[:, None] * stride_sin_t +\
-            idx_hid[None, :] * stride_sin_hid
-    )
+    if not NEED_APPLY_ROPE:
+        mask_t = mask_t & (old_t != 0)
+        
+        cos_old = tl.load(
+            COS +\
+                old_t[:, None].to(tl.int64) * stride_cos_t +\
+                idx_hid[None, :] * stride_cos_hid,
+            mask=tl.ravel(mask_t)[:, None],
+            other=0,
+        )
+        sin_old = tl.load(
+            SIN +\
+                old_t[:, None].to(tl.int64) * stride_sin_t +\
+                idx_hid[None, :] * stride_sin_hid,
+            mask=tl.ravel(mask_t)[:, None],
+            other=0,
+        )
+        
+        cos_new = tl.load(
+            COS +\
+                new_t[:, None].to(tl.int64) * stride_cos_t +\
+                idx_hid[None, :] * stride_cos_hid,
+            mask=tl.ravel(mask_t)[:, None],
+            other=0,
+        )
+        sin_new = tl.load(
+            SIN +\
+                new_t[:, None].to(tl.int64) * stride_sin_t +\
+                idx_hid[None, :] * stride_sin_hid,
+            mask=tl.ravel(mask_t)[:, None],
+            other=0,
+        )
+        
+        tokens_adjusted = de_rope(tokens.to(tl.float32), cos_old.to(tl.float32), sin_old.to(tl.float32), T, HID)
+        tokens_adjusted = apply_rope(tokens_adjusted.to(tl.float32), cos_new.to(tl.float32), sin_new.to(tl.float32), T, HID)
+        
+        tokens = tl.where(mask_t[:, None], tokens_adjusted.to(tokens.dtype), tokens)
+        
+        return tokens
+    else:
+        cos_new = tl.load(
+            COS +\
+                new_t[:, None].to(tl.int64) * stride_cos_t +\
+                idx_hid[None, :] * stride_cos_hid,
+            mask=tl.ravel(mask_t)[:, None],
+            other=0.0,
+        )
+        sin_new = tl.load(
+            SIN +\
+                new_t[:, None].to(tl.int64) * stride_sin_t +\
+                idx_hid[None, :] * stride_sin_hid,
+            mask=tl.ravel(mask_t)[:, None],
+            other=0.0,
+        )
+        
+        tokens = apply_rope(
+            tokens.to(tl.float32), 
+            cos_new.to(tl.float32), 
+            sin_new.to(tl.float32), 
+            T, HID
+        ).to(tokens.dtype)
+        
+        # tokens = tl.where(mask_t[:, None], tokens_adjusted.to(tokens.dtype), tokens)
+        
+        return tokens
+
+@triton.jit
+def hash_table_lookup_or_fail(
+    TABLES, stride_tables_n, stride_tables_k,
+    idx_n, idx_tsrc: tl.tensor, mask_tsrc: tl.tensor,
     
-    cos_new = tl.load(
-        COS +\
-            new_t[:, None] * stride_cos_t +\
-            idx_hid[None, :] * stride_cos_hid
-    )
-    sin_new = tl.load(
-        SIN +\
-            new_t[:, None] * stride_sin_t +\
-            idx_hid[None, :] * stride_sin_hid
-    )
+    TABLE_LEN,
+):
+    TABLE_CURRENT = TABLES + idx_n * stride_tables_n
     
-    tokens = de_rope(tokens, cos_old, sin_old, T, HID)
-    tokens = apply_rope(tokens, cos_new, sin_new, T, HID)
     
-    return tokens
+    idx_hash_slot = idx_tsrc % TABLE_LEN
+    
+    # idx_hash_slot = idx_tsrc.to(tl.uint64)
+    # idx_hash_slot ^= idx_hash_slot >> 8
+    # # idx_hash_slot *= 0xff51afd7ed558ccd
+    # # idx_hash_slot = idx_hash_slot >> 33
+    # # idx_hash_slot *= 0xc4ceb9fe1a85ec53
+    # # idx_hash_slot ^= idx_hash_slot >> 33    
+    # idx_hash_slot = idx_hash_slot.to(tl.int64) % TABLE_LEN
+    
+    offset_probe = tl.zeros_like(idx_tsrc).to(tl.int64) # type: tl.tensor
+    found_slot = tl.zeros_like(idx_tsrc).to(tl.int64) - 1
+    
+    offset_probe = tl.where(mask_tsrc, offset_probe, TABLE_LEN)
+    
+    if offset_probe.numel == 1:
+        minimum_offset_prob = offset_probe
+    else:
+        minimum_offset_prob = tl.min(offset_probe)
+        
+    max_try = TABLE_LEN + 1
+    
+    while (minimum_offset_prob < TABLE_LEN) & (max_try > 0):
+        max_try -= 1
+        
+        probing_target = ((idx_hash_slot + offset_probe) % TABLE_LEN)
+        mask_probing = (found_slot == -1) & (offset_probe < TABLE_LEN) & mask_tsrc
+        slots = tl.load(
+            TABLE_CURRENT +\
+                probing_target * stride_tables_k,
+            mask=mask_probing,
+            other=65535, # mimic full
+        )
+        
+        # mask_empty_hit = (found_slot == -1) & ((slots == 65535) | (slots == 0xFFFFFFFFFFFFFFFF))
+        # found_slot = tl.where(mask_empty_hit, probing_target, found_slot)
+        # offset_probe = tl.where(mask_empty_hit, TABLE_LEN, offset_probe)
+        
+        mask_current_hit = (found_slot == -1) & ((slots.to(tl.uint64) >> 16) == (idx_tsrc.to(tl.uint64)))
+        found_slot = tl.where(mask_current_hit, probing_target, found_slot)
+        offset_probe = tl.where(mask_current_hit, TABLE_LEN, offset_probe)
+        
+        offset_probe = tl.where(found_slot == -1, offset_probe + 1, offset_probe)
+        
+        if offset_probe.numel == 1:
+            minimum_offset_prob = offset_probe
+        else:
+            minimum_offset_prob = tl.min(offset_probe)
+    
+    return found_slot
 
 @triton.jit
 def load_tokens(
@@ -568,6 +695,7 @@ def load_tokens(
     
     # offload cache args template
     USING_OFFLOAD_CACHE: tl.constexpr,
+    OFFLOAD_CACHE_METHOD: tl.constexpr,
     OFFLOAD_CACHE_BUDGET: tl.constexpr,
     OFFLOAD_CACHE_KV_HEAD: tl.constexpr,
     OFFLOAD_CACHE_UPDATE: tl.constexpr,
@@ -599,6 +727,8 @@ def load_tokens(
     # DEBUG: to load nothing
     # mask_keys = mask_keys & False
     
+    # tl.static_print(OFFLOAD_CACHE_METHOD)
+    
     if not USING_PAGES:
         if USING_OFFLOAD_CACHE:
             original_mask_keys = mask_keys
@@ -606,14 +736,46 @@ def load_tokens(
                 idx_bsz.to(tl.int64) * OFFLOAD_CACHE_KV_HEAD +\
                     idx_kv_head.to(tl.int64)
             ).to(tl.int64)
-            idx_bank_page = tl.load(
-                OFFLOAD_CACHE_K_TABLES +\
-                    idx_cache * stride_offload_cache_k_tables_n +\
-                    (idx_tsrc // BLOCK_SIZE_K).to(tl.int64) * stride_offload_cache_k_tables_t,
-                mask=mask_keys,
-                other=65535
-            ).to(tl.uint16)
-            mask_bank_hit = (idx_bank_page != 65536) & (idx_bank_page < OFFLOAD_CACHE_BUDGET)
+            
+            if OFFLOAD_CACHE_METHOD == 'single_level':
+                idx_bank_page = tl.load(
+                    OFFLOAD_CACHE_K_TABLES +\
+                        idx_cache * stride_offload_cache_k_tables_n +\
+                        (idx_tsrc // BLOCK_SIZE_K).to(tl.int64) * stride_offload_cache_k_tables_t,
+                    mask=mask_keys,
+                    other=65535
+                ).to(tl.uint16)
+            elif OFFLOAD_CACHE_METHOD == 'bloom':
+                TABLE_LEN = OFFLOAD_CACHE_BUDGET * 1
+                idx_table_entry = hash_table_lookup_or_fail(
+                    OFFLOAD_CACHE_K_TABLES, 
+                    stride_offload_cache_k_tables_n, 
+                    stride_offload_cache_k_tables_t,
+                    idx_cache, 
+                    (idx_tsrc // BLOCK_SIZE_K).to(tl.int64),
+                    mask_keys,
+                    TABLE_LEN,
+                )
+                # idx_table_entry = idx_table_entry * 0 - 1
+                mask_table_entry = mask_keys & (idx_table_entry >= 0) & (idx_table_entry < TABLE_LEN)
+                tl.static_assert(OFFLOAD_CACHE_K_TABLES.dtype.element_ty != tl.uint16)
+                idx_bank_page = tl.load(
+                    OFFLOAD_CACHE_K_TABLES +\
+                        idx_cache *  stride_offload_cache_k_tables_n +\
+                        idx_table_entry * stride_offload_cache_k_tables_t,
+                    mask=mask_table_entry,
+                    other=65535
+                )
+                idx_entry_tsrc = idx_bank_page >> 16
+                idx_bank_page = idx_bank_page & 0xFFFF
+                idx_bank_page = idx_bank_page.to(tl.int64)
+                idx_bank_page = tl.where(idx_entry_tsrc == (idx_tsrc // BLOCK_SIZE_K), idx_bank_page, 65535)
+                # if (tl.program_id(0) == 0) and (tl.program_id(1) == 0):
+                #     tl.device_print('a', idx_entry_tsrc)
+            else:
+                tl.static_assert(False, f"Not supported {OFFLOAD_CACHE_METHOD}")
+            
+            mask_bank_hit = (idx_bank_page != 65535) & (idx_bank_page < OFFLOAD_CACHE_BUDGET)
             mask_keys = mask_keys & (~mask_bank_hit)
             
             # load from offload cache
@@ -662,7 +824,7 @@ def load_tokens(
                 idx_kv_head.to(tl.int64) * stride_k_head +\
                 idx_hid.to(tl.int64) * stride_k_hid,
             mask = mask_keys,
-            other = 0,
+            other = 0.0,
             # cache_modifier='.cs', # TODO: uncomment this
         )
         
@@ -699,7 +861,7 @@ def load_tokens(
                 idx_kv_head.to(tl.int64) * stride_k_cache_kv_head +\
                 idx_hid.to(tl.int64) * stride_k_cache_hid,
             mask=mask_keys,
-            other=0,
+            other=0.0,
         )
     
     if keys.dtype == tl.uint8:
@@ -720,6 +882,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
     DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
     
+    ACCESS_LOG_STORE_FROM,
     KEY_ACCESS_LOG, 
     stride_key_access_log_b, 
     stride_key_access_log_bdst, 
@@ -744,7 +907,10 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     
     idx_b, 
     idx_bdst,
-    idx_tdst, mask_tdst, pos_tdst,
+    idx_tdst, 
+    mask_tdst, 
+    pos_tdst,
+    idx_bk, # for streamingLLM
     mask_key_blocks,
     
     sliding_window_size,
@@ -754,8 +920,10 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     MAX_TSRC, 
     HID: tl.constexpr,
     KV_HEAD_REPEAT: tl.constexpr,
+    MASK_K: tl.constexpr,
     
     USING_EXTEND: tl.constexpr,
+    NEED_APPLY_ROPE: tl.constexpr,
     extend_window_size,
     extend_group_size,
     
@@ -788,6 +956,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     
     # offload cache args template
     USING_OFFLOAD_CACHE: tl.constexpr,
+    OFFLOAD_CACHE_METHOD: tl.constexpr,
     OFFLOAD_CACHE_BUDGET: tl.constexpr,
     OFFLOAD_CACHE_KV_HEAD: tl.constexpr,
     OFFLOAD_CACHE_K_TABLES,
@@ -814,7 +983,8 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
     BLOCK_BK: tl.constexpr,
     REDUCE_METHOD: tl.constexpr,
     
-    NUM_CALIB: tl.constexpr = 32
+    NUM_CALIB: tl.constexpr = 32,
+    EXTEND_BACKEND: tl.constexpr = DEFAULT_EXTEND_BACKEND
 ):
     if BLOCK_ACCESS_LOG is not None:
         list_block_access = idx_key_blocks
@@ -824,16 +994,17 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
         block_access_location = tl.atomic_add(
             BLOCK_ACCESS_COUNT +\
                 idx_b * stride_block_access_count_b +\
-                idx_bdst * stride_block_access_count_bdst,
+                (idx_bdst - ACCESS_LOG_STORE_FROM) * stride_block_access_count_bdst,
             val=len_block_access,
+            mask=(idx_bdst - ACCESS_LOG_STORE_FROM) >= 0,
         )
         idx_block_access = (block_access_location + tl.cumsum(mask_block_access.to(tl.int32)) - 1) % MAX_BLOCK_ACCESS_COUNT
         tl.store(
             BLOCK_ACCESS_LOG +\
                 idx_b * stride_block_access_log_b +\
-                idx_bdst * stride_block_access_log_bdst +\
+                (idx_bdst - ACCESS_LOG_STORE_FROM) * stride_block_access_log_bdst +\
                 idx_block_access * stride_block_access_log_t,
-            mask=mask_block_access,
+            mask=mask_block_access & ((idx_bdst - ACCESS_LOG_STORE_FROM) >= 0),
             value=list_block_access,
         )
     
@@ -857,26 +1028,28 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
         key_access_location = tl.atomic_add(
             KEY_ACCESS_COUNT +\
                 idx_b * stride_key_access_count_b +\
-                idx_bdst * stride_key_access_count_bdst,
+                (idx_bdst - ACCESS_LOG_STORE_FROM) * stride_key_access_count_bdst,
             val=len_access,
+            mask=((idx_bdst - ACCESS_LOG_STORE_FROM) >= 0)
         )
         idx_access = (key_access_location + tl.cumsum(mask_access.to(tl.int32)) - 1) % MAX_ACCESS_COUNT
         # idx_access = tl.arange(0, BLOCK_BK * KEY_DUP * BLOCK_SIZE_K // BLOCK_STRIDE_K)
         tl.store(
             KEY_ACCESS_LOG +\
                 idx_b * stride_key_access_log_b +\
-                idx_bdst * stride_key_access_log_bdst +\
+                (idx_bdst - ACCESS_LOG_STORE_FROM) * stride_key_access_log_bdst +\
                 idx_access * stride_key_access_log_t,
             value=idx_tsrc_grouped,
-            mask=mask_access,
+            mask=mask_access & ((idx_bdst - ACCESS_LOG_STORE_FROM) >= 0),
             # eviction_policy='evict_first'
         )
     
     acc = tl.zeros((
         BLOCK_SIZE_Q // BLOCK_STRIDE_Q, 
         BLOCK_BK * KEY_DUP * BLOCK_SIZE_K // BLOCK_STRIDE_K
-    ), dtype=tl.float16)
+    ), dtype=tl.float32)
     idx_hid = tl.arange(0, HID)
+    mask_acc_keys = tl.zeros((BLOCK_BK * KEY_DUP * BLOCK_SIZE_K // BLOCK_STRIDE_K, ), dtype=tl.int1)
     for i_group in tl.range(0, G):
         queries = tl.load(
             Q +\
@@ -890,7 +1063,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
             # cache_modifier='.cs', # TODO: uncomment this (do not uncomment others)
             # eviction_policy='evict_last'
         )
-        # queries = (idx_tdst[:, None] + idx_hid[None, :]).to(tl.float16)
+        # queries = (idx_tdst[:, None] + idx_hid[None, :]).to(tl.float32)
         
         if queries.dtype == tl.uint8:
             queries = queries.to(tl.float8e5, bitcast=True).to(tl.float16)
@@ -937,6 +1110,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
             ).to(tl.int1)
             mask_keys = mask_keys & diagonal_mask
         
+        mask_acc_keys = mask_acc_keys | tl.ravel(mask_keys)
         keys = load_tokens(
             K, 
             stride_k_bsz, 
@@ -959,6 +1133,7 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
             
             # offload cache args template
             USING_OFFLOAD_CACHE,
+            OFFLOAD_CACHE_METHOD, 
             OFFLOAD_CACHE_BUDGET,
             OFFLOAD_CACHE_KV_HEAD,
             True,
@@ -986,116 +1161,170 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
             
             BLOCK_SIZE_K,
         )
-        # keys = (idx_tsrc[None, :] + idx_hid[:, None]).to(tl.float16)
+        # keys = (idx_tsrc[None, :] + idx_hid[:, None]).to(tl.float32)
         if keys.dtype == tl.uint8:
             keys = keys.to(tl.float8e5, bitcast=True).to(tl.float16)
         
         if USING_EXTEND:
-            if tl.min(pos_tdst) > (extend_window_size + NUM_CALIB // 2):
+            if EXTEND_BACKEND == 'self_extend':
+                if tl.min(pos_tdst) > (extend_window_size + NUM_CALIB // 2):
+                    assert COS is not None
+                    assert SIN is not None
+                    
+                    # dynamic_group_size = tl.maximum(1.0, tl.math.ceil(tl.max(pos_tdst / 8192))).to(tl.int32)
+                    dynamic_group_size = extend_group_size
+                    
+                    idx_tsrc_calib = tl.maximum(0, tl.min(pos_tdst) - (extend_window_size + NUM_CALIB // 2))
+                    idx_tsrc_calib = idx_tsrc_calib + tl.arange(0, NUM_CALIB)
+                    mask_tsrc_calib = idx_tsrc_calib < MAX_TSRC
+                    keys_calib_old = tl.load(
+                        K +\
+                            idx_bsz.to(tl.int64) * stride_k_bsz +\
+                            idx_tsrc_calib[None, :] * stride_k_tsrc +\
+                            idx_kv_head * stride_k_head +\
+                            idx_hid[:, None] * stride_k_hid,
+                        mask=mask_tsrc_calib[None, :],
+                        other=0
+                    )
+                    
+                    keys_calib_new = adjust_rope(
+                        keys_calib_old.trans(1, 0), 
+                        idx_tsrc_calib, 
+                        # idx_tsrc_calib // extend_group_size,
+                        (idx_tsrc_calib / dynamic_group_size).to(tl.int32),
+                        mask_tsrc_calib,
+                        idx_hid,
+                        COS, stride_cos_t, stride_cos_hid,
+                        SIN, stride_sin_t, stride_sin_hid,
+                        NUM_CALIB, 
+                        HID,
+                        NEED_APPLY_ROPE,
+                    ).trans(1, 0)
+                    
+                    old_tsrc = idx_tsrc
+                    mask_tsrc_window = idx_tsrc >= (tl.min(tl.where(mask_tdst, (pos_tdst - 1), 9999999)) - extend_window_size)
+                    new_tsrc = tl.where(
+                        mask_tsrc_window,
+                        old_tsrc,
+                        # old_tsrc // extend_group_size
+                        (old_tsrc / dynamic_group_size).to(tl.int32)
+                    )
+                    
+                    keys = keys.trans(1, 0)
+                    keys = adjust_rope(
+                        keys, 
+                        old_tsrc, 
+                        new_tsrc,
+                        mask_keys, 
+                        idx_hid,
+                        COS, stride_cos_t, stride_cos_hid,
+                        SIN, stride_sin_t, stride_sin_hid,
+                        BLOCK_BK * KEY_DUP * BLOCK_SIZE_K // BLOCK_STRIDE_K, 
+                        HID,
+                        NEED_APPLY_ROPE,
+                    ).to(keys.dtype)
+                    keys = tl.trans(keys, 1, 0)
+                    keys = (keys * mask_keys).to(keys.dtype)
+                    
+                    old_tdst = (pos_tdst - 1)
+                    # new_tdst = old_tdst // extend_group_size
+                    new_tdst = (old_tdst / dynamic_group_size).to(tl.int32)
+                    
+                    queries_grouped = adjust_rope(
+                        queries, 
+                        old_tdst, 
+                        new_tdst, 
+                        mask_tdst,
+                        idx_hid,
+                        COS, stride_cos_t, stride_cos_hid,
+                        SIN, stride_sin_t, stride_sin_hid,
+                        BLOCK_SIZE_Q // BLOCK_STRIDE_Q, 
+                        HID,
+                        NEED_APPLY_ROPE,
+                    ).to(queries.dtype)
+                    
+                    t_calib_old = tl.dot(
+                        (queries * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype), 
+                        (keys_calib_old.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype),
+                    )
+                    t_calib_new = tl.dot(
+                        (queries_grouped * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries_grouped.dtype), 
+                        (keys_calib_new.to(queries_grouped.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries_grouped.dtype),
+                    )
+                    
+                    calibration = tl.sum(t_calib_new - t_calib_old, axis=-1) / NUM_CALIB
+                    
+                    # calib_old_mean = tl.sum(t_calib_old, axis=-1) / NUM_CALIB
+                    # calib_old_std = tl.sqrt(tl.sum(tl.extra.cuda.libdevice.pow(t_calib_old - calib_old_mean[:, None], 2), axis=-1) / NUM_CALIB)
+                    # calib_new_mean = tl.sum(t_calib_new, axis=-1) / NUM_CALIB
+                    # calib_new_std = tl.sqrt(tl.sum(tl.extra.cuda.libdevice.pow(t_calib_new - calib_new_mean[:, None], 2), axis=-1) / NUM_CALIB)
+                    
+                    t_window = tl.dot(
+                        (queries * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype), 
+                        (keys.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype),
+                    )
+                    
+                    t_grouped = tl.dot(
+                        (queries_grouped * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries_grouped.dtype), 
+                        (keys.to(queries_grouped.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries_grouped.dtype),
+                    )
+                    
+                    # NOTE: this calibration trick is very important.
+                    # > w/o std
+                    t_grouped = t_grouped - calibration[:, None]
+                    # > with std
+                    # t_grouped = ((t_grouped - calib_new_mean[:, None]) / calib_new_std[:, None]) * calib_old_std[:, None] + calib_old_mean[:, None]
+                    
+                    t = tl.where(
+                        mask_tsrc_window[None, :],
+                        t_window,
+                        t_grouped,
+                    ).to(tl.float32)
+                else:
+                    t = tl.dot(
+                        (queries * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype), 
+                        (keys.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype),
+                        out_dtype=tl.float32,
+                        allow_tf32=True,
+                    ).to(tl.float32)
+            elif EXTEND_BACKEND == 'streaming':
                 assert COS is not None
                 assert SIN is not None
                 
-                # dynamic_group_size = tl.maximum(1.0, tl.math.floor(tl.max(pos_tdst / 3072)))
-                dynamic_group_size = extend_group_size
+                # tl.static_print(idx_tsrc.shape, mask_keys.shape, idx_bk.shape)
                 
-                idx_tsrc_calib = tl.maximum(0, tl.min(pos_tdst) - (extend_window_size + NUM_CALIB // 2))
-                idx_tsrc_calib = idx_tsrc_calib + tl.arange(0, NUM_CALIB)
-                mask_tsrc_calib = idx_tsrc_calib < MAX_TSRC
-                keys_calib_old = tl.load(
-                    K +\
-                        idx_bsz.to(tl.int64) * stride_k_bsz +\
-                        idx_tsrc_calib[None, :] * stride_k_tsrc +\
-                        (idx_bh * BH + i_group) * stride_k_head +\
-                        idx_hid[:, None] * stride_k_hid,
-                    mask=mask_tsrc_calib[None, :],
-                    other=0
-                )
+                old_tsrc = idx_tsrc
+                new_tsrc = tl.ravel((idx_bk * BLOCK_SIZE_K)[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :]) +\
+                    tl.maximum(0, 
+                        tl.min(tl.where(mask_tdst, pos_tdst - 1, 987654321)) -\
+                            sliding_window_size -\
+                            MASK_K#tl.arange(0, BLOCK_TK)
+                    )
+                new_tsrc = tl.where(mask_keys, new_tsrc, old_tsrc)
+                new_tsrc = tl.ravel(new_tsrc)
                 
-                keys_calib_new = adjust_rope(
-                    keys_calib_old.trans(1, 0), 
-                    idx_tsrc_calib, 
-                    # idx_tsrc_calib // extend_group_size,
-                    (idx_tsrc_calib / dynamic_group_size).to(tl.int32),
+                keys_adjusted = keys.trans(1, 0)
+                keys_adjusted = adjust_rope(
+                    keys_adjusted, 
+                    old_tsrc, 
+                    new_tsrc,
+                    mask_keys, 
                     idx_hid,
                     COS, stride_cos_t, stride_cos_hid,
                     SIN, stride_sin_t, stride_sin_hid,
-                    NUM_CALIB, HID,
-                ).trans(1, 0)
-                
-                old_tsrc = idx_tsrc
-                mask_tsrc_window = idx_tsrc >= (tl.min(tl.where(mask_tdst, (pos_tdst - 1), 9999999)) - extend_window_size)
-                new_tsrc = tl.where(
-                    mask_tsrc_window,
-                    old_tsrc,
-                    # old_tsrc // extend_group_size
-                    (old_tsrc / dynamic_group_size).to(tl.int32)
-                )
-                
-                keys = keys.trans(1, 0)
-                keys = adjust_rope(
-                    keys, old_tsrc, new_tsrc, idx_hid,
-                    COS, stride_cos_t, stride_cos_hid,
-                    SIN, stride_sin_t, stride_sin_hid,
-                    BLOCK_BK * KEY_DUP * BLOCK_SIZE_K // BLOCK_STRIDE_K, HID,
+                    BLOCK_BK * KEY_DUP * BLOCK_SIZE_K // BLOCK_STRIDE_K, 
+                    HID,
+                    NEED_APPLY_ROPE,
                 ).to(keys.dtype)
-                keys = tl.trans(keys, 1, 0)
-                keys = (keys * mask_keys).to(keys.dtype)
+                keys_adjusted = tl.trans(keys_adjusted, 1, 0)
+                keys_adjusted = (keys_adjusted * mask_keys).to(keys_adjusted.dtype)
                 
-                old_tdst = (pos_tdst - 1)
-                # new_tdst = old_tdst // extend_group_size
-                new_tdst = (old_tdst / dynamic_group_size).to(tl.int32)
-                
-                queries_grouped = adjust_rope(
-                    queries, old_tdst, new_tdst, idx_hid,
-                    COS, stride_cos_t, stride_cos_hid,
-                    SIN, stride_sin_t, stride_sin_hid,
-                    BLOCK_SIZE_Q // BLOCK_STRIDE_Q, HID,
-                ).to(queries.dtype)
-                
-                t_calib_old = tl.dot(
-                    queries, 
-                    keys_calib_old.to(queries.dtype),
-                )
-                t_calib_new = tl.dot(
-                    queries_grouped, 
-                    keys_calib_new.to(queries.dtype),
-                )
-                
-                calibration = tl.sum(t_calib_new - t_calib_old, axis=-1) / NUM_CALIB
-                
-                # calib_old_mean = tl.sum(t_calib_old, axis=-1) / NUM_CALIB
-                # calib_old_std = tl.sqrt(tl.sum(tl.extra.cuda.libdevice.pow(t_calib_old - calib_old_mean[:, None], 2), axis=-1) / NUM_CALIB)
-                # calib_new_mean = tl.sum(t_calib_new, axis=-1) / NUM_CALIB
-                # calib_new_std = tl.sqrt(tl.sum(tl.extra.cuda.libdevice.pow(t_calib_new - calib_new_mean[:, None], 2), axis=-1) / NUM_CALIB)
-                
-                t_window = tl.dot(
-                    queries, 
-                    keys.to(queries.dtype),
-                )
-                
-                t_grouped = tl.dot(
-                    queries_grouped, 
-                    keys.to(queries.dtype),
-                )
-                
-                # NOTE: this calibration trick is very important.
-                # > w/o std
-                t_grouped = t_grouped - calibration[:, None]
-                # > with std
-                # t_grouped = ((t_grouped - calib_new_mean[:, None]) / calib_new_std[:, None]) * calib_old_std[:, None] + calib_old_mean[:, None]
-                
-                t = tl.where(
-                    mask_tsrc_window[None, :],
-                    t_window,
-                    t_grouped,
+                t = tl.dot(
+                    (queries * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype), 
+                    (keys_adjusted.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype),
                 ).to(tl.float32)
             else:
-                t = tl.dot(
-                    queries,
-                    keys.to(queries.dtype),
-                    allow_tf32=True,
-                    out_dtype=tl.float32,
-                ).to(tl.float32)
+                raise Exception()
         else:
             if not USING_SPARQ:
                 NUM_QUERIES: tl.constexpr = tl.constexpr(BLOCK_SIZE_Q // BLOCK_STRIDE_Q)
@@ -1105,9 +1334,10 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 else:
                     # BQ=64, BSQ=2
                     # 4090: 20 ms, A100: 34.81ms
+                    
                     t = tl.dot(
-                        queries, 
-                        keys.to(queries.dtype),
+                        (queries * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype), 
+                        (keys.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype),
                         out_dtype=tl.float32,
                         allow_tf32=True,
                     )
@@ -1115,11 +1345,11 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                     # 4090: 16 ms, A100: 31.97 ms
                     # scale = 256 / tl.max(tl.abs(queries))
                     # t = tl.dot(
-                    #     tl.clamp(queries.to(tl.float16) * scale, -127, 127).to(tl.int8), 
-                    #     tl.clamp(keys.to(tl.float16) * scale, -127, 127).to(tl.int8),
+                    #     tl.clamp(queries.to(tl.float32) * scale, -127, 127).to(tl.int8), 
+                    #     tl.clamp(keys.to(tl.float32) * scale, -127, 127).to(tl.int8),
                     #     out_dtype=tl.int32,
                     # ).to(tl.float32) / (scale * scale)
-                    # t = t.to(tl.float16)
+                    # t = t.to(tl.float32)
                     
                     # 4090: 10.13 ms, A100: 19.18704981 ms
                     # t = tl.zeros_like(acc) + tl.sum(keys) + tl.sum(queries)
@@ -1155,8 +1385,8 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
                 )
                 
                 t = tl.dot(
-                    q_sparq, 
-                    k_sparq,
+                    (q_sparq * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(q_sparq.dtype), 
+                    (k_sparq.to(q_sparq.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(q_sparq.dtype),
                 ).to(tl.float32)
         acc += t.to(acc.dtype)
         # acc += tl.sum(queries)
@@ -1181,6 +1411,20 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
             -32000.0 if REDUCE_METHOD == 'max' else 32000.0, 
             acc
         )
+    if REDUCE_METHOD == 'max':
+        acc = tl.where(
+            mask_acc_keys[None, :] & mask_tdst[:, None],
+            acc,
+            float('-inf')
+        )
+    elif REDUCE_METHOD == 'min':
+        acc = tl.where(
+            mask_acc_keys[None, :] & mask_tdst[:, None],
+            acc,
+            float('inf')
+        )
+    else:
+        raise Exception()
     scores = tl.reshape(
         acc, (
             BLOCK_SIZE_Q // BLOCK_STRIDE_Q, 
@@ -1219,9 +1463,9 @@ def masking_iteration_draft_cuda_dup_and_score_calc_score(
             tl.store(
                 BLOCK_ACCESS_SCORE +\
                     idx_b * stride_block_access_score_b +\
-                    idx_bdst * stride_block_access_score_bdst +\
+                    (idx_bdst - ACCESS_LOG_STORE_FROM) * stride_block_access_score_bdst +\
                     idx_block_access * stride_block_access_score_t,
-                mask=mask_block_access,
+                mask=mask_block_access & ((idx_bdst - ACCESS_LOG_STORE_FROM) >= 0),
                 value=checkout_scores,
             )
     
@@ -1258,6 +1502,7 @@ def masking_iteration_draft_cuda_dup_and_score(
     VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
     DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
     
+    ACCESS_LOG_STORE_FROM,
     KEY_ACCESS_LOG, 
     stride_key_access_log_b, 
     stride_key_access_log_bdst, 
@@ -1324,6 +1569,7 @@ def masking_iteration_draft_cuda_dup_and_score(
     KV_HEAD_REPEAT: tl.constexpr,
     
     USING_EXTEND: tl.constexpr,
+    NEED_APPLY_ROPE: tl.constexpr,
     extend_window_size,
     extend_group_size,
     
@@ -1356,6 +1602,7 @@ def masking_iteration_draft_cuda_dup_and_score(
     
     # offload cache args template
     USING_OFFLOAD_CACHE: tl.constexpr,
+    OFFLOAD_CACHE_METHOD: tl.constexpr,
     OFFLOAD_CACHE_BUDGET: tl.constexpr,
     OFFLOAD_CACHE_KV_HEAD: tl.constexpr,
     OFFLOAD_CACHE_K_TABLES,
@@ -1406,7 +1653,7 @@ def masking_iteration_draft_cuda_dup_and_score(
     idx_b = pid_b
     idx_bdst = pid_bdst
     
-    idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // BLOCK_STRIDE_Q) * BLOCK_STRIDE_Q + (BLOCK_STRIDE_Q - 1)
+    idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // BLOCK_STRIDE_Q) * BLOCK_STRIDE_Q + (tl.minimum(MAX_TDST, BLOCK_STRIDE_Q) - 1)
     # idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.random.randint(idx_b * 131072 * BLOCK_SIZE_Q + idx_bdst * BLOCK_SIZE_Q, tl.arange(0, BLOCK_SIZE_Q // BLOCK_STRIDE_Q)).to(tl.int32) % BLOCK_SIZE_Q
     # idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // BLOCK_STRIDE_Q) + (BLOCK_SIZE_Q - BLOCK_SIZE_Q // BLOCK_STRIDE_Q)
     idx_tdst_no_proj = idx_tdst
@@ -1558,15 +1805,15 @@ def masking_iteration_draft_cuda_dup_and_score(
         dupped_indices_for_keys = dupped_indices + tl.maximum(
             0, dupped_group_sizes // 2
         )
-    elif SAMPLE_METHOD == 'sqrt2':
+    elif SAMPLE_METHOD == 'position':
         dupped_indices_for_keys = dupped_indices + tl.maximum(
-            0, tl.extra.cuda.libdevice.round(dupped_group_sizes * 0.55).to(tl.int32)
+            0, tl.extra.cuda.libdevice.round(dupped_group_sizes * EXPERIMENTAL_SAMPLING_POSITION).to(tl.int32)
         )
     elif SAMPLE_METHOD == 'oracle':
         # NOTE: perform linear scan inside of the chunk, this will cost O(T^2)
         dupped_indices_for_keys_start = dupped_indices_for_keys
         dupped_indices_for_keys_end = dupped_indices_for_keys + tl.maximum(dupped_group_sizes - 1, 0)
-        max_scores = tl.zeros((BLOCK_BK * 2, ), dtype=tl.float16) - 32000.0
+        max_scores = tl.zeros((BLOCK_BK * 2, ), dtype=tl.bfloat16) - 32000.0
         for i_shift in range(0, tl.cdiv(BSRC, mask_block_k)):
             t_dupped_indices_for_keys = tl.where(
                 i_shift < dupped_group_sizes,
@@ -1584,6 +1831,7 @@ def masking_iteration_draft_cuda_dup_and_score(
                 VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
                 DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
                 
+                ACCESS_LOG_STORE_FROM,
                 KEY_ACCESS_LOG, 
                 stride_key_access_log_b, 
                 stride_key_access_log_bdst, 
@@ -1608,7 +1856,10 @@ def masking_iteration_draft_cuda_dup_and_score(
                 
                 idx_b, 
                 idx_bdst,
-                idx_tdst, mask_tdst, pos_tdst,
+                idx_tdst, 
+                mask_tdst, 
+                pos_tdst,
+                idx_bk_dup,
                 dupped_mask,
                 
                 sliding_window_size, 
@@ -1618,8 +1869,10 @@ def masking_iteration_draft_cuda_dup_and_score(
                 MAX_TSRC, 
                 HID, 
                 KV_HEAD_REPEAT,
+                mask_k,
                 
                 USING_EXTEND,
+                NEED_APPLY_ROPE,
                 extend_window_size,
                 extend_group_size,
                 
@@ -1652,6 +1905,7 @@ def masking_iteration_draft_cuda_dup_and_score(
                 
                 # offload cache args template
                 USING_OFFLOAD_CACHE,
+                OFFLOAD_CACHE_METHOD,
                 OFFLOAD_CACHE_BUDGET,
                 OFFLOAD_CACHE_KV_HEAD,
                 OFFLOAD_CACHE_K_TABLES,
@@ -1749,6 +2003,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
             DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
             
+            ACCESS_LOG_STORE_FROM,
             KEY_ACCESS_LOG, 
             stride_key_access_log_b, 
             stride_key_access_log_bdst, 
@@ -1773,12 +2028,16 @@ def masking_iteration_draft_cuda_dup_and_score(
             
             idx_b, 
             idx_bdst,
-            idx_tdst, mask_tdst, pos_tdst,
+            idx_tdst, 
+            mask_tdst, 
+            pos_tdst,
+            idx_bk,
             mask_to_sample,
             
-            sliding_window_size, BH, G, MAX_TDST, MAX_TSRC, HID, KV_HEAD_REPEAT,
+            sliding_window_size, BH, G, MAX_TDST, MAX_TSRC, HID, KV_HEAD_REPEAT, mask_k,
             
             USING_EXTEND,
+            NEED_APPLY_ROPE,
             extend_window_size,
             extend_group_size,
             
@@ -1811,6 +2070,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             
             # offload cache args template
             USING_OFFLOAD_CACHE,
+            OFFLOAD_CACHE_METHOD,
             OFFLOAD_CACHE_BUDGET,
             OFFLOAD_CACHE_KV_HEAD,
             OFFLOAD_CACHE_K_TABLES,
@@ -1885,6 +2145,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
             DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
             
+            ACCESS_LOG_STORE_FROM,
             KEY_ACCESS_LOG, 
             stride_key_access_log_b, 
             stride_key_access_log_bdst, 
@@ -1909,12 +2170,16 @@ def masking_iteration_draft_cuda_dup_and_score(
             
             idx_b, 
             idx_bdst,
-            idx_tdst, mask_tdst, pos_tdst,
+            idx_tdst, 
+            mask_tdst, 
+            pos_tdst,
+            idx_bk_dup,
             mask_to_sample,
             
-            sliding_window_size, BH, G, MAX_TDST, MAX_TSRC, HID, KV_HEAD_REPEAT,
+            sliding_window_size, BH, G, MAX_TDST, MAX_TSRC, HID, KV_HEAD_REPEAT, mask_k,
             
             USING_EXTEND,
+            NEED_APPLY_ROPE,
             extend_window_size,
             extend_group_size,
             
@@ -1947,6 +2212,7 @@ def masking_iteration_draft_cuda_dup_and_score(
             
             # offload cache args template
             USING_OFFLOAD_CACHE,
+            OFFLOAD_CACHE_METHOD,
             OFFLOAD_CACHE_BUDGET,
             OFFLOAD_CACHE_KV_HEAD,
             OFFLOAD_CACHE_K_TABLES,
@@ -2268,14 +2534,14 @@ def masking_iteration_draft_cuda_partial_softmax(
         mask=mask_bk,
         other=float('-inf'),
         cache_modifier=DEFAULT_CACHE_MODIFIER,
-    ).to(tl.float16)
+    ).to(tl.bfloat16)
     
-    one = tl.zeros((1, ), dtype=tl.float16) + 1
+    one = tl.zeros((1, ), dtype=tl.bfloat16) + 1
     for i_group in range(G):
         mask_softmax = groups == i_group
         scores_masked = tl.where(mask_softmax, scores, float('-inf'))
         if G == 1:
-            scores_softmax = tl.sigmoid(scores_masked)
+            scores_softmax = tl.sigmoid(scores_masked.to(tl.float32)).to(scores_masked.dtype)
         else:
             count = tl.max(mask_softmax.to(tl.int32)).to(tl.float32)
             t = count / (BK * G)
@@ -2285,7 +2551,7 @@ def masking_iteration_draft_cuda_partial_softmax(
             scores_softmax = tl.where(scores_softmax >= scores_promote_thresh, scores_softmax + 1, scores_softmax)
         scores = tl.where(mask_softmax, scores_softmax, scores).to(scores.dtype)
     
-    scores = tl.where((indices % MAX_BSRC) < tl.cdiv(SINK_TOKEN_SIZE, BLOCK_SIZE_K), 2, scores)
+    # scores = tl.where((indices % MAX_BSRC) < tl.cdiv(SINK_TOKEN_SIZE, BLOCK_SIZE_K), 2, scores) # NOTE: sink token will handled by block_sparse_attention
     scores = tl.where(group_sizes == 0, -1, scores)
     
     tl.store(
@@ -2432,7 +2698,15 @@ def masking_iteration_draft_python_epilog(
 def get_masking_iteration_draft_cuda_fused_configs():
     autotune_disabled = os.getenv('HIP_DISABLE_AUTOTUNE', '0') == '1'
     if autotune_disabled:
-        return [triton.Config({}, num_warps=4, num_stages=2, maxnreg=512)]
+        device_name = torch.cuda.get_device_name()
+        defaults = {
+            'NVIDIA A100-SXM4-80GB': dict(
+                num_warps=4, 
+                num_stages=2, 
+                maxnreg=512,
+            ),
+        }.get(device_name, dict(num_warps=4, num_stages=2, maxnreg=512))
+        return [triton.Config({}, **defaults)]
     if os.getenv('HIP_DISABLE_AUTOTUNE_WARNINGS', '0') == '0':
         warnings.warn('triton autotuning is activated. this should be disabled for faster startup. if you want set HIP_DISABLE_AUTOTUNE=1')
     configs = []
@@ -2523,32 +2797,32 @@ def sum_all_diagonal(scores: Tensor):
     
     return reduced_score.to(scores.dtype)
 
-# @triton.autotune(
-#     configs=get_masking_iteration_draft_cuda_fused_configs(),
-#     key=[
-#         'BLOCK_BK',
-#         'BLOCK_SIZE_K', 
-#         'BLOCK_SIZE_Q', 
-#         'HID',
-#         'TDST_NEXT_POWER_OF_2',
-#     ],
-#     restore_value=[
-#         'KEY_ACCESS_LOG',
-#         'KEY_ACCESS_COUNT',
-#         'INDICES',
-#         'KS',
-#         'GROUP_SIZE',
-#         'DUPPED_INDICES',
-#         'DUPPED_GROUP_SIZE',
-#         'SCORES', 
-#         'SCORES_FINAL',
-#         'PROBS',
-#         'TOPK_IDS',
-#         'T_GROUP_SIZE',
-#     ],
-#     warmup=200,
-#     rep=1000,
-# )
+@triton.autotune(
+    configs=get_masking_iteration_draft_cuda_fused_configs(),
+    key=[
+        'BLOCK_BK',
+        'BLOCK_SIZE_K', 
+        'BLOCK_SIZE_Q', 
+        'HID',
+        'TDST_NEXT_POWER_OF_2',
+    ],
+    restore_value=[
+        'KEY_ACCESS_LOG',
+        'KEY_ACCESS_COUNT',
+        'INDICES',
+        'KS',
+        'GROUP_SIZE',
+        'DUPPED_INDICES',
+        'DUPPED_GROUP_SIZE',
+        'SCORES', 
+        'SCORES_FINAL',
+        'PROBS',
+        'TOPK_IDS',
+        'T_GROUP_SIZE',
+    ],
+    warmup=200,
+    rep=1000,
+)
 @triton.jit
 def masking_iteration_draft_cuda_fused(
     Q, 
@@ -2573,6 +2847,7 @@ def masking_iteration_draft_cuda_fused(
     stride_diagonal_mask_n, 
     stride_diagonal_mask_tsrc,
     
+    ACCESS_LOG_STORE_FROM,
     KEY_ACCESS_LOG, 
     stride_key_access_log_b, 
     stride_key_access_log_bdst, 
@@ -2658,6 +2933,7 @@ def masking_iteration_draft_cuda_fused(
     KV_HEAD_REPEAT: tl.constexpr,
     
     USING_EXTEND: tl.constexpr,
+    NEED_APPLY_ROPE: tl.constexpr,
     extend_window_size,
     extend_group_size,
     COS, 
@@ -2696,6 +2972,7 @@ def masking_iteration_draft_cuda_fused(
     
     # offload cache args template
     USING_OFFLOAD_CACHE: tl.constexpr,
+    OFFLOAD_CACHE_METHOD: tl.constexpr,
     OFFLOAD_CACHE_BUDGET: tl.constexpr,
     OFFLOAD_CACHE_KV_HEAD: tl.constexpr,
     OFFLOAD_CACHE_K_TABLES,
@@ -2746,9 +3023,9 @@ def masking_iteration_draft_cuda_fused(
     # # BSZ
     # _pid_2 = _pid_bsz
     
-    _pid_0 = tl.program_id(0) % GROUP_BH + tl.program_id(1) * GROUP_BH
-    _pid_1 = (tl.program_id(0) // GROUP_BH) % _grid_gdst
-    _pid_2 = tl.program_id(2)
+    _pid_0 = tl.program_id(0).to(tl.int64) % GROUP_BH + tl.program_id(1).to(tl.int64) * GROUP_BH
+    _pid_1 = (tl.program_id(0).to(tl.int64) // GROUP_BH) % _grid_gdst
+    _pid_2 = tl.program_id(2).to(tl.int64)
     
     # _pid_0 = _pid % BH
     # _pid_1 = (_pid // BH) % _grid_gdst
@@ -2761,6 +3038,19 @@ def masking_iteration_draft_cuda_fused(
     pid_1 = _pid_2 * BH + _pid_0
     
     num_groups = tl.minimum(GROUP_BDST, (MAX_BDST - _pid_1 * GROUP_BDST))
+    
+    if num_groups == 1:
+        pid_0 = _pid_1 * GROUP_BDST
+        idx_b = pid_1
+        idx_bdst = pid_0
+        max_group_size = tl.load(
+            T_GROUP_SIZE +\
+                idx_b * stride_t_group_size_b +\
+                idx_bdst * stride_t_group_size_bdst,
+        ).to(tl.float32)
+        if max_group_size <= 1:
+            return
+    
     for i_group in range(num_groups):
         # originally bdst dim, before vectorize head
         pid_0 = _pid_1 * GROUP_BDST + i_group
@@ -2786,6 +3076,7 @@ def masking_iteration_draft_cuda_fused(
                     VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
                     DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
                     
+                    ACCESS_LOG_STORE_FROM,
                     KEY_ACCESS_LOG, 
                     stride_key_access_log_b, 
                     stride_key_access_log_bdst, 
@@ -2852,6 +3143,7 @@ def masking_iteration_draft_cuda_fused(
                     KV_HEAD_REPEAT,
                     
                     USING_EXTEND,
+                    NEED_APPLY_ROPE,
                     extend_window_size,
                     extend_group_size,
                     
@@ -2884,6 +3176,7 @@ def masking_iteration_draft_cuda_fused(
                     
                     # offload cache args template
                     USING_OFFLOAD_CACHE,
+                    OFFLOAD_CACHE_METHOD,
                     OFFLOAD_CACHE_BUDGET,
                     OFFLOAD_CACHE_KV_HEAD,
                     OFFLOAD_CACHE_K_TABLES,
@@ -3084,6 +3377,7 @@ def masking_iteration_draft_cuda_initialize_score(
     VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
     DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
     
+    ACCESS_LOG_STORE_FROM,
     KEY_ACCESS_LOG, 
     stride_key_access_log_b, 
     stride_key_access_log_bdst, 
@@ -3130,8 +3424,10 @@ def masking_iteration_draft_cuda_initialize_score(
     MAX_TSRC, 
     HID: tl.constexpr,
     KV_HEAD_REPEAT: tl.constexpr,
+    MASK_K: tl.constexpr,
                 
     USING_EXTEND: tl.constexpr,
+    NEED_APPLY_ROPE: tl.constexpr,
     extend_window_size,
     extend_group_size,
     COS, stride_cos_t, stride_cos_hid,
@@ -3166,6 +3462,7 @@ def masking_iteration_draft_cuda_initialize_score(
     
     # offload cache args template
     USING_OFFLOAD_CACHE: tl.constexpr,
+    OFFLOAD_CACHE_METHOD: tl.constexpr,
     OFFLOAD_CACHE_BUDGET: tl.constexpr,
     OFFLOAD_CACHE_KV_HEAD: tl.constexpr,
     OFFLOAD_CACHE_K_TABLES,
@@ -3193,7 +3490,7 @@ def masking_iteration_draft_cuda_initialize_score(
     
     KEY_DUP: tl.constexpr = 1,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     
     grid_bh = BH
     grid_bk = tl.cdiv(indices_bk_len, BLOCK_BK)
@@ -3201,10 +3498,10 @@ def masking_iteration_draft_cuda_initialize_score(
     
     pid_bh = tl.program_id(0) % BH
     pid_bk = tl.program_id(0) // BH
-    pid_bdst = tl.program_id(1)
-    pid_bsz = tl.program_id(2)
+    pid_bdst = tl.program_id(1).to(tl.int64)
+    pid_bsz = tl.program_id(2).to(tl.int64)
     
-    idx_bk = pid_bk * BLOCK_BK + tl.arange(0, BLOCK_BK)
+    idx_bk = pid_bk * BLOCK_BK + tl.arange(0, BLOCK_BK).to(tl.int64)
     mask_bk = idx_bk < indices_bk_len
     idx_bdst = pid_bdst
     idx_b = pid_bsz * BH + pid_bh
@@ -3217,7 +3514,7 @@ def masking_iteration_draft_cuda_initialize_score(
     if t_group_size <= 1.0:
         return
     
-    idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // BLOCK_STRIDE_Q) * BLOCK_STRIDE_Q + (BLOCK_STRIDE_Q - 1)
+    idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // BLOCK_STRIDE_Q) * BLOCK_STRIDE_Q + (tl.minimum(MAX_TDST, BLOCK_STRIDE_Q) - 1)
     # idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // BLOCK_STRIDE_Q) + (BLOCK_SIZE_Q - BLOCK_SIZE_Q // BLOCK_STRIDE_Q)
     idx_tdst_no_proj = idx_tdst
     mask_tdst = idx_tdst < MAX_TDST
@@ -3236,7 +3533,7 @@ def masking_iteration_draft_cuda_initialize_score(
                 idx_tdst_no_proj * stride_pos_tdst,
             mask=mask_tdst,
             other=0,
-        )
+        ).to(tl.int64)
     else:
         pos_tdst = tl.full((BLOCK_SIZE_Q // BLOCK_STRIDE_Q, ), value=MAX_TSRC, dtype=tl.int64)
     TSRC = tl.max(pos_tdst)
@@ -3264,6 +3561,7 @@ def masking_iteration_draft_cuda_initialize_score(
         VERTICAL_MASK, stride_vertical_mask_n, stride_vertical_mask_tsrc,
         DIAGONAL_MASK, stride_diagonal_mask_n, stride_diagonal_mask_tsrc,
         
+        ACCESS_LOG_STORE_FROM,
         KEY_ACCESS_LOG, 
         stride_key_access_log_b, 
         stride_key_access_log_bdst, 
@@ -3288,12 +3586,23 @@ def masking_iteration_draft_cuda_initialize_score(
         
         idx_b,
         idx_bdst,
-        idx_tdst, mask_tdst, pos_tdst,
+        idx_tdst, 
+        mask_tdst, 
+        pos_tdst,
+        idx_bk,
         mask_bk,
         
-        sliding_window_size, BH, G, MAX_TDST, MAX_TSRC, HID, KV_HEAD_REPEAT,
+        sliding_window_size, 
+        BH, 
+        G, 
+        MAX_TDST, 
+        MAX_TSRC, 
+        HID, 
+        KV_HEAD_REPEAT, 
+        MASK_K,
                 
         USING_EXTEND,
+        NEED_APPLY_ROPE,
         extend_window_size,
         extend_group_size,
         
@@ -3326,6 +3635,7 @@ def masking_iteration_draft_cuda_initialize_score(
         
         # offload cache args template
         USING_OFFLOAD_CACHE,
+        OFFLOAD_CACHE_METHOD,
         OFFLOAD_CACHE_BUDGET,
         OFFLOAD_CACHE_KV_HEAD,
         OFFLOAD_CACHE_K_TABLES,
@@ -3478,7 +3788,7 @@ def masking_iteration_draft(
             elif max_group_strategy == 'worst':
                 # > worst case  5.1097  17.6545 sec
                 #   (always complete search)
-                max_group_size = triton.cdiv(BSRC, args.block_size_k)
+                max_group_size = max(1, BSRC - mask_block_k)
             elif max_group_strategy == 'greedy':
                 # > greedy      5.1202  11.4861 sec
                 #   (slightly generous then best stratgy)
@@ -3499,15 +3809,17 @@ def masking_iteration_draft(
     else:
         KEY_ACCESS_LEN = args.mask_k * 2 * math.ceil(math.log2(MAX_BSRC) + 1)
     
+    access_log_num_blocks_to_keep = min(args.access_log_num_blocks_to_keep, BDST)
+    access_log_store_from = BDST - access_log_num_blocks_to_keep
     if args.output_key_access_log:
         key_access_log = torch.full(
-            (B, BDST, KEY_ACCESS_LEN,), dtype=torch.int32, 
+            (B, access_log_num_blocks_to_keep, KEY_ACCESS_LEN,), dtype=torch.int32, 
             # fill_value=torch.iinfo(torch.int32).max,
             device=q.device,
             fill_value=-1,
         )
         key_access_count = torch.zeros(
-            (B, BDST, ), 
+            (B, access_log_num_blocks_to_keep, ), 
             dtype=torch.long,
             device=q.device,
         )
@@ -3518,18 +3830,18 @@ def masking_iteration_draft(
     BLOCK_ACCESS_LEN = KEY_ACCESS_LEN // (args.block_size_k // args.block_stride_k)
     if args.output_block_access_log:
         block_access_log = torch.full(
-            (B, BDST, BLOCK_ACCESS_LEN,), dtype=torch.int32,
+            (B, access_log_num_blocks_to_keep, BLOCK_ACCESS_LEN,), dtype=torch.int32,
             device=q.device,
             fill_value=-1,
         )
         block_access_score = torch.full(
-            (B, BDST, BLOCK_ACCESS_LEN), 
+            (B, access_log_num_blocks_to_keep, BLOCK_ACCESS_LEN), 
             device=q.device,
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
             fill_value=-32000.0,
         )
         block_access_count = torch.zeros(
-            (B, BDST,),
+            (B, access_log_num_blocks_to_keep,),
             dtype=torch.long,
             device=q.device,
         )
@@ -3550,10 +3862,10 @@ def masking_iteration_draft(
     assert len(group_sizes.stride()) == 3
     assert len(t_group_sizes.stride()) == 2
     if indices_seed is not None:
-        assert len(indices_seed.stride()) == 3
+        assert len(indices_seed.stride()) == 3, indices_seed.shape
         assert len(ks_seed.stride()) == 2
         assert indices_seed.shape == indices.shape, f'{indices_seed.shape} == {indices.shape}'
-        assert ks_seed.shape == ks.shape
+        assert ks_seed.shape == ks.shape, f'{ks_seed.shape} == {ks.shape}'
         indices_seed = indices_seed // args.block_size_k
     if args.rope_cos is not None:
         assert len(args.rope_cos.stride()) == 2, args.rope_cos.shape
@@ -3563,7 +3875,7 @@ def masking_iteration_draft(
         'first', 
         'last', 
         'center',
-        'sqrt2',
+        'position',
         'random', 
         'oracle', 
     ]
@@ -3671,6 +3983,8 @@ def masking_iteration_draft(
     #     print('init ins', indices_seed[0, -1, :10])
     BLOCK_MASK_BLOCK_K = triton.next_power_of_2(mask_block_k)
     
+    assert (args.sink_token_size % args.block_size_k) == 0
+    assert (args.sliding_window_size % args.block_size_k) == 0
     if group_size_seed is None:
         grid = (B, BDST, G)
         # print('init grid', grid)
@@ -3688,14 +4002,15 @@ def masking_iteration_draft(
             t_group_sizes, *t_group_sizes.stride(),
             
             args.mask_k,
+            args.sliding_window_size,
+            args.sink_token_size,
+            max_group_size_seed if max_group_size_seed is not None else MAX_TSRC,
+            G, TDST, MAX_TSRC, HEAD,
+            
             args.block_size_q, 
             args.block_stride_q,
             args.block_size_k, 
             args.is_causal,
-            
-            args.sliding_window_size,
-            
-            G, TDST, MAX_TSRC, HEAD,
             
             BLOCK_MASK_BLOCK_K,
             
@@ -3707,6 +4022,7 @@ def masking_iteration_draft(
     else:
         indices.copy_(indices_seed)
         ks.copy_(ks_seed)
+        assert group_sizes.shape == group_size_seed.shape, f'{group_sizes.shape} == {group_size_seed.shape}'
         group_sizes.copy_(group_size_seed)
         t_group_sizes = group_sizes.max(dim=-1)[0].float()
     # print('init in after', indices[0, 0, :10])
@@ -3736,6 +4052,12 @@ def masking_iteration_draft(
         
         BLOCK_BK = 256 // (args.block_size_k // args.block_stride_k) * G
         
+        if HID == 256:
+            BLOCK_BK //= 2
+        
+        if args.using_extend:
+            BLOCK_BK //= 4
+        
         assert B == BSZ * BH
         grid = (
             BH * triton.cdiv(indices.shape[-1], BLOCK_BK),
@@ -3755,6 +4077,7 @@ def masking_iteration_draft(
             vertical_attention_mask, *args.safe_stride(vertical_attention_mask, 2),
             diagonal_attention_mask, *args.safe_stride(diagonal_attention_mask, 2),
             
+            access_log_store_from,
             key_access_log, *args.safe_stride(key_access_log, 3),
             key_access_count, *args.safe_stride(key_access_count, 2),
             KEY_ACCESS_LEN,
@@ -3773,7 +4096,7 @@ def masking_iteration_draft(
             
             args.sliding_window_size,
             indices.shape[-1],
-            BH, G, TDST, MAX_TSRC, HID, KV_HEAD_REPEAT,
+            BH, G, TDST, MAX_TSRC, HID, KV_HEAD_REPEAT, args.mask_k,
             
             *args.args_extend(),
             *args.args_sparq(),
@@ -3828,6 +4151,11 @@ def masking_iteration_draft(
         # BLOCK_BK = indices.shape[-1] // 4
         
         # BLOCK_BK = indices.shape[-1] // 4
+        if HID == 256:
+            BLOCK_BK //= 2
+        
+        if args.using_extend:
+            BLOCK_BK //= 4
         
         GROUP_BDST = 1
         GROUP_BH = 1
@@ -3859,6 +4187,7 @@ def masking_iteration_draft(
             vertical_attention_mask, *args.safe_stride(vertical_attention_mask, 2),
             diagonal_attention_mask, *args.safe_stride(diagonal_attention_mask, 2),
             
+            access_log_store_from,
             key_access_log, *args.safe_stride(key_access_log, 3),
             key_access_count, *args.safe_stride(key_access_count, 2),
             KEY_ACCESS_LEN,
@@ -4172,6 +4501,7 @@ def block_sparse_attention_cuda_step(
     # QKV
     queries,
     keys,
+    keys_rot,
     values,
     
     #indices
@@ -4185,20 +4515,30 @@ def block_sparse_attention_cuda_step(
     # TSRC,
     
     sliding_window_size,
+    sink_token_size,
+    mask_k,
     EXCLUDE_SLIDING_WINDOW: tl.constexpr,
+    HAS_FIRST_TOKEN: tl.constexpr,
+    LOGIT_SOFTCAP: tl.constexpr,
     
     USING_EXTEND: tl.constexpr,
+    NEED_APPLY_ROPE: tl.constexpr,
     extend_window_size,
     extend_group_size,
     COS, stride_cos_t, stride_cos_hid,
     SIN, stride_sin_t, stride_sin_hid,
+    model_context_length,
     
+    idx_bk,
     pos_tdst,
     idx_hid, 
     IS_CAUSAL: tl.constexpr,
     HID: tl.constexpr, 
     BLOCK_TQ, 
-    BLOCK_TK,
+    BLOCK_TK, 
+    BLOCK_SIZE_K: tl.constexpr,
+    
+    EXTEND_BACKEND: tl.constexpr = DEFAULT_EXTEND_BACKEND,
 ):
     # keys := [BLOCK_HID: hid, BLOCK_BK * BLOCK_SIZE_K: tsrc]
     # queries := [BLOCK_SIZE_Q: tdst, BLOCK_HID: hid]
@@ -4225,65 +4565,365 @@ def block_sparse_attention_cuda_step(
     # ).to(tl.float32) * 1.44269504 # * queries_max * keys_max)
     
     if USING_EXTEND:
-        assert COS is not None
-        assert SIN is not None
-        
-        old_tsrc = idx_tsrc
-        mask_tsrc_window = idx_tsrc >= (tl.min(tl.where(mask_tdst, (pos_tdst - 1), 987654321)) - extend_window_size)
-        new_tsrc = tl.where(
-            mask_tsrc_window,
-            old_tsrc,
-            old_tsrc // extend_group_size
-        )
-        
-        keys = keys.trans(1, 0)
-        keys = adjust_rope(
-            keys, old_tsrc, new_tsrc, idx_hid,
-            COS, stride_cos_t, stride_cos_hid,
-            SIN, stride_sin_t, stride_sin_hid,
-            BLOCK_TK, HID,
-        )
-        keys = tl.trans(keys, 1, 0)
-        keys = keys * mask_tsrc[None, :]
-        
-        old_tdst = (pos_tdst - 1)
-        new_tdst = old_tdst // extend_group_size
-        
-        queries_grouped = adjust_rope(
-            queries, old_tdst, new_tdst, idx_hid,
-            COS, stride_cos_t, stride_cos_hid,
-            SIN, stride_sin_t, stride_sin_hid,
-            BLOCK_TQ, HID,
-        )
-        queries_grouped = queries_grouped * mask_tdst[:, None]
-        
-        t_window = tl.dot(
-            queries, 
-            keys.to(queries.dtype),
-            allow_tf32=True,
-        )
-        t_grouped = tl.dot(
-            queries_grouped.to(queries.dtype), 
-            keys.to(queries.dtype),
-            allow_tf32=True,
-        )
-        qk = tl.where(
-            mask_tsrc_window[None, :],
-            t_window,
-            t_grouped,
-        ).to(tl.float32) * 1.44269504
+        if EXTEND_BACKEND == 'self_extend':
+            assert COS is not None
+            assert SIN is not None
+            
+            # dynamic_group_size = tl.maximum(1.0, tl.math.ceil(tl.max(pos_tdst / 8192))).to(tl.int32)
+            dynamic_group_size = extend_group_size
+            
+            old_tsrc = idx_tsrc
+            mask_tsrc_window = idx_tsrc >= (tl.min(tl.where(mask_tdst, (pos_tdst - 1), 987654321)) - extend_window_size)
+            new_tsrc = tl.where(
+                mask_tsrc_window,
+                old_tsrc,
+                old_tsrc // dynamic_group_size
+            )
+            
+            keys = keys.trans(1, 0)
+            keys = adjust_rope(
+                keys, 
+                old_tsrc, 
+                new_tsrc, 
+                mask_tsrc,
+                idx_hid,
+                COS, stride_cos_t, stride_cos_hid,
+                SIN, stride_sin_t, stride_sin_hid,
+                BLOCK_TK, 
+                HID,
+                NEED_APPLY_ROPE,
+            )
+            keys = tl.trans(keys, 1, 0)
+            keys = keys * mask_tsrc[None, :]
+            
+            old_tdst = (pos_tdst - 1)
+            new_tdst = old_tdst // dynamic_group_size
+            
+            queries_grouped = adjust_rope(
+                queries, 
+                old_tdst, 
+                new_tdst, 
+                mask_tdst,
+                idx_hid,
+                COS, stride_cos_t, stride_cos_hid,
+                SIN, stride_sin_t, stride_sin_hid,
+                BLOCK_TQ, 
+                HID,
+                NEED_APPLY_ROPE,
+            )
+            queries_grouped = queries_grouped * mask_tdst[:, None]
+            
+            t_window = tl.dot(
+                (queries * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype), 
+                (keys.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype),
+                allow_tf32=True,
+            )
+            t_grouped = tl.dot(
+                (queries_grouped * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries_grouped.dtype), 
+                (keys.to(queries_grouped.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries_grouped.dtype),
+                allow_tf32=True,
+            )
+            qk = tl.where(
+                mask_tsrc_window[None, :],
+                t_window,
+                t_grouped,
+            ).to(tl.float32) * 1.44269504
+        elif (EXTEND_BACKEND == 'streaming') or (EXTEND_BACKEND == 'dynamic_extend'):
+            pos_tdst_min = tl.min(tl.where(mask_tdst, pos_tdst - 1, 987654321))
+            if not NEED_APPLY_ROPE:
+                if ((pos_tdst_min >= model_context_length) and EXCLUDE_SLIDING_WINDOW) and True:
+                    assert COS is not None
+                    assert SIN is not None
+                    
+                    if HAS_FIRST_TOKEN:
+                        old_tdst = (pos_tdst - 1)
+                        new_tdst = tl.minimum(old_tdst, sliding_window_size + mask_k + sink_token_size - 1)
+                        
+                        queries_adjusted = adjust_rope(
+                            queries, 
+                            old_tdst, 
+                            new_tdst, 
+                            mask_tdst,
+                            idx_hid,
+                            COS, stride_cos_t, stride_cos_hid,
+                            SIN, stride_sin_t, stride_sin_hid,
+                            BLOCK_TQ, 
+                            HID,
+                            NEED_APPLY_ROPE,
+                        )
+                        
+                        keys_adjusted = keys
+                    else:
+                        old_tsrc = idx_tsrc
+                        new_tsrc = tl.ravel((idx_bk * BLOCK_SIZE_K)[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :])
+                        new_tsrc = tl.maximum(0, new_tsrc + pos_tdst_min - sliding_window_size - sink_token_size - mask_k - BLOCK_TQ + 1)
+                        
+                        keys_adjusted = keys.trans(1, 0)
+                        keys_adjusted = adjust_rope(
+                            keys_adjusted.to(queries.dtype), 
+                            old_tsrc, 
+                            new_tsrc, 
+                            mask_tsrc,
+                            idx_hid,
+                            COS, stride_cos_t, stride_cos_hid,
+                            SIN, stride_sin_t, stride_sin_hid,
+                            BLOCK_TK, 
+                            HID,
+                            NEED_APPLY_ROPE,
+                        )
+                        keys_adjusted = tl.trans(keys_adjusted, 1, 0)
+                        
+                        queries_adjusted = queries
+                else:
+                    if NEED_APPLY_ROPE:
+                        queries = adjust_rope(
+                            queries.to(tl.float32),
+                            pos_tdst - 1, 
+                            pos_tdst - 1, 
+                            mask_tdst,
+                            idx_hid,
+                            COS, stride_cos_t, stride_cos_hid,
+                            SIN, stride_sin_t, stride_sin_hid,
+                            BLOCK_TQ, 
+                            HID,
+                            True,
+                        ).to(queries.dtype)
+                        queries_adjusted = (queries * mask_tdst[:, None]).to(queries.dtype)
+                        
+                        keys = tl.trans(
+                            adjust_rope(
+                                tl.trans(keys.to(tl.float32), 1, 0), 
+                                idx_tsrc, 
+                                idx_tsrc, 
+                                mask_tsrc,
+                                idx_hid,
+                                COS, stride_cos_t, stride_cos_hid,
+                                SIN, stride_sin_t, stride_sin_hid,
+                                BLOCK_TK, 
+                                HID,
+                                True,
+                            ),
+                            1, 0
+                        ).to(keys.dtype)
+                        keys_adjusted = (keys * mask_tsrc[None, :]).to(keys.dtype)
+            else:
+                tl.static_assert(NEED_APPLY_ROPE)
+                tl.static_assert(USING_EXTEND)
+                # tl.static_assert(not EXCLUDE_SLIDING_WINDOW)
+                
+                if EXCLUDE_SLIDING_WINDOW:
+                    # new_tsrc = tl.ravel((idx_bk * BLOCK_SIZE_K)[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :])
+                    # # new_tsrc = tl.minimum(new_tsrc, sliding_window_size + sink_token_size + mask_k - 1)
+                    # # new_tsrc = tl.minimum(new_tsrc, pos_tdst_min + tl.sum(mask_tdst.to(tl.int32)) - 1)
+                    # new_tsrc = tl.maximum(0, new_tsrc)
+                    
+                    pos_tdst_max = pos_tdst_min + tl.sum(mask_tdst.to(tl.int32))
+                    
+                    if EXTEND_BACKEND == 'streaming':
+                        # streaming
+                        new_tsrc = tl.ravel((idx_bk * BLOCK_SIZE_K)[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :])
+                        new_tsrc = tl.maximum(0, new_tsrc + pos_tdst_min - sliding_window_size - sink_token_size - mask_k + 1)
+                        # new_tsrc = idx_tsrc
+                    elif EXTEND_BACKEND == 'dynamic_extend':
+                        # dynamic extend
+                        window = model_context_length // 2
+                        new_tsrc = tl.where(
+                            idx_tsrc >= (pos_tdst_max - window),
+                            idx_tsrc,
+                            tl.where(
+                                pos_tdst_max <= model_context_length,
+                                idx_tsrc,
+                                (idx_tsrc * ((model_context_length - window) / (pos_tdst_min - window))).to(tl.int32) + (pos_tdst_min - model_context_length)
+                            )
+                        )
+                        new_tsrc = tl.maximum(0, new_tsrc)
+                    else:
+                        raise Exception()
+                else:
+                    new_tsrc = idx_tsrc
+                # new_tsrc = idx_tsrc
+                
+                # keys_adjusted = keys.trans(1, 0)
+                # keys_adjusted = adjust_rope(
+                #     keys_adjusted.to(queries.dtype), 
+                #     new_tsrc,
+                #     new_tsrc,
+                #     mask_tsrc,
+                #     idx_hid,
+                #     COS, stride_cos_t, stride_cos_hid,
+                #     SIN, stride_sin_t, stride_sin_hid,
+                #     BLOCK_TK, 
+                #     HID,
+                #     True,
+                # )
+                # keys_adjusted = tl.trans(keys_adjusted, 1, 0)
+                
+                keys = keys.to(queries.dtype)
+                keys_rot = keys_rot.to(queries.dtype)
+                
+                # cos_new = tl.load(
+                #     COS +\
+                #         new_tsrc[None, :].to(tl.int64) * stride_cos_t +\
+                #         idx_hid[:, None] * stride_cos_hid,
+                #     mask=mask_tsrc[None, :],
+                #     other=0.0,
+                # ).to(keys.dtype)
+                # sin_new = tl.load(
+                #     SIN +\
+                #         new_tsrc[None, :].to(tl.int64) * stride_sin_t +\
+                #         idx_hid[:, None] * stride_sin_hid,
+                #     mask=mask_tsrc[None, :],
+                #     other=0.0,
+                # ).to(keys.dtype)
+                
+                cos_new = tl.load(
+                    COS +\
+                        new_tsrc[None, :].to(tl.int64) * stride_cos_t +\
+                        (tl.arange(0, HID) % (HID // 2))[:, None] * stride_cos_hid,
+                    mask=mask_tsrc[None, :],
+                    other=0.0,
+                ).to(keys.dtype)
+                sin_new = tl.load(
+                    SIN +\
+                        new_tsrc[None, :].to(tl.int64) * stride_sin_t +\
+                        (tl.arange(0, HID) % (HID // 2))[:, None] * stride_sin_hid,
+                    mask=mask_tsrc[None, :],
+                    other=0.0,
+                ).to(keys.dtype)
+                
+                # rope_theta = 500000.0
+                # inv_freqs = ((tl.arange(0, HID) * 2) % HID) 
+                # 1.0 / tl.extra.cuda.libdevice.fast_powf(
+                #     rope_theta,
+                #     ((tl.arange(0, HID) * 2) % HID).to(tl.float32) / HID
+                # )
+                # freqs = new_tsrc[None, :].to(tl.float32) * inv_freqs[:, None]
+                # cos_new = tl.extra.cuda.libdevice.fast_cosf(freqs)
+                # sin_new = tl.extra.cuda.libdevice.fast_sinf(freqs)
+                
+                # keys_rot = tl.where(
+                #     (idx_hid + HID // 2)[:, None] < HID,
+                #     -keys_rot,
+                #     keys_rot
+                # )
+                keys_rot = keys_rot * (((idx_hid + HID // 2)[:, None] < HID) * (-2) + 1).to(keys_rot.dtype)
+                
+                keys_adjusted = (keys * cos_new + keys_rot * sin_new).to(keys.dtype)
+                
+                # error = tl.sum(tl.abs(keys_adjusted * mask_tsrc[None, :] - keys_adjusted_ * mask_tsrc[None, :]))
+                # tl.device_print('err', error)
+                # keys_adjusted = keys_adjusted_
+                
+                queries_adjusted = queries
+                # pass
+                
+            qk = tl.dot(
+                queries_adjusted * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0))).to(queries.dtype), 
+                keys_adjusted * (1 / tl.sqrt(tl.sqrt(HID * 1.0))).to(queries.dtype),
+                out_dtype=tl.float32,
+                allow_tf32=True,
+            ).to(tl.float32)
+            if LOGIT_SOFTCAP is not None:
+                qk = tl.extra.cuda.libdevice.tanh(qk / LOGIT_SOFTCAP) * LOGIT_SOFTCAP
+            qk = qk * 1.44269504
+        elif EXTEND_BACKEND == 'dynamic_extend':
+            assert COS is not None
+            assert SIN is not None
+            
+            pos_tdst_min = tl.min(tl.where(mask_tdst, tl.maximum(0, pos_tdst - 1), 987654321)) + tl.sum(mask_tdst.to(tl.int32))
+            if (pos_tdst_min >= model_context_length) and EXCLUDE_SLIDING_WINDOW:
+                old_tdst = (pos_tdst - 1)
+                new_tdst = tl.minimum(model_context_length - 1, old_tdst)
+                # new_tdst = old_tdst // 16
+                
+                queries = adjust_rope(
+                    queries, 
+                    old_tdst, 
+                    new_tdst, 
+                    mask_tdst & (old_tdst != 0),
+                    idx_hid,
+                    COS, stride_cos_t, stride_cos_hid,
+                    SIN, stride_sin_t, stride_sin_hid,
+                    BLOCK_TQ, 
+                    HID,
+                    NEED_APPLY_ROPE,
+                ).to(queries.dtype)
+                queries = (queries * mask_tdst[:, None]).to(queries.dtype)
+                
+                if not HAS_FIRST_TOKEN:
+                    old_tsrc = idx_tsrc
+                    
+                    # src_scale = (
+                    #     (pos_tdst_min + 1 - sink_token_size - sliding_window_size) /\
+                    #     (model_context_length - sink_token_size - sliding_window_size)
+                    # )
+                    # new_tsrc = (
+                    #     (old_tsrc - sink_token_size) / src_scale + sink_token_size
+                    # ).to(tl.int32)
+                    
+                    # new_tsrc = tl.where(
+                    #     (old_tsrc - pos_tdst_min + model_context_length - 1) > (model_context_length // 2),
+                    #     old_tsrc - pos_tdst_min + model_context_length - 1,
+                    #     ((old_tsrc - sink_token_size) * ((model_context_length // 2 - 1 - sink_token_size - sliding_window_size) / (pos_tdst_min - sink_token_size - sliding_window_size))).to(tl.int32) + sink_token_size
+                    # )
+                    
+                    new_tsrc = tl.where(
+                        (old_tsrc - pos_tdst_min + model_context_length - 1) > (model_context_length // 2),
+                        old_tsrc - pos_tdst_min + model_context_length - 1,
+                        ((old_tsrc - sink_token_size) * ((model_context_length // 2) / (pos_tdst_min - model_context_length // 2))).to(tl.int32) + sink_token_size
+                        # ((old_tsrc - num_sinks) * (model_context_length / real_pos_tdst_min)).to(tl.int32) + num_sinks
+                    )
+                    
+                    # new_tsrc = old_tsrc // 16
+                    
+                    keys_adjusted = keys.trans(1, 0)
+                    keys_adjusted = adjust_rope(
+                        keys_adjusted, 
+                        old_tsrc, 
+                        new_tsrc, 
+                        mask_tsrc & (old_tsrc != 0),
+                        idx_hid,
+                        COS, stride_cos_t, stride_cos_hid,
+                        SIN, stride_sin_t, stride_sin_hid,
+                        BLOCK_TK,
+                        HID,
+                        NEED_APPLY_ROPE,
+                    ).to(keys.dtype)
+                    keys_adjusted = tl.trans(keys_adjusted, 1, 0).to(keys.dtype)
+                    # keys_adjusted = (keys_adjusted * mask_tsrc[None, :]).to(keys.dtype)
+                else:
+                    keys_adjusted = keys
+            else:
+                keys_adjusted = keys
+            
+            qk = tl.dot(
+                (queries * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype), 
+                (keys_adjusted.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype),
+                out_dtype=tl.float32,
+                allow_tf32=True,
+            ).to(tl.float32)
+            
+            if LOGIT_SOFTCAP is not None:
+                qk = tl.extra.cuda.libdevice.tanh(qk / LOGIT_SOFTCAP) * LOGIT_SOFTCAP
+            qk = qk * 1.44269504
+        else:
+            raise Exception()
     else:
         qk = tl.dot(
-            queries, 
-            keys.to(queries.dtype),
-            allow_tf32=True,
+            (queries * (tl.sqrt(HID * 1.0) / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype), 
+            (keys.to(queries.dtype) * (1 / tl.sqrt(tl.sqrt(HID * 1.0)))).to(queries.dtype),
             out_dtype=tl.float32,
-        ).to(tl.float16) * 1.44269504
+            allow_tf32=True,
+        ).to(tl.float32)
+        if LOGIT_SOFTCAP is not None:
+            qk = tl.extra.cuda.libdevice.tanh(qk / LOGIT_SOFTCAP) * LOGIT_SOFTCAP
+        qk = qk * 1.44269504
     
     # qk_mask = (
     #     ((idx_tdst[:, None] + TSRC - TDST) < (idx_tsrc)[None, :]) |
     #     (~(mask_tdst[:, None] & mask_tsrc[None, :]))
     # )
+    
     
     if IS_CAUSAL:
         if EXCLUDE_SLIDING_WINDOW:
@@ -4342,10 +4982,10 @@ def block_sparse_attention_cuda_step(
     
     # update acc
     acc += tl.dot(
-        p.to(values.dtype), 
-        values,
+        p.to(queries.dtype),
+        values.to(queries.dtype),
+        out_dtype=tl.float32,
         allow_tf32=True,
-        out_dtype=tl.float32
     ).to(acc.dtype)
     
     # update m_i and l_i
@@ -4356,33 +4996,38 @@ def block_sparse_attention_cuda_step(
 def get_block_sparse_attention_configs():
     autotune_disabled = os.getenv('HIP_DISABLE_AUTOTUNE', '0') == '1'
     if autotune_disabled:
-        return [triton.Config({'BLOCK_BK': int(os.getenv('SA_BLOCK_BK', '8'))}, num_warps=4, num_stages=2, maxnreg=256)]
+        device_name = torch.cuda.get_device_name()
+        defaults = {
+            'NVIDIA A100-SXM4-80GB': dict(
+                num_warps=4, 
+                num_stages=2,
+                maxnreg=256,
+            ),
+        }.get(device_name, dict(num_warps=4, num_stages=2, maxnreg=256))
+        return [triton.Config({}, **defaults)]
     if os.getenv('HIP_DISABLE_AUTOTUNE_WARNINGS', '0') == '0':
         warnings.warn('triton autotuning is activated. this should be disabled for faster startup. if you want set HIP_DISABLE_AUTOTUNE=1')
     configs = []
     # for block_bk in [4, 8, 16, 32]:
     # for block_bk in [16, 32,]:
-    for block_bk in [1, 2, 4, 8, 16, 32, 64]:
-        for max_nreg in [128, 256, 512]:
-            for num_warps in [4, 8]:
-                for num_stages in [2, 4]:
-                    configs.append(triton.Config(
-                        {
-                            'BLOCK_BK': block_bk
-                        }, 
-                        num_warps=num_warps, 
-                        num_stages=num_stages, 
-                        maxnreg=max_nreg
-                    ))
+    for max_nreg in [128, 256, 512]:
+        for num_warps in [4, 8]:
+            for num_stages in [2, 4]:
+                configs.append(triton.Config(
+                    {},
+                    num_warps=num_warps, 
+                    num_stages=num_stages, 
+                    maxnreg=max_nreg
+                ))
     return configs
 
-def perf_model_block_sparse_attention(**kwargs):
-    block_bk = kwargs['BLOCK_BK']
-    block_k = kwargs['BLOCK_SIZE_K']
-    assert block_k <= 64, 'this will not good idea'
-    if ((block_bk * block_k) <= 64) and ((block_bk * block_k) >= 32):
-        return 0
-    return 999999999 # run might fails
+# def perf_model_block_sparse_attention(**kwargs):
+#     block_bk = kwargs['BLOCK_BK']
+#     block_k = kwargs['BLOCK_SIZE_K']
+#     assert block_k <= 64, 'this will not good idea'
+#     if ((block_bk * block_k) <= 64) and ((block_bk * block_k) >= 32):
+#         return 0
+#     return 999999999 # run might fails
 
 @triton.autotune(
     configs=get_block_sparse_attention_configs(),
@@ -4392,10 +5037,10 @@ def perf_model_block_sparse_attention(**kwargs):
         'HID',
         'TDST_NEXT_POWER_OF_2',
     ],
-    prune_configs_by={
-        'perf_model': perf_model_block_sparse_attention,
-        'top_k': 24,
-    }
+    # prune_configs_by={
+    #     'perf_model': perf_model_block_sparse_attention,
+    #     'top_k': 24,
+    # }
 )
 @triton.jit
 def block_sparse_attention_cuda(
@@ -4424,12 +5069,16 @@ def block_sparse_attention_cuda(
     KV_HEAD_REPEAT: tl.constexpr,
     
     sliding_window_size: tl.constexpr,
+    sink_token_size: tl.constexpr,
+    LOGIT_SOFTCAP: tl.constexpr,
     
     USING_EXTEND: tl.constexpr,
+    NEED_APPLY_ROPE: tl.constexpr,
     extend_window_size,
     extend_group_size,
     COS, stride_cos_t, stride_cos_hid,
     SIN, stride_sin_t, stride_sin_hid,
+    model_context_length,
     
     # paged attention args template
     USING_PAGES: tl.constexpr,
@@ -4452,6 +5101,7 @@ def block_sparse_attention_cuda(
     
     # offload cache args template
     USING_OFFLOAD_CACHE: tl.constexpr,
+    OFFLOAD_CACHE_METHOD: tl.constexpr,
     OFFLOAD_CACHE_BUDGET: tl.constexpr,
     OFFLOAD_CACHE_KV_HEAD: tl.constexpr,
     OFFLOAD_CACHE_K_TABLES,
@@ -4483,10 +5133,11 @@ def block_sparse_attention_cuda(
     
     # autotuning parameters
     BLOCK_BK: tl.constexpr,
+    EXTEND_BACKEND: tl.constexpr,
 ):
-    pid_bsz = tl.program_id(2)
-    pid_bdst = tl.program_id(1)
-    pid_head = tl.program_id(0)
+    pid_bsz = tl.program_id(2).to(tl.int64)
+    pid_bdst = tl.program_id(1).to(tl.int64)
+    pid_head = tl.program_id(0).to(tl.int64)
     
     idx_bsz = pid_bsz.to(tl.int64)
     idx_head = pid_head
@@ -4519,13 +5170,29 @@ def block_sparse_attention_cuda(
     idx_hid = tl.arange(0, HID)
     
     if BLOCK_SIZE_Q < 16:
-        acc = tl.zeros((16, HID), dtype=tl.float16)
+        acc = tl.zeros((16, HID), dtype=tl.float32)
         m_i = tl.full((16, 1), -float("inf"), dtype=tl.float32)
         l_i = tl.full((16, 1), 1.0, dtype=tl.float32)
     else:
-        acc = tl.zeros((BLOCK_SIZE_Q, HID), dtype=tl.float16)
+        acc = tl.zeros((BLOCK_SIZE_Q, HID), dtype=tl.float32)
         m_i = tl.full((BLOCK_SIZE_Q, 1), -float("inf"), dtype=tl.float32)
         l_i = tl.full((BLOCK_SIZE_Q, 1), 1.0, dtype=tl.float32)
+    
+    range_start = tl.load(
+        KS_START_END + \
+            idx_b * stride_ks_start_end_b +\
+            idx_bdst * stride_ks_start_end_bdst +\
+            idx_g * stride_ks_start_end_g
+    )
+    range_end = tl.load(
+        KS_START_END + \
+            idx_b * stride_ks_start_end_b +\
+            idx_bdst * stride_ks_start_end_bdst +\
+            (idx_g + 1) * stride_ks_start_end_g
+    )
+    if BK <= 0:
+        range_start = 0
+        range_end = 0
     
     queries = tl.load(
         Q +\
@@ -4535,25 +5202,69 @@ def block_sparse_attention_cuda(
             idx_hid[None, :] * stride_q_hid,
         mask=mask_tdst[:, None],
         other=0,
-        cache_modifier='.cg',
+        # cache_modifier='.cg',
         # eviction_policy='evict_last',
         # volatile=True,
     )
     
-    if (BK > 0):
-        range_start = tl.load(
-            KS_START_END + \
-                idx_b * stride_ks_start_end_b +\
-                idx_bdst * stride_ks_start_end_bdst +\
-                idx_g * stride_ks_start_end_g
-        )
-        range_end = tl.load(
-            KS_START_END + \
-                idx_b * stride_ks_start_end_b +\
-                idx_bdst * stride_ks_start_end_bdst +\
-                (idx_g + 1) * stride_ks_start_end_g
+    if USING_EXTEND and NEED_APPLY_ROPE:
+        rope_tdst = pos_tdst - 1
+        # rope_tdst = tl.minimum(
+        #     rope_tdst, 
+        #     sliding_window_size + sink_token_size + (range_end - range_start) * BLOCK_SIZE_K - 1
+        # )
+        
+        # queries = adjust_rope(
+        #     queries,
+        #     rope_tdst,
+        #     rope_tdst,
+        #     mask_tdst,
+        #     idx_hid,
+        #     COS, stride_cos_t, stride_cos_hid,
+        #     SIN, stride_sin_t, stride_sin_hid,
+        #     BLOCK_SIZE_Q, 
+        #     HID,
+        #     True,
+        # ).to(queries.dtype)
+        
+        queries_rot = tl.load(
+            Q +\
+                idx_bsz * stride_q_bsz +\
+                idx_tdst[:, None] * stride_q_tdst +\
+                idx_head * stride_q_head +\
+                ((idx_hid + HID // 2) % HID)[None, :] * stride_q_hid,
+            mask=mask_tdst[:, None],
+            other=0,
+            # cache_modifier='.cg',
+            # eviction_policy='evict_last',
+            # volatile=True,
         )
         
+        cos_new = tl.load(
+            COS +\
+                rope_tdst[:, None].to(tl.int64) * stride_cos_t +\
+                (idx_hid % (HID // 2))[None, :] * stride_cos_hid,
+            mask=mask_tdst[:, None],
+            other=0.0,
+        ).to(queries.dtype)
+        sin_new = tl.load(
+            SIN +\
+                rope_tdst[:, None].to(tl.int64) * stride_sin_t +\
+                (idx_hid % (HID // 2))[None, :] * stride_sin_hid,
+            mask=mask_tdst[:, None],
+            other=0.0,
+        ).to(queries.dtype)
+        
+        # queries_rot = tl.where(
+        #     (idx_hid + HID // 2)[None, :] < HID,
+        #     -queries_rot,
+        #     queries_rot
+        # )
+        queries_rot = queries_rot * (((idx_hid + HID // 2)[None, :] < HID) * (-2) + 1).to(queries_rot.dtype)
+        
+        queries = (queries * cos_new + queries_rot * sin_new).to(queries.dtype)
+    
+    if (BK > 0) and True:
         for i_bk in range(range_start, range_start + (BK * G), BLOCK_BK):
             idx_bk = i_bk + tl.arange(0, BLOCK_BK)
             mask_bk = (idx_bk < (range_start + BK * G)) & (idx_bk < range_end)
@@ -4573,15 +5284,17 @@ def block_sparse_attention_cuda(
                 mask_tsrc_from_bk = mask_bk[:, None] & tl.full((1, BLOCK_SIZE_K), 1, dtype=tl.int1)
                 mask_tsrc_from_bk = tl.reshape(mask_tsrc_from_bk, (BLOCK_BK * BLOCK_SIZE_K))
                 mask_tsrc = (idx_tsrc < (MAX_TSRC * (idx_g + 1))) & (idx_tsrc >= (MAX_TSRC * idx_g)) & mask_tsrc_from_bk
+                idx_tsrc = idx_tsrc % MAX_TSRC
+                mask_tsrc = mask_tsrc & (idx_tsrc < tl.max(pos_tdst)) & (idx_tsrc >= sink_token_size)
                 # mask_tsrc = True
                 # mask_tsrc = idx_tsrc > 0
                 # idx_group = idx_tsrc // MAX_TSRC
-                idx_tsrc = idx_tsrc % MAX_TSRC
                 
                 # min_tsrc = tl.min(idx_tsrc)
                 
                 # if min_tsrc <= tl.max(idx_tdst):
                 # idx_n = idx_b * G + idx_group
+                
                 keys = load_tokens(
                     K, 
                     stride_k_bsz, 
@@ -4604,6 +5317,7 @@ def block_sparse_attention_cuda(
                     
                     # offload cache args template
                     USING_OFFLOAD_CACHE,
+                    OFFLOAD_CACHE_METHOD,
                     OFFLOAD_CACHE_BUDGET,
                     OFFLOAD_CACHE_KV_HEAD,
                     False,
@@ -4629,6 +5343,57 @@ def block_sparse_attention_cuda(
                     BLOCK_SIZE_K,
                 )
                 
+                if USING_EXTEND and NEED_APPLY_ROPE:
+                    keys_rot = load_tokens(
+                        K, 
+                        stride_k_bsz, 
+                        stride_k_tsrc, 
+                        stride_k_head, 
+                        stride_k_hid,
+                        
+                        USING_PAGES, 
+                        PAGE_SIZE,
+                        K_CACHE,
+                        stride_k_cache_page,
+                        stride_k_cache_offset,
+                        stride_k_cache_kv_head,
+                        stride_k_cache_hid,
+                        BLOCK_TABLE,
+                        stride_block_table_bsz,
+                        stride_block_table_page,
+                        CACHE_SEQ_LENS,
+                        stride_cache_seq_lens_b,
+                        
+                        # offload cache args template
+                        USING_OFFLOAD_CACHE,
+                        OFFLOAD_CACHE_METHOD,
+                        OFFLOAD_CACHE_BUDGET,
+                        OFFLOAD_CACHE_KV_HEAD,
+                        False,
+                        OFFLOAD_CACHE_K_TABLES,
+                        stride_offload_cache_k_tables_n,
+                        stride_offload_cache_k_tables_t,
+                        OFFLOAD_CACHE_K_BANKS,
+                        stride_offload_cache_k_banks_n,
+                        stride_offload_cache_k_banks_page,
+                        stride_offload_cache_k_banks_offset,
+                        stride_offload_cache_k_banks_hid,
+                        None, 0, 0, 0,
+                        OFFLOAD_CACHE_COUNTERS,
+                        stride_offload_cache_counters_n,
+                        stride_offload_cache_counters_k,
+                        
+                        idx_bsz,
+                        idx_tsrc[None, :],
+                        idx_head // KV_HEAD_REPEAT,
+                        ((idx_hid + HID // 2) % HID)[:, None],
+                        mask_tsrc[None, :],
+                        
+                        BLOCK_SIZE_K,
+                    )
+                else:
+                    keys_rot = None
+                
                 values = load_tokens(
                     V, 
                     stride_v_bsz, 
@@ -4651,6 +5416,7 @@ def block_sparse_attention_cuda(
                     
                     # offload cache args template
                     USING_OFFLOAD_CACHE,
+                    OFFLOAD_CACHE_METHOD,
                     OFFLOAD_CACHE_BUDGET,
                     OFFLOAD_CACHE_KV_HEAD,
                     False,
@@ -4679,6 +5445,7 @@ def block_sparse_attention_cuda(
                 acc, l_i, m_i = block_sparse_attention_cuda_step(
                     queries,
                     keys,
+                    keys_rot,
                     values,
                     
                     idx_tsrc, mask_tsrc,
@@ -4687,32 +5454,40 @@ def block_sparse_attention_cuda(
                     acc, l_i, m_i,
                     
                     sliding_window_size,
+                    sink_token_size,
+                    (range_end - range_start) * BLOCK_SIZE_K,
                     True,
+                    False,
+                    LOGIT_SOFTCAP,
                     
                     USING_EXTEND,
+                    NEED_APPLY_ROPE,
                     extend_window_size,
                     extend_group_size,
                     COS, stride_cos_t, stride_cos_hid,
                     SIN, stride_sin_t, stride_sin_hid,
+                    model_context_length,
                     
+                    idx_bk + sink_token_size // BLOCK_SIZE_K,
                     pos_tdst,
                     idx_hid, 
                     IS_CAUSAL,
                     HID, 
                     BLOCK_SIZE_Q, 
                     BLOCK_BK * BLOCK_SIZE_K,
+                    BLOCK_SIZE_K,
+                    
+                    EXTEND_BACKEND=EXTEND_BACKEND,
                 )
                 # else:
                 #     pass
             else:
                 pass
     
-    if (sliding_window_size > 0):
-        CURR_TSRC = tl.max(pos_tdst)
-        # CURR_TSRC = (idx_bdst + 1) * BLOCK_SIZE_Q + MAX_TSRC - MAX_TDST
-        for i_tsrc in range(tl.maximum(0, CURR_TSRC - sliding_window_size - BLOCK_SIZE_Q), CURR_TSRC, BLOCK_BK * BLOCK_SIZE_K):
+    if (sink_token_size > 0) and True:
+        for i_tsrc in range(0, sink_token_size, BLOCK_BK * BLOCK_SIZE_K):
             idx_tsrc = i_tsrc + tl.arange(0, BLOCK_BK * BLOCK_SIZE_K)
-            mask_tsrc = idx_tsrc < MAX_TSRC
+            mask_tsrc = idx_tsrc < tl.minimum(MAX_TSRC, sink_token_size)
             
             # idx_n = idx_b * G + idx_group
             keys = load_tokens(
@@ -4737,6 +5512,7 @@ def block_sparse_attention_cuda(
                 
                 # offload cache args template
                 USING_OFFLOAD_CACHE,
+                OFFLOAD_CACHE_METHOD,
                 OFFLOAD_CACHE_BUDGET,
                 OFFLOAD_CACHE_KV_HEAD,
                 False,
@@ -4762,6 +5538,57 @@ def block_sparse_attention_cuda(
                 BLOCK_SIZE_K,
             )
             
+            if USING_EXTEND and NEED_APPLY_ROPE:
+                keys_rot = load_tokens(
+                    K, 
+                    stride_k_bsz, 
+                    stride_k_tsrc, 
+                    stride_k_head, 
+                    stride_k_hid,
+                    
+                    USING_PAGES, 
+                    PAGE_SIZE,
+                    K_CACHE,
+                    stride_k_cache_page,
+                    stride_k_cache_offset,
+                    stride_k_cache_kv_head,
+                    stride_k_cache_hid,
+                    BLOCK_TABLE,
+                    stride_block_table_bsz,
+                    stride_block_table_page,
+                    CACHE_SEQ_LENS,
+                    stride_cache_seq_lens_b,
+                    
+                    # offload cache args template
+                    USING_OFFLOAD_CACHE,
+                    OFFLOAD_CACHE_METHOD,
+                    OFFLOAD_CACHE_BUDGET,
+                    OFFLOAD_CACHE_KV_HEAD,
+                    False,
+                    OFFLOAD_CACHE_K_TABLES,
+                    stride_offload_cache_k_tables_n,
+                    stride_offload_cache_k_tables_t,
+                    OFFLOAD_CACHE_K_BANKS,
+                    stride_offload_cache_k_banks_n,
+                    stride_offload_cache_k_banks_page,
+                    stride_offload_cache_k_banks_offset,
+                    stride_offload_cache_k_banks_hid,
+                    None, 0, 0, 0,
+                    OFFLOAD_CACHE_COUNTERS,
+                    stride_offload_cache_counters_n,
+                    stride_offload_cache_counters_k,
+                    
+                    idx_bsz,
+                    idx_tsrc[None, :],
+                    idx_head // KV_HEAD_REPEAT,
+                    ((idx_hid + HID // 2) % HID)[:, None],
+                    mask_tsrc[None, :],
+                    
+                    BLOCK_SIZE_K,
+                )
+            else:
+                keys_rot = None
+            
             values = load_tokens(
                 V, 
                 stride_v_bsz, 
@@ -4784,6 +5611,7 @@ def block_sparse_attention_cuda(
                 
                 # offload cache args template
                 USING_OFFLOAD_CACHE,
+                OFFLOAD_CACHE_METHOD,
                 OFFLOAD_CACHE_BUDGET,
                 OFFLOAD_CACHE_KV_HEAD,
                 False,
@@ -4812,6 +5640,7 @@ def block_sparse_attention_cuda(
             acc, l_i, m_i = block_sparse_attention_cuda_step(
                 queries,
                 keys,
+                keys_rot,
                 values,
                 
                 idx_tsrc, mask_tsrc,
@@ -4820,20 +5649,232 @@ def block_sparse_attention_cuda(
                 acc, l_i, m_i,
                 
                 sliding_window_size,
-                False,
+                sink_token_size,
+                (range_end - range_start) * BLOCK_SIZE_K,
+                True,
+                True,
+                LOGIT_SOFTCAP,
                 
                 USING_EXTEND,
+                NEED_APPLY_ROPE,
                 extend_window_size,
                 extend_group_size,
                 COS, stride_cos_t, stride_cos_hid,
                 SIN, stride_sin_t, stride_sin_hid,
+                model_context_length, 
                 
+                tl.arange(0, BLOCK_BK) +\
+                    i_tsrc // BLOCK_SIZE_K,
                 pos_tdst,
                 idx_hid, 
                 IS_CAUSAL,
                 HID, 
                 BLOCK_SIZE_Q, 
                 BLOCK_BK * BLOCK_SIZE_K,
+                BLOCK_SIZE_K,
+                
+                EXTEND_BACKEND=EXTEND_BACKEND,
+            )
+    
+    if (sliding_window_size > 0):
+        CURR_TSRC = tl.max(pos_tdst)
+        # CURR_TSRC = (idx_bdst + 1) * BLOCK_SIZE_Q + MAX_TSRC - MAX_TDST
+        i_tsrc_range_start = tl.maximum(0, CURR_TSRC - sliding_window_size - BLOCK_SIZE_Q)
+        TSRC_RANGE_STEP: tl.constexpr = BLOCK_BK * BLOCK_SIZE_K
+        for i_tsrc in range(i_tsrc_range_start, CURR_TSRC, TSRC_RANGE_STEP):
+            idx_tsrc = i_tsrc + tl.arange(0, BLOCK_BK * BLOCK_SIZE_K)
+            mask_tsrc = idx_tsrc < MAX_TSRC
+            
+            # idx_n = idx_b * G + idx_group
+            keys = load_tokens(
+                K, 
+                stride_k_bsz, 
+                stride_k_tsrc, 
+                stride_k_head, 
+                stride_k_hid,
+                
+                USING_PAGES, 
+                PAGE_SIZE,
+                K_CACHE,
+                stride_k_cache_page,
+                stride_k_cache_offset,
+                stride_k_cache_kv_head,
+                stride_k_cache_hid,
+                BLOCK_TABLE,
+                stride_block_table_bsz,
+                stride_block_table_page,
+                CACHE_SEQ_LENS,
+                stride_cache_seq_lens_b,
+                
+                # offload cache args template
+                USING_OFFLOAD_CACHE,
+                OFFLOAD_CACHE_METHOD,
+                OFFLOAD_CACHE_BUDGET,
+                OFFLOAD_CACHE_KV_HEAD,
+                False,
+                OFFLOAD_CACHE_K_TABLES,
+                stride_offload_cache_k_tables_n,
+                stride_offload_cache_k_tables_t,
+                OFFLOAD_CACHE_K_BANKS,
+                stride_offload_cache_k_banks_n,
+                stride_offload_cache_k_banks_page,
+                stride_offload_cache_k_banks_offset,
+                stride_offload_cache_k_banks_hid,
+                None, 0, 0, 0,
+                OFFLOAD_CACHE_COUNTERS,
+                stride_offload_cache_counters_n,
+                stride_offload_cache_counters_k,
+                
+                idx_bsz,
+                idx_tsrc[None, :],
+                idx_head // KV_HEAD_REPEAT,
+                idx_hid[:, None],
+                mask_tsrc[None, :],
+                
+                BLOCK_SIZE_K,
+            )
+            
+            if USING_EXTEND and NEED_APPLY_ROPE:
+                keys_rot = load_tokens(
+                    K, 
+                    stride_k_bsz, 
+                    stride_k_tsrc, 
+                    stride_k_head, 
+                    stride_k_hid,
+                    
+                    USING_PAGES, 
+                    PAGE_SIZE,
+                    K_CACHE,
+                    stride_k_cache_page,
+                    stride_k_cache_offset,
+                    stride_k_cache_kv_head,
+                    stride_k_cache_hid,
+                    BLOCK_TABLE,
+                    stride_block_table_bsz,
+                    stride_block_table_page,
+                    CACHE_SEQ_LENS,
+                    stride_cache_seq_lens_b,
+                    
+                    # offload cache args template
+                    USING_OFFLOAD_CACHE,
+                    OFFLOAD_CACHE_METHOD,
+                    OFFLOAD_CACHE_BUDGET,
+                    OFFLOAD_CACHE_KV_HEAD,
+                    False,
+                    OFFLOAD_CACHE_K_TABLES,
+                    stride_offload_cache_k_tables_n,
+                    stride_offload_cache_k_tables_t,
+                    OFFLOAD_CACHE_K_BANKS,
+                    stride_offload_cache_k_banks_n,
+                    stride_offload_cache_k_banks_page,
+                    stride_offload_cache_k_banks_offset,
+                    stride_offload_cache_k_banks_hid,
+                    None, 0, 0, 0,
+                    OFFLOAD_CACHE_COUNTERS,
+                    stride_offload_cache_counters_n,
+                    stride_offload_cache_counters_k,
+                    
+                    idx_bsz,
+                    idx_tsrc[None, :],
+                    idx_head // KV_HEAD_REPEAT,
+                    ((idx_hid + HID // 2) % HID)[:, None],
+                    mask_tsrc[None, :],
+                    
+                    BLOCK_SIZE_K,
+                )
+            else:
+                keys_rot = None
+            
+            values = load_tokens(
+                V, 
+                stride_v_bsz, 
+                stride_v_tsrc, 
+                stride_v_head, 
+                stride_v_hid,
+                
+                USING_PAGES, 
+                PAGE_SIZE,
+                V_CACHE,
+                stride_v_cache_page,
+                stride_v_cache_offset,
+                stride_v_cache_kv_head,
+                stride_v_cache_hid,
+                BLOCK_TABLE,
+                stride_block_table_bsz,
+                stride_block_table_page,
+                CACHE_SEQ_LENS,
+                stride_cache_seq_lens_b,
+                
+                # offload cache args template
+                USING_OFFLOAD_CACHE,
+                OFFLOAD_CACHE_METHOD,
+                OFFLOAD_CACHE_BUDGET,
+                OFFLOAD_CACHE_KV_HEAD,
+                False,
+                OFFLOAD_CACHE_V_TABLES,
+                stride_offload_cache_v_tables_n,
+                stride_offload_cache_v_tables_t,
+                OFFLOAD_CACHE_V_BANKS,
+                stride_offload_cache_v_banks_n,
+                stride_offload_cache_v_banks_page,
+                stride_offload_cache_v_banks_offset,
+                stride_offload_cache_v_banks_hid,
+                None, 0, 0, 0,
+                OFFLOAD_CACHE_COUNTERS,
+                stride_offload_cache_counters_n,
+                stride_offload_cache_counters_k,
+                
+                idx_bsz,
+                idx_tsrc[:, None],
+                idx_head // KV_HEAD_REPEAT,
+                idx_hid[None, :],
+                mask_tsrc[:, None],
+                
+                BLOCK_SIZE_K,
+            )
+            
+            acc, l_i, m_i = block_sparse_attention_cuda_step(
+                queries,
+                keys,
+                keys_rot,
+                values,
+                
+                idx_tsrc, mask_tsrc,
+                idx_tdst, mask_tdst,
+                
+                acc, l_i, m_i,
+                
+                sliding_window_size,
+                sink_token_size,
+                (range_end - range_start) * BLOCK_SIZE_K,
+                False,
+                False,
+                LOGIT_SOFTCAP,
+                
+                USING_EXTEND,
+                NEED_APPLY_ROPE,
+                extend_window_size,
+                extend_group_size,
+                COS, stride_cos_t, stride_cos_hid,
+                SIN, stride_sin_t, stride_sin_hid,
+                model_context_length, 
+                
+                # tl.arange(0, BLOCK_BK) +\
+                #     (range_end - range_start) +\
+                #     (sink_token_size // BLOCK_SIZE_K) +\
+                #     (i_tsrc-i_tsrc_range_start) // BLOCK_SIZE_K,
+                tl.arange(0, BLOCK_BK) +\
+                    (i_tsrc-i_tsrc_range_start) // BLOCK_SIZE_K +\
+                    (tl.max(pos_tdst * mask_tdst) - tl.sum(mask_tdst.to(tl.int32)) - sliding_window_size) // BLOCK_SIZE_K,
+                pos_tdst,
+                idx_hid, 
+                IS_CAUSAL,
+                HID, 
+                BLOCK_SIZE_Q, 
+                BLOCK_BK * BLOCK_SIZE_K,
+                BLOCK_SIZE_K,
+                
+                EXTEND_BACKEND=EXTEND_BACKEND,
             )
     
     # epilogue
@@ -4857,7 +5898,7 @@ def block_sparse_attention(
     q: Tensor,
     k: Optional[Tensor],
     v: Optional[Tensor],
-    position_ids: Tensor,
+    seq_lens: Tensor,
     
     indices: Tensor,
     ks: Tensor,
@@ -4865,6 +5906,9 @@ def block_sparse_attention(
     ks_start_end: Tensor,
     
     args: "HiPAttentionArgs",
+    
+    EXTEND_BACKEND: str = DEFAULT_EXTEND_BACKEND,
+    model_context_length: int = 131072,
 ):
     if os.getenv('HIP_DEBUG_SA', '0') == '1':
         return block_sparse_attention_pytorch(
@@ -4902,7 +5946,13 @@ def block_sparse_attention(
     # elif block_size_k > 8:
     #     BLOCK_BK = 256 // block_size_k
     # BLOCK_BK = 64 // args.block_size_k
-    # assert BLOCK_BK > 0, BLOCK_BK
+    
+    BLOCK_BK = 32 // args.block_size_k
+    BLOCK_BK = max(1, min(32, BLOCK_BK))
+    if 'SA_BLOCK_BK' in os.environ:
+        BLOCK_BK = int(os.environ['SA_BLOCK_BK'])
+    
+    assert BLOCK_BK > 0, BLOCK_BK
     
     # sliding_window_size = min(sliding_window_size, block_size_k * 16)
     
@@ -4924,17 +5974,21 @@ def block_sparse_attention(
         assert args.v_cache.ndim == 4
     else:
         raise Exception()
-    assert position_ids.ndim == 2
+    assert seq_lens.ndim == 2
     
     grid = (HEAD, BDST, BSZ)
     pre_device = torch.get_default_device()
     torch.set_default_device(q.device)
     
+    # print(indices.shape, indices[0, -1], ks_start_end[0, -1])
+    # if indices.shape[1] == 1:
+    #     input()
+    
     block_sparse_attention_cuda[grid](
         q, *args.safe_stride(q, 4),
         k, *args.safe_stride(k, 4),
         v, *args.safe_stride(v, 4),
-        position_ids, *args.safe_stride(position_ids, 2),
+        seq_lens, *args.safe_stride(seq_lens, 2),
         
         indices, *args.safe_stride(indices, 3),
         
@@ -4942,11 +5996,14 @@ def block_sparse_attention(
         
         context, *args.safe_stride(context, 4),
         
-        HEAD, G, BK, TDST, MAX_TSRC, KV_HEAD_REPEAT,
+        HEAD, G, BK, TDST, MAX_TSRC, KV_HEAD_REPEAT, 
         
         args.sliding_window_size,
+        args.sink_token_size,
+        args.logit_softcap,
         
         *args.args_extend(),
+        model_context_length,
         *args.args_paged_kv_cache(),
         *args.args_offload_cache(is_masking=False),
         
@@ -4957,7 +6014,8 @@ def block_sparse_attention(
         args.block_size_k,
         HID,
         # 2,
-        # BLOCK_BK,
+        BLOCK_BK=BLOCK_BK,
+        EXTEND_BACKEND=EXTEND_BACKEND,
         
         # num_warps=4,
         # num_stages=2 if not using_extend else 1,
@@ -5134,7 +6192,7 @@ def masking_step_loop(
         idx_tdst = idx_tdst.reshape(-1)
         if args.position_ids is not None:
             pos_tdst = args.position_ids\
-                .gather(dim=1, index=idx_tdst.unsqueeze(0).expand(BSZ, -1)) + 1
+                .gather(dim=1, index=idx_tdst.unsqueeze(0).expand(BSZ, -1))# + 1
         else:
             if TSRC is not None:
                 pos_tdst = (idx_tdst[None, :] + TSRC - TDST).expand(BSZ, -1) + 1
@@ -5490,6 +6548,8 @@ def hip_masking(
     k: Optional[Tensor],
     args: "HiPAttentionArgs",
 ):
+    assert args.logit_softcap != 0, 'args.logit_softcap should be None if 0'
+    
     if not args.is_causal:
         assert args.sliding_window_size == 0, 'if bidirectional, you should disable sliding window'
         assert args.sink_token_size == 0, 'if bidirectional, you should disable sink tokens'
@@ -5562,6 +6622,53 @@ def hip_masking(
                 plt.savefig('dummy.png', dpi=96, bbox_inches='tight')
                 print('saved dummy.png')
             render_mask()
+        
+        return (
+            indices,
+            ks, 
+            ks_count, 
+            ks_start_end, 
+            None, 
+            None,
+            None,
+            None,
+            None,
+            args,
+        )
+    
+    if args.decode_style_masking and (q.shape[1] > 1):
+        args = args.clone()
+        shift = args.block_size_q
+        args.sliding_window_size += shift
+        args.decode_style_masking = False
+        
+        (
+            indices,
+            ks, 
+            ks_count, 
+            ks_start_end, 
+            key_access_log, 
+            key_access_count,
+            block_access_log,
+            block_access_score,
+            block_access_count,
+            args,
+        ) = hip_masking(
+            # TODO(-): apply PCA topk
+            q=q,
+            k=k,
+            args=args,
+        )
+        
+        args = args.clone()
+        args.sliding_window_size -= shift
+        
+        indices = torch.roll(indices, shifts=-1, dims=1)
+        indices[:, -1, :] = indices[:, -2, :]
+        ks = torch.roll(ks, shifts=-1, dims=1)
+        ks[:, -1] = ks[:, -2]
+        ks_count[:, :, 0] = ks
+        ks_start_end[:, :, 1] = ks
         
         return (
             indices,
@@ -5933,6 +7040,7 @@ def hip_masking(
             
             cv2.imwrite('dummy_raw.png', debug_mask.astype(np.uint8) * 255)
             print('saved dummy_raw.png', indices.shape, ks.shape, debug_mask.shape, q.shape, TSRC)
+            # input()
             
             # plt.clf()
             # plt.figure(figsize=(4*args.topk_head_group_size, 4))
@@ -5964,6 +7072,18 @@ def hip_masking(
         args = args.clone()
         args.block_size_k = args.block_size_k_after_masking
         args.block_size_k_after_masking = -1
+    
+    HIP_DEBUG_MASK_UNIQUE = os.getenv('HIP_DEBUG_MASK_UNIQUE', '0') == '1'
+    if HIP_DEBUG_MASK_UNIQUE:
+        # indices = indices.sort(dim=-1).values
+        unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
+        indices = torch.where(unique_mask, indices, torch.iinfo(indices.dtype).max)
+        indices = indices.sort(dim=-1).values
+        # active_mask = unique_mask
+        active_mask = indices < (args.position_ids[:, ::args.block_size_q, None].repeat_interleave(HEAD, 0) + args.block_size_q)
+        ks = active_mask.int().sum(-1)
+        ks_count = ks.unsqueeze(-1)
+        ks_start_end[:, :, -1] = ks
     
     return (
         indices, 
@@ -6128,7 +7248,7 @@ def hip_attention(
         q=q, 
         k=k, 
         v=v,
-        position_ids=args.position_ids,
+        seq_lens=args.position_ids,
         
         indices=indices, 
         ks=ks, 
@@ -6169,7 +7289,8 @@ def paged_hip_attention(
             args.cache_seq_lens[:, None] - TDST + 1
         args.position_ids = position_ids
     
-    q = q * softmax_scale
+    q_dtype = q.dtype
+    q = (q * softmax_scale).to(q.dtype)#.to(torch.float32)
     
     if previous_mask_metadata is None:
         # print(q.shape, args.json())
@@ -6209,13 +7330,15 @@ def paged_hip_attention(
         q=q,
         k=None,
         v=None,
-        position_ids=args.position_ids,
+        seq_lens=args.position_ids,
         indices=indices,
         ks=ks,
         ks_count=ks_count,
         ks_start_end=ks_start_end,
         args=args,
     )
+    
+    context = context.to(q_dtype)
     
     return context, HiPAttentionOutputMetadata(
         indices=indices,

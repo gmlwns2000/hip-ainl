@@ -1725,8 +1725,8 @@ def main_latency_benchmark():
         v = v.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).repeat(1, q.shape[0] // v.shape[0], 1, 1).contiguous() # [128, 8, 32k, 128]
         q = q.view(BSIZE, -1, QUERY_SIZE, HID).contiguous() # [128, 32, 32k, 128]
     elif METHOD in ['streaming', 'hyper',]:
-        k = k.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).repeat(1, q.shape[0] // k.shape[0], 1, 1).view(q.shape[0], -1, q.shape[2])
-        v = v.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).repeat(1, q.shape[0] // v.shape[0], 1, 1).view(q.shape[0], -1, q.shape[2])
+        k = k.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).repeat(q.shape[0] // k.shape[0], 1, 1, 1).view(q.shape[0], -1, q.shape[2])
+        v = v.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).repeat(q.shape[0] // v.shape[0], 1, 1, 1).view(q.shape[0], -1, q.shape[2])
     
     q = q.cuda()
     k = k.cuda()
@@ -1984,7 +1984,8 @@ def main_latency_benchmark():
                         block_stride_k=args.block_stride_k if args.block_stride_k is not None else max(2, args.block_size_k//2),
                         q_quant=q_quant,
                         k_quant=k_quant,
-                        sample_method='center'
+                        sample_method='center',
+                        mask_only=False,
                     )
                 else:
                     _, mask = hip_attention_11(

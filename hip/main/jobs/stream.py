@@ -90,19 +90,62 @@ def job_stream(args, model, tokenizer, device):
                         print(generated_text, n_tokens)
                 print(f'{n_generated} token generated, {n_generated/elapsed:.2f} tok/sec')
             else:
-                streamer = BatchedStreamer(tokenizer, skip_prompt=False, skip_special_tokens=False)
-                
-                with torch.no_grad():
-                    model.generate(
-                        **inputs, 
-                        streamer=streamer, 
-                        do_sample=True,
-                        max_new_tokens=256,
-                        temperature=0.7,
-                        top_p=0.9,
-                        top_k=10,
-                        repetition_penalty=1.0,
-                    )
+                without_cache = os.environ.get('STREAM_WITHOUT_CACHE', '0') == '1'
+                if without_cache:
+                    last_output_text = ""
+                    with torch.no_grad():
+                        import triton
+                        input_ids_len = inputs['input_ids'].shape[-1]
+                        target_index = input_ids_len - 1
+                        pad_size = 128
+                        padded_inputs = torch.zeros(
+                            (input_ids_len + pad_size * 4, ), 
+                            dtype=torch.long, 
+                            device=inputs['input_ids'].device
+                        )
+                        padded_inputs[:input_ids_len] = inputs['input_ids'][0]
+                        output = model(
+                            use_cache=False, 
+                            output_logits=True, 
+                            num_logits_to_keep=-target_index, 
+                            input_ids=padded_inputs[:target_index+pad_size].unsqueeze(0)
+                        )
+                        output_tokens = [output.logits[0, -1, :].topk(k=1).indices]
+                        new_output_text = tokenizer.batch_decode(torch.cat(output_tokens).cpu().unsqueeze(0), skip_special_tokens=False)[0]
+                        print(new_output_text[len(last_output_text):].replace('\n', '\\n\n'), end='', flush=True)
+                        last_output_text = new_output_text
+                        for i in range(256):
+                            target_index += 1
+                            padded_inputs[
+                                input_ids_len:
+                                input_ids_len + len(output_tokens)
+                            ] = torch.cat(output_tokens)
+                            output = model(
+                                input_ids = padded_inputs[:target_index+pad_size].unsqueeze(0),
+                                use_cache=False,
+                                output_logits=True,
+                                num_logits_to_keep=-target_index,
+                            )
+                            output_tokens += [output.logits[0, -1, :].topk(k=1).indices]
+                            new_output_text = tokenizer.batch_decode(torch.cat(output_tokens).cpu().unsqueeze(0), skip_special_tokens=False)[0]
+                            print(new_output_text[len(last_output_text):].replace('\n', '\\n\n'), end='', flush=True)
+                            last_output_text = new_output_text
+                            # print(output_tokens[-1], )
+                else:
+                    streamer = BatchedStreamer(tokenizer, skip_prompt=False, skip_special_tokens=False)
+                    
+                    with torch.no_grad():
+                        model.generate(
+                            **inputs, 
+                            streamer=streamer, 
+                            do_sample=True,
+                            max_new_tokens=256,
+                            temperature=0.7,
+                            top_p=0.9,
+                            top_k=10,
+                            repetition_penalty=1.0,
+                            cache_implementation='static',
+                        )
         except KeyboardInterrupt:
             traceback.print_exc()
             print('Interrupted')
