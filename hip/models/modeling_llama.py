@@ -272,7 +272,6 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
-# TODO discard some initializes for h2o??
 class LlamaAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
@@ -407,22 +406,6 @@ class LlamaAttention(nn.Module):
             attn_weights = None
 
         return attn_output, attn_weights, past_key_value
-
-# TODO LATER?
-# def _make_causal_mask(
-#     bsz: int, tgt_len: int, past_key_values_length: int, dtype: torch.dtype, device: torch.device):
-#     """
-#     Make causal mask used for bi-directional self-attention.
-#     """
-#     mask = torch.full((tgt_len, tgt_len), torch.finfo(dtype).min, device=device)
-#     mask_cond = torch.arange(mask.size(-1), device=device)
-#     mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
-#     mask = mask.to(dtype)
-
-#     if past_key_values_length > 0:
-#         mask = torch.cat([torch.zeros(tgt_len, past_key_values_length, dtype=dtype, device=device), mask], dim=-1)
-#     return mask[None, None, :, :].expand(bsz, 1, tgt_len, tgt_len + past_key_values_length)
-
 
 def apply_rotary_pos_emb_single(x, cos, sin, position_ids, unsqueeze_dim=1):
     # cos, sin : [bsz, seq_len, dim], position_ids : [bsz, seq_len]
@@ -601,11 +584,12 @@ class LlamaCustomAttention(LlamaAttention):
                         value_states,
                         torch.arange(0, key_states.shape[-2], device=key_states.device)[None, :]
                     )
-
+            
             # NOTE: HiP, FA2 supports GQA, MQA natively.
             if self.attention_method not in ['hip', 'fa2', 'none']:
                 key_states = repeat_kv(key_states, self.num_key_value_groups)
                 value_states = repeat_kv(value_states, self.num_key_value_groups)
+
             cos_all, sin_all = self.rotary_emb(value_states, torch.arange(0, key_states.shape[-2], device=query_states.device)[None, :])
             
             # attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)

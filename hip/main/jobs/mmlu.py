@@ -200,7 +200,7 @@ def evaluate_mmlu(args, model, tokenizer, subject_name):
     avg_seq_len = seq_len_sum / len(results)
     print(f'{subject_name} = Accuracy: {accuracy:.4f} %, avg_seq_len: {avg_seq_len:.2f}. elapsed: {elapsed:.1f} s')
 
-    folder = f'./saves/llama_eval/mmlu/{args.name}_{args.model}_{args.method}_gpu0'
+    folder = f'./saves/llama_eval/mmlu/{args.name}_{args.model}_{args.method}'
     if args.method == 'hip':
         folder = f'./saves/llama_eval/mmlu/{args.name}_{args.model}_{args.method}_bq{args.block_size_q}_bk{args.block_size_k}_k{args.k}'
     os.makedirs(folder, exist_ok=True)

@@ -1874,12 +1874,6 @@ def main_latency_benchmark():
                         cos=cos,
                         sin=sin,
                     )
-                    # attn_output_loop = torch.zeros(
-                    #     (attn_output.shape[0], q_len - mask_k, attn_output.shape[-1]), 
-                    #     dtype=attn_output.dtype, device=attn_output.device
-                    # )
-                    
-                    
                     # loop one by one
                     # print('========== prompt_loop_attn')
                     assert query_states_loop.shape[-2] == q_len - mask_k
@@ -1929,43 +1923,7 @@ def main_latency_benchmark():
                         h2o_attention.config.reduction_for_gqa,
                         layer_idx=0,
                     )
-                    # past_key_value = DynamicCache()
-                    # attn_output, attn_weights, past_key_value = h2o_attention._h2o_attention( # , hh_score
-                    #     q,
-                    #     k,
-                    #     v,
-                        
-                    #     position_ids,
-                    #     past_key_value=past_key_value,
-                    #     output_attentions=False,
-                    #     use_cache=True,
-                    #     # hh_score=hh_score,
-                    #     bsz=bsz,
-                    #     cache_position=cache_position,
-                    #     reduction_for_gqa=h2o_attention.config.reduction_for_gqa,
-                    #     kv_seq_len=None,
-                    #     decoding_loop_for_prefill=True,
-                    #     compute_final_attn_output=True, # compute_final_attn_output
-                        
-                    #     cos=cos,
-                    #     sin=sin
-                    # )
-                
-                # attn_output, attn_weights, past_key_value = h2o_attention._h2o_attention(
-                #     q, k, v,
-                #     attention_mask = None,
-                #     position_ids = torch.arange(0, QUERY_SIZE).repeat(q.shape[0], 1).to(q.device), # TODO postiion_ids to batch size?
-                #     past_key_value = DynamicCache(),
-                #     output_attentions= False, # TODO check
-                #     use_cache = True,
                     
-                #     bsz=q.shape[0],
-                #     cache_position=
-                #     reduction_for_gqa = config.reduction_for_gqa,
-                #     kv_seq_len =                         
-                #     mask_k = args.k,
-                #     # H2O_BENCHMARK = 1
-                # )
                 for m in h2o_attention.modules():
                     if hasattr(m, '_clean_cache'):
                         m._clean_cache()

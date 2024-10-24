@@ -235,7 +235,7 @@ def load_model(args):
         ) if not args.no_quantize else None,
         torch_dtype=infer_dtype,
         # torch_dtype=torch.float32,
-        trust_remote_code=True
+        trust_remote_code=True,
     )
     
     if args.method == 'tova':

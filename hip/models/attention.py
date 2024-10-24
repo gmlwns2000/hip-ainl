@@ -57,16 +57,6 @@ def custom_attention(
     # Hyper attention state
     hyper_attention=None,
     
-    # TODO LATER?
-    # H2O attention state
-    # h2o_attention=None,
-    # past_key_value=None,
-    # position_embeddings=None,
-    # kv_seq_len=None,
-    # shift_q_pos=False,
-    # reduction_for_gqa='average',
-    # cache_position=None,
-    # layer_idx=0,
     sm_scaler=None,
     attn_logit_softcapping=0,
     model_sliding_window=None,
@@ -106,8 +96,6 @@ def custom_attention(
     if sm_scaler is None:
         sm_scaler = 1 / (query_states.shape[-1] ** 0.5)
     attn_sparsity_loss = None
-    # TODO LATER?
-    # computed_final_attn_output = False
     if model_sliding_window is not None:
         assert isinstance(model_sliding_window, int)
     
@@ -307,7 +295,7 @@ def custom_attention(
                     dual_stage_quadratic_hip_attention as \
                     dual_stage_quadratic_hip_attention_extend
                 
-                q = q.permute(0, 2, 1, 3) # N, H, T, HID -> N, T, H, HID
+                q = q.permute(0, 2, 1, 3)
                 k = k.permute(0, 2, 1, 3)
                 v = v.permute(0, 2, 1, 3)
                 
@@ -546,10 +534,6 @@ def custom_attention(
     
     elif attention_method in ['h2o', 'h2o_stream']:
         raise Exception()
-        # TODO LATER?
-        # prefill -> prefill_ + for loop decoding : past_key_value = None
-        # decoding -> decoding : 
-        # breakpoint()
         attn_output, _, _, computed_final_attn_output = h2o_attention( # NOTE call immediately bc we also have to support attention1_block_gpu
             hidden_states=None,
             query_states=query_states, 
@@ -588,5 +572,5 @@ def custom_attention(
     else:
         raise Exception(attention_method)
 
-    return attn_output, last_cumsum, attn_sparsity_loss# , computed_final_attn_output # TODO LATER?
+    return attn_output, last_cumsum, attn_sparsity_loss
 
