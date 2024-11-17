@@ -518,11 +518,11 @@ class LlamaCustomAttention(LlamaAttention):
         if self.attention_method == 'hip':
             force_extend = True
             need_apply_rope = True
-            model_context_length = 65536
+            model_context_length = 131072
         else:
             force_extend = False
             need_apply_rope = False
-            model_context_length = 65536
+            model_context_length = 131072
 
         if self.config.pretraining_tp > 1:
             key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
@@ -561,7 +561,9 @@ class LlamaCustomAttention(LlamaAttention):
                 cos, sin = self.rotary_emb(value_states, position_ids)
             else:
                 cos, sin = position_embeddings
-                
+
+            query_states_derope = query_states
+            key_states_derope = key_states  
             if self.layer_idx in self.tree_dense_layers:
                 if not need_apply_rope:
                     query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
@@ -608,6 +610,26 @@ class LlamaCustomAttention(LlamaAttention):
             if attention_mask is not None:
                 causal_mask = causal_mask[:, :, :, : key_states.shape[-2]]
 
+            sink_token = key_states[:, :, :4, :].clone()
+            # if (self.layer_idx < 3) or (self.layer_idx > 20):
+            #     pass
+            # else:
+            #     value_states[:, :, :1, :].fill_(0)
+
+            DEBUG_KEYS = False
+            if DEBUG_KEYS:
+                other = key_states[0, 0]
+                sink = sink_token[0, 0]
+                other = other / torch.norm(other, dim=-1, keepdim=True)
+                sink = sink / torch.norm(sink, dim=-1, keepdim=True)
+                score = sink @ other.T[:, :100]
+                import matplotlib.pyplot as plt
+                plt.clf()
+                plt.imshow(score.cpu().float().numpy())
+                plt.colorbar()
+                plt.savefig('dummy_debug_keys.png')
+                input('>>>')
+
             mask_k = self.tree_k
             if self.layer_idx in self.tree_high_k_layers:
                 mask_k = self.tree_high_k_layers[self.layer_idx] * mask_k
@@ -627,7 +649,7 @@ class LlamaCustomAttention(LlamaAttention):
                     tree_performer=self.tree_performer,
 
                     # hip parameters
-                    tree_k=1,
+                    tree_k=4096,
                     tree_block_size_q=64,
                     tree_block_stride_q=4, 
                     tree_block_size_k=64,
@@ -641,7 +663,7 @@ class LlamaCustomAttention(LlamaAttention):
                     tree_enable_sparq=self.tree_enable_sparq,
                     tree_use_sliding_window=self.tree_use_sliding_window,
                     tree_sink_token_size=256,
-                    tree_sliding_window_size=7680,
+                    tree_sliding_window_size=2048,
 
                     # Context averaging parameters
                     tree_using_context_avg=False,
@@ -659,13 +681,14 @@ class LlamaCustomAttention(LlamaAttention):
                     # Attention sparsity loss
                     output_attn_sparsity_loss=output_attn_sparsity_loss,
                     tree_lp_norm_coeff=self.tree_lp_norm_coeff,
-                    
+
                     # Hyper attention states
                     hyper_attention=self.hyper_attention,
-                    
+
                     sm_scaler=1 / math.sqrt(self.head_dim),
-                    model_sliding_window=None if not force_extend else 131072,
+                    model_sliding_window=None if (not force_extend) else 131072,
                     model_context_length=model_context_length,
+                    layer_idx=self.layer_idx,
                 )
             else:
                 attn_output, cur_cumsum, attn_sparsity_loss = custom_attention(
@@ -712,14 +735,34 @@ class LlamaCustomAttention(LlamaAttention):
                     # Attention sparsity loss
                     output_attn_sparsity_loss=output_attn_sparsity_loss,
                     tree_lp_norm_coeff=self.tree_lp_norm_coeff,
-                    
+
                     # Hyper attention states
                     hyper_attention=self.hyper_attention,
-                    
+
                     sm_scaler=1 / math.sqrt(self.head_dim),
-                    model_sliding_window=None if not force_extend else 131072,
+                    model_sliding_window=None if (not force_extend) else 131072,
                     model_context_length=model_context_length,
+                    layer_idx=self.layer_idx,
                 )
+
+            # if (self.layer_idx < 3) or (self.layer_idx > 20):
+            #     pass
+            # else:
+            #     attn_output = attn_output + sink_token.mean(dim=-2, keepdim=True).repeat_interleave(3, 1) * 0.535
+
+            if os.environ.get('CHECKOUT_STATES_DEROPE', '0') == '1':
+                os.makedirs('./cache/llama/', exist_ok=True)
+                torch.save({
+                    'q': query_states,
+                    'k': key_states,
+                    'v': value_states,
+                    'q_derope': query_states_derope,
+                    'k_derope': key_states_derope,
+                    'out': attn_output,
+                    'cos': cos_all,
+                    'sin': sin_all,
+                }, './cache/llama/qkvout.pth')
+                input('stored. press enter to continue >>> ')
 
             if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
                 raise ValueError(
@@ -732,7 +775,7 @@ class LlamaCustomAttention(LlamaAttention):
                 attn_output = attn_output.contiguous()
 
             attn_output = attn_output.view(bsz, q_len, -1)
-
+            
             if self.config.pretraining_tp > 1:
                 attn_output = attn_output.split(self.hidden_size // self.config.pretraining_tp, dim=2)
                 o_proj_slices = self.o_proj.weight.split(self.hidden_size // self.config.pretraining_tp, dim=1)
@@ -1775,9 +1818,10 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             if labels is not None:
                 from hip.models.hip_attention.memory_efficient_llm_ce import memory_efficient_llm_ce
                 
+                first_skip = 0
                 # Shift so that tokens < n predict n
-                shift_states = hidden_states[..., :-1, :].contiguous()
-                shift_labels = labels[..., 1:].contiguous()
+                shift_states = hidden_states[..., first_skip:-1, :].contiguous()
+                shift_labels = labels[..., first_skip+1:].contiguous()
                 # Flatten the tokens
                 shift_states = shift_states.view(-1, shift_states.shape[-1])
                 shift_labels = shift_labels.view(-1)

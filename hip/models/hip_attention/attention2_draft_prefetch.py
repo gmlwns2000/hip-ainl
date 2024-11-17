@@ -4726,17 +4726,19 @@ def block_sparse_attention_cuda_step(
                         # new_tsrc = idx_tsrc
                     elif EXTEND_BACKEND == 'dynamic_extend':
                         # dynamic extend
-                        window = model_context_length // 2
+                        window = model_context_length // 4
+                        
+                        # new_tsrc = tl.where(
+                        #     (idx_tsrc >= (pos_tdst_max - window)) | (pos_tdst_max <= model_context_length),
+                        #     idx_tsrc,
+                        #     ((idx_tsrc - (pos_tdst_min - model_context_length)) * ((model_context_length - window) / (pos_tdst_min - window))).to(tl.int32) + (pos_tdst_min - model_context_length)
+                        # )
                         new_tsrc = tl.where(
-                            idx_tsrc >= (pos_tdst_max - window),
+                            (idx_tsrc >= (pos_tdst_max - window)) | (pos_tdst_max <= model_context_length),
                             idx_tsrc,
-                            tl.where(
-                                pos_tdst_max <= model_context_length,
-                                idx_tsrc,
-                                (idx_tsrc * ((model_context_length - window) / (pos_tdst_min - window))).to(tl.int32) + (pos_tdst_min - model_context_length)
-                            )
+                            ((idx_tsrc + window - pos_tdst_min) * ((model_context_length - window) / (pos_tdst_min - window))).to(tl.int32) + pos_tdst_min - window
                         )
-                        new_tsrc = tl.maximum(0, new_tsrc)
+                        new_tsrc = tl.maximum(pos_tdst_max - model_context_length, new_tsrc)
                     else:
                         raise Exception()
                 else:
@@ -4790,6 +4792,29 @@ def block_sparse_attention_cuda_step(
                     mask=mask_tsrc[None, :],
                     other=0.0,
                 ).to(keys.dtype)
+                
+                if EXCLUDE_SLIDING_WINDOW:
+                    if EXTEND_BACKEND == 'dynamic_extend':
+                        streaming_tsrc = tl.ravel((idx_bk * BLOCK_SIZE_K)[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :])
+                        streaming_tsrc = tl.maximum(0, streaming_tsrc + pos_tdst_min - sliding_window_size - sink_token_size - mask_k + 1)
+                        
+                        cos_zero = tl.load(
+                            COS +\
+                                streaming_tsrc[None, :].to(tl.int64) * stride_cos_t +\
+                                (tl.arange(0, HID) % (HID // 2))[:, None] * stride_cos_hid,
+                            # mask=mask_tsrc[None, :],
+                            # other=0.0,
+                        ).to(keys.dtype)
+                        sin_zero = tl.load(
+                            SIN +\
+                                streaming_tsrc[None, :].to(tl.int64) * stride_sin_t +\
+                                (tl.arange(0, HID) % (HID // 2))[:, None] * stride_sin_hid,
+                            # mask=mask_tsrc[None, :],
+                            # other=0.0,
+                        ).to(keys.dtype)
+                        
+                        cos_new = (cos_zero * 0.75 + cos_new * 0.25).to(cos_new.dtype)
+                        sin_new = (sin_zero * 0.75 + sin_new * 0.25).to(sin_new.dtype)
                 
                 # rope_theta = 500000.0
                 # inv_freqs = ((tl.arange(0, HID) * 2) % HID) 
@@ -5947,8 +5972,9 @@ def block_sparse_attention(
     #     BLOCK_BK = 256 // block_size_k
     # BLOCK_BK = 64 // args.block_size_k
     
-    BLOCK_BK = 32 // args.block_size_k
-    BLOCK_BK = max(1, min(32, BLOCK_BK))
+    max_block_size = int(os.getenv('SA_BLOCK_SIZE', '32'))
+    BLOCK_BK = max_block_size // args.block_size_k
+    BLOCK_BK = max(1, min(max_block_size, BLOCK_BK))
     if 'SA_BLOCK_BK' in os.environ:
         BLOCK_BK = int(os.environ['SA_BLOCK_BK'])
     

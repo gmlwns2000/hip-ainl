@@ -61,6 +61,7 @@ def custom_attention(
     attn_logit_softcapping=0,
     model_sliding_window=None,
     model_context_length=131072,
+    layer_idx=10,
 ):
     """
     @param query_states: (N, H, TDST, HID)
@@ -294,6 +295,11 @@ def custom_attention(
                 from hip.models.hip_attention.attention2_draft_sampling_extend import \
                     dual_stage_quadratic_hip_attention as \
                     dual_stage_quadratic_hip_attention_extend
+                from hip.models.hip_attention.attention2_draft_sampling_extend import (
+                    ScanStage,
+                    EvalScoreStage,
+                    NopStage,
+                )
                 
                 q = q.permute(0, 2, 1, 3)
                 k = k.permute(0, 2, 1, 3)
@@ -324,35 +330,54 @@ def custom_attention(
     
                 # print(rope_cos.shape, rope_sin.shape, rope_cos.dtype, rope_sin.dtype, need_apply_rope)
                 IS_GEMMA = os.getenv('IS_GEMMA', '0') == '1'
-                attn_output_hip, metadata = dual_stage_quadratic_hip_attention_extend(
-                    q, k, v,
-                    args=HiPAttentionArgs11(
-                        position_ids=position_ids,
-                        
+                is_dense = layer_idx < 3
+                mask_only = False
+                is_decode = (TDST == 1)
+                cos = rope_cos.squeeze(0) if rope_cos is not None else None
+                sin = rope_sin.squeeze(0) if rope_sin is not None else None
+                block_size = 64
+                HiPAttentionArgs = HiPAttentionArgs11
+                
+                dual_stage_kwargs = dict(
+                    q=q, k=k, v=v,
+                    args=HiPAttentionArgs(
                         mask_k=256,
-                        block_size_q=32 if IS_GEMMA else 64,
-                        block_stride_q=2 if IS_GEMMA else 4,
-                        block_size_k=32 if IS_GEMMA else 64, # BLOCK_CHUNK
-                        block_stride_k=1 if IS_GEMMA else 2,
+                        block_size_q=64,
+                        block_stride_q=4,
+                        block_size_k=64, # BLOCK_CHUNK
+                        block_stride_k=1,
+                        sliding_window_size=1024,
+                        sink_token_size=256,
+                        # position_ids=position_ids,
                         
-                        sliding_window_size=tree_sliding_window_size,
-                        sink_token_size=tree_sink_token_size,
-                        
-                        using_extend=tree_rope_method != 'none',
-                        need_apply_rope=need_apply_rope,
-                        rope_cos=rope_cos.squeeze(0) if rope_cos is not None else None,
-                        rope_sin=rope_sin.squeeze(0) if rope_sin is not None else None,
-                        
-                        logit_softcap=attn_logit_softcapping,
+                        using_extend=True,
+                        rope_cos=cos,
+                        rope_sin=sin,
+                        need_apply_rope=True,
                     ),
-                    second_stage_k=2048,
+                    second_stage_k=2*1024,
+                    # low_percent = 0.75 if layer_idx >= 3 else 0.25,
+                    # low_k_ratio = 0.25,
                     stages=[
-                        (32 if IS_GEMMA else 64, 8192),
+                        ScanStage(
+                            stage_block_stride_q=4,
+                            stage_chunk_size=32,
+                            stage_k=32768,
+                            stage_stride=1,
+                        ),
                     ],
                     scan_stride=1,
+                    block_sparse_block_size_q=block_size,
                     model_context_length=model_context_length,
-                    block_sparse_block_size_q=32 if IS_GEMMA else 64,
-                    scan_early_terminate=16 if IS_GEMMA else 32,
+                    scan_early_terminate=1,
+                    stage_early_terminate=1,
+                    scan_extend_backend='streaming' if layer_idx < 3 else 'relative',
+                    sa_extend_backend='streaming',
+                    mask_only=mask_only,
+                )
+                
+                attn_output_hip, metadata = dual_stage_quadratic_hip_attention_extend(
+                    **dual_stage_kwargs,
                 )
                 
                 # attn_output_hip = sampling_only_attention(

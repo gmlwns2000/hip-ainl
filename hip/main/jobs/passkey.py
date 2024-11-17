@@ -28,10 +28,9 @@ def job_passkey(args, model, tokenizer, device):
             prompts = tokenizer.batch_decode(input_ids, skip_special_tokens=False)
             sampling_params = SamplingParams(
                 n=1,
-                temperature=1.0,
-                top_p=1.0,
+                temperature=0.0,
                 top_k=1,
-                max_tokens=10,
+                max_tokens=20,
             )
             
             outputs = model.generate(prompts, sampling_params, use_tqdm=False)
@@ -40,23 +39,24 @@ def job_passkey(args, model, tokenizer, device):
                 output.append(item.outputs[0].text)
         elif isinstance(model, SglangModel):
             input_text = tokenizer.batch_decode(input_ids, skip_special_tokens=False)
-            output = [model.generate(input_text=input_text, max_tokens=10)]
+            output = [model.generate(input_text=input_text, max_tokens=20)]
         else:
-            with torch.no_grad(), torch.autocast('cuda', torch.float16):
+            with torch.no_grad(), torch.autocast('cuda', torch.bfloat16):
                 output = model.generate(
                     input_ids, 
-                    max_new_tokens=7,
-                    min_new_tokens=7,
+                    max_new_tokens=20,
+                    min_new_tokens=5,
                     do_sample=False, 
                     num_beams=1,
                     attention_mask=None,
-                    pad_token_id=tokenizer.eos_token_id,
+                    # pad_token_id=tokenizer.eos_token_id,
                 )
                 # h2o
                 for m in model.modules():
                     if hasattr(m, '_clean_cache'):
                         m._clean_cache()
                 output = output[:, input_ids.shape[1]:]
+                tqdm.write(f'{tokenizer.batch_decode(output)}')
     
         # tqdm(tokenizer.batch_decode(output))
         truth = tokenizer.batch_decode(target_ids)
