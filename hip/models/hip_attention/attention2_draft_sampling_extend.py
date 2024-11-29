@@ -1,3 +1,7 @@
+import torch
+torch.xpu.is_available()
+torch.set_num_threads(8)
+
 from dataclasses import dataclass
 import math
 import os
@@ -26,6 +30,10 @@ import triton.language as tl
 import numpy as np
 import cv2
 import numba
+
+def synced_breakpoint(message):
+    torch.xpu.synchronize()
+    print('breakpoint', time.time(), message, flush=True)
 
 @dataclass
 class Stage:
@@ -1289,6 +1297,7 @@ def dual_stage_quadratic_hip_attention(
     idx_pca_hid_q: Optional[torch.Tensor] = None,
     idx_pca_hid_k: Optional[torch.Tensor] = None,
 ):
+    synced_breakpoint('start')
     DEBUG_HEAD = -1
     global DEBUG
     
@@ -1323,7 +1332,7 @@ def dual_stage_quadratic_hip_attention(
     args = args.clone()
     args.sliding_window_size = max(0, args.sliding_window_size - args.mask_k)
     
-    if torch.cuda.is_current_stream_capturing() or args.position_ids is not None:
+    if (torch.cuda.is_current_stream_capturing() if torch.cuda.is_available() else False) or args.position_ids is not None:
         assert args.position_ids is not None
         position_ids = args.position_ids
     else:
@@ -1470,6 +1479,8 @@ def dual_stage_quadratic_hip_attention(
         
         # STAGE_STRIDE = STAGE_STRIDE
         
+        synced_breakpoint('initialize done')
+
         for i_stage, stage_info in enumerate(stages):
             # if stage_chunk_size > chunk_size: continue
             # if stage_k > TSRC: continue
@@ -1484,15 +1495,17 @@ def dual_stage_quadratic_hip_attention(
                 indices_left = indices_left[..., :stage_k // chunk_size]
                 require_align = stage_info.require_realign_index
                 if require_align:
-                    indices_left = ((indices_left - args.sink_token_size) // chunk_size * chunk_size + args.sink_token_size)
+                    # indices_left = ((indices_left - args.sink_token_size) // chunk_size * chunk_size + args.sink_token_size)
+                    indices_left = indices_left - args.sink_token_size
+                    indices_left.floor_divide_(chunk_size).mul_(chunk_size).add_(args.sink_token_size)
                     indices_right = (indices_left + chunk_size)
                 else:
-                    indices_right = indices_right[..., :stage_k // chunk_size]
-                out_scores = out_scores[..., :stage_k // chunk_size]
+                    indices_right = indices_right[..., :stage_k // chunk_size].clone()
+                out_scores = out_scores[..., :stage_k // chunk_size].clone()
                 if stage_info.require_reset_score:
                     out_scores.fill_(-32000.0)
                 
-                indices_left, t_indices = indices_left.sort(dim=-1)
+                indices_left, t_indices = indices_left.sort(dim=-1, stable=False)
                 indices_right = indices_right.gather(dim=-1, index=t_indices)
                 out_scores = out_scores.gather(dim=-1, index=t_indices)
                 
@@ -1542,8 +1555,9 @@ def dual_stage_quadratic_hip_attention(
             chunk_count = indices_left.shape[-1]
             BLOCK_CHUNK = max(16, triton.next_power_of_2(min(chunk_count, BLOCK_CHUNK)))
             
-            pre_device = torch.cuda.current_device()
-            torch.cuda.set_device(q.device)
+            if torch.cuda.is_available():
+                pre_device = torch.cuda.current_device()
+                torch.cuda.set_device(q.device)
             
             if isinstance(stage_info, ScanStage):
                 extend_backend = scan_extend_backend\
@@ -1556,6 +1570,9 @@ def dual_stage_quadratic_hip_attention(
                     triton.cdiv(triton.cdiv(TDST, BLOCK_SIZE_Q), STAGE_STRIDE) *\
                     HEAD,
                 )
+
+                synced_breakpoint('scan start')
+
                 chunk_controllable_sampling_mask_cuda[grid](
                     q_mask, *q_mask.stride(),
                     k_mask, *args.safe_stride(k_mask, 4),
@@ -1591,6 +1608,8 @@ def dual_stage_quadratic_hip_attention(
                     SCAN_STRIDE=STAGE_STRIDE,
                 )
                 
+                synced_breakpoint('scan end')
+
                 # if stage_require_recalculate_score:
                 #     assert STAGE_STRIDE == 1
                 #     grid = (
@@ -1687,8 +1706,11 @@ def dual_stage_quadratic_hip_attention(
                 pass
             else:
                 raise Exception()
-
-            torch.cuda.set_device(pre_device)
+            
+            if torch.cuda.is_available():
+                torch.cuda.set_device(pre_device)
+            
+            synced_breakpoint('stage done')
 
             if stage_info.require_post_sort:
                 if (i_stage < (len(stages) - 1)):
@@ -1700,11 +1722,14 @@ def dual_stage_quadratic_hip_attention(
                         dim=-1, sorted=False, largest=True, 
                     )
                 else:
-                    _, t_indices = out_scores[..., :indices_left.shape[-1]].sort(dim=-1, descending=True, stable=False)
+                    _, t_indices = out_scores[..., :indices_left.shape[-1]]\
+                        .clone().sort(dim=-1, descending=True, stable=False)
                 indices_left = indices_left.gather(dim=-1, index=t_indices)
                 indices_right = indices_right.gather(dim=-1, index=t_indices)
             
-            if DEBUG and DEBUG_RENDER and not torch.cuda.is_current_stream_capturing():
+            synced_breakpoint('post sort done')
+
+            if DEBUG and DEBUG_RENDER and not (torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()):
                 if (i_stage + 1) < len(stages):
                     next_stage_k = stages[i_stage + 1].stage_k
                 else:
@@ -1720,18 +1745,28 @@ def dual_stage_quadratic_hip_attention(
             indices_right = indices_right.repeat_interleave(STAGE_STRIDE, 1)[:, -BDST:].contiguous()
             out_scores = out_scores.repeat_interleave(STAGE_STRIDE, 1)[:, -BDST:].contiguous()
         
+        synced_breakpoint('handle stage stride done')
+
         assert (second_stage_k % chunk_size) == 0
         if DEBUG:
             print('indices_left', indices_left[0, -1])
             print('out_scores', out_scores[0, -1], second_stage_k, indices_left.shape, chunk_size)
-        indices = indices_left[..., :second_stage_k // chunk_size] // chunk_size * chunk_size
+        # indices = indices_left[..., :second_stage_k // chunk_size] // chunk_size * chunk_size
+        indices = indices_left[..., :second_stage_k // chunk_size].clone()
+        indices.floor_divide_(chunk_size)
+        indices.mul_(chunk_size)
         
-        if DEBUG and DEBUG_RENDER and not torch.cuda.is_current_stream_capturing() and (BDST > 10):
+        synced_breakpoint('indices update done')
+
+        if DEBUG and DEBUG_RENDER and not (torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()) and (BDST > 10):
             out_indices_cpu = indices.cpu().numpy()
             debug = np.zeros((triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_SIZE_Q)))
             render_plot(out_indices_cpu, debug, DEBUG_HEAD, BLOCK_SIZE_Q)
             cv2.imwrite('dummy_sampled_final.png', debug * 255)
             print('saved dummy_sampled_final.png')
+        
+        
+        synced_breakpoint('before start post processing')
         
         args = args.clone()
         args.block_size_q = stages[-1].stage_block_size_q
@@ -1743,19 +1778,36 @@ def dual_stage_quadratic_hip_attention(
         
         # print('ff', indices.shape)
         indices = indices.permute(0, 2, 1, 3).flatten(0, 1)
+        synced_breakpoint('flatten')
         
-        indices, t_sort_1 = indices.sort(dim=-1)
-        indices = indices // args.block_size_k * args.block_size_k
+        indices, t_sort_1 = torch.sort(indices, dim=-1, stable=False)
+        synced_breakpoint('sort')
+
+        indices = indices.floor_divide_(args.block_size_k).mul_(args.block_size_k)
+        synced_breakpoint('floor')
         
         unique_mask = torch.roll(indices, shifts=1, dims=-1) != indices
+        synced_breakpoint('roll')
+
         indices = torch.where(unique_mask, indices, torch.iinfo(indices.dtype).max)
-        indices, t_sort_2 = indices.sort(dim=-1)
+        synced_breakpoint('where')
+        
+        indices, t_sort_2 = indices.sort(dim=-1, stable=False)
+        synced_breakpoint('sort2')
+
         active_mask = indices < (position_ids[:, ::args.block_size_q, None].repeat_interleave(HEAD, 0) + args.block_size_q)
+        synced_breakpoint('masking')
+
         ks = active_mask.int().sum(-1)
+        synced_breakpoint('sum')
+
         ks_count = ks.unsqueeze(-1)
         ks_start_end = torch.zeros((ks.shape[0], ks.shape[1], 2), dtype=torch.int32, device=q.device)
+        synced_breakpoint('zeros')
+
         ks_start_end[:, :, -1] = ks
-        
+        synced_breakpoint('unique done')
+
         if (low_percent > 0) and (low_k_ratio < 1):
             scores = out_scores[..., :second_stage_k // chunk_size].permute(0, 2, 1, 3).flatten(0, 1)
             scores = scores.gather(dim=-1, index=t_sort_1)
@@ -1793,7 +1845,7 @@ def dual_stage_quadratic_hip_attention(
                     .gather(dim=dim_to_lower, index=lowk)\
                     .scatter(dim=-1, index=t_sort_score, value=987654321),
             )
-            indices, t_sort_2 = indices.sort(dim=-1)
+            indices, t_sort_2 = indices.sort(dim=-1, stable=False)
             active_mask = indices < (position_ids[:, ::args.block_size_q, None].repeat_interleave(HEAD, 0) + args.block_size_q)
             # print(indices[1, -1, :])
             # print(active_mask[1, -1, :])
@@ -1802,7 +1854,7 @@ def dual_stage_quadratic_hip_attention(
             ks_start_end = torch.zeros((ks.shape[0], ks.shape[1], 2), dtype=torch.int32, device=q.device)
             ks_start_end[:, :, -1] = ks
         
-            if DEBUG and DEBUG_RENDER and not torch.cuda.is_current_stream_capturing() and (BDST > 10):
+            if DEBUG and DEBUG_RENDER and not (torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()) and (BDST > 10):
                 indices_cpu = indices.cpu().numpy()
                 ks_cpu = ks.cpu().numpy()
                 debug = np.zeros((triton.cdiv(TDST, BLOCK_SIZE_Q), triton.cdiv(TSRC, BLOCK_SIZE_Q)))
@@ -1823,7 +1875,7 @@ def dual_stage_quadratic_hip_attention(
                 plt.plot(ks[DEBUG_HEAD, :].float().cpu().numpy())
                 plt.savefig('dummy_stat_ks.png')
         
-        if DEBUG and DEBUG_RENDER and not torch.cuda.is_current_stream_capturing() and (BDST > 10):
+        if DEBUG and DEBUG_RENDER and not (torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()) and (BDST > 10):
             try:
                 input('>>>')
             except EOFError:
@@ -1841,8 +1893,20 @@ def dual_stage_quadratic_hip_attention(
             ks_start_end = ks_start_end.repeat_interleave(BLOCK_SIZE_Q // block_sparse_block_size_q, 1)
             args.block_size_q = block_sparse_block_size_q
         
+        synced_breakpoint('change BSQ done')
+
         if mask_only:
-            return None, None
+            return None, HiPAttentionOutputMetadata(
+                indices=indices,
+                ks=ks,
+                ks_count=ks_count,
+                ks_start_end=ks_start_end,
+                key_access_log=None,
+                key_access_count=None,
+                block_access_log=None,
+                block_access_score=None,
+                block_access_count=None,
+            )
     else:
         args = args.clone()
         args.sliding_window_size += args.mask_k
@@ -1858,6 +1922,8 @@ def dual_stage_quadratic_hip_attention(
     
     args.block_size_q = min(args.block_size_q, triton.next_power_of_2(TDST))
     
+    synced_breakpoint('bsa start')
+
     context = block_sparse_attention(
         q=q, 
         k=k, 
@@ -1873,6 +1939,8 @@ def dual_stage_quadratic_hip_attention(
         model_context_length=model_context_length,
     )
     
+    synced_breakpoint('bsa done')
+
     if DEBUG:
         print('context', context[0, :, DEBUG_HEAD, :], context.shape)
         print('indices', indices[0 + DEBUG_HEAD, -1], indices.shape)
@@ -1903,13 +1971,19 @@ def main_debug():
     
     assert seq_dups > 0
     
+    if torch.xpu.is_available():
+        device = 'xpu'
+    else:
+        device = 'cuda'
+
     q, k, v, out, cos, sin = load_checkouts(
         idx=0, 
         window=40, 
         seq_len=seq_len, 
         return_cos_sin=True, 
         derope=True,
-        dtype=torch.bfloat16
+        dtype=torch.bfloat16,
+        device=device,
     )
     HEAD = q.shape[0]
     HEAD_KV = k.shape[0]
@@ -1979,7 +2053,10 @@ def main_debug():
         q_mask = q
         k_mask = k
     
-    from flash_attn import flash_attn_func, flash_attn_with_kvcache
+    try:
+        from flash_attn import flash_attn_func, flash_attn_with_kvcache
+    except ModuleNotFoundError:
+        flash_attn_func = flash_attn_with_kvcache = None
     
     print(q.shape, k.shape, v.shape, q_mask.shape, k_mask.shape)
     
@@ -2154,17 +2231,30 @@ def main_debug():
     
     refresh_interval = 8 if is_decode else 2
     
+    if device == 'xpu':
+        Event = None # torch.xpu.Event
+        synchronize = torch.xpu.synchronize
+        empty_cache = torch.xpu.empty_cache
+    else:
+        Event = torch.cuda.Event
+        synchronize = torch.cuda.synchronize
+        empty_cache = torch.cuda.empty_cache
+
     metadata = None
     for i in range(min(num_samples, 24)):
-        start = torch.cuda.Event(True)
-        end = torch.cuda.Event(True)
+        if Event is not None:
+            start = Event(True)
+            end = Event(True)
+            start.record()
+        else:
+            start = time.time()
         
-        start.record()
         if i==0: DEBUG = os.getenv('DEBUG', '0') == '1'
         
         # print(cos.shape)
         # print(sin.shape)
         
+        print(time.time())
         _, metadata = dual_stage_quadratic_hip_attention(
             **dual_stage_kwargs,
             cached_metadata=metadata
@@ -2174,15 +2264,19 @@ def main_debug():
             metadata = None
         
         if i==0: DEBUG = False
-        end.record()
-        
-        end.synchronize()
-        print(start.elapsed_time(end))
+
+        if Event is not None:
+            end.record()
+            end.synchronize()
+            print(start.elapsed_time(end))
+        else:
+            synchronize()
+            print((time.time() - start) * 1000)
     
     print('-' * 20)
     
-    torch.cuda.synchronize()
-    torch.cuda.empty_cache()
+    synchronize()
+    empty_cache()
     if os.getenv('DEBUG', '0') == '1':
         input('>>>')
     
@@ -2191,10 +2285,13 @@ def main_debug():
     
     metadata = None
     for i in range(min(num_samples, 24)):
-        start = torch.cuda.Event(True)
-        end = torch.cuda.Event(True)
-        
-        start.record()
+        if Event is not None:
+            start = Event(True)
+            end = Event(True)
+            start.record()
+        else:
+            start = time.time()
+
         if i==0: DEBUG = os.getenv('DEBUG', '0') == '1'
         
         # print(cos.shape)
@@ -2209,76 +2306,110 @@ def main_debug():
             metadata = None
         
         if i==0: DEBUG = False
-        end.record()
-        
-        end.synchronize()
-        print(start.elapsed_time(end))
+
+        if Event is not None:
+            end.record()
+            end.synchronize()
+            print(start.elapsed_time(end))
+        else:
+            synchronize()
+            print((time.time() - start) * 1000)
     
     print('-' * 20)
     
-    torch.cuda.synchronize()
-    torch.cuda.empty_cache()
+    synchronize()
+    empty_cache()
     
-    metadata = None
-    for i in range(min(num_samples, 24)):
-        start = torch.cuda.Event(True)
-        end = torch.cuda.Event(True)
-         
-        start.record()
-        context, metadata = hip_attention(
-            **hip_1k_kwargs,
-            previous_metadata=metadata,
-        )
-        end.record()
+    # metadata = None
+    # for i in range(min(num_samples, 24)):
+    #     if Event is not None:
+    #         start = Event(True)
+    #         end = Event(True)
+    #         start.record()
+    #     else:
+    #         start = time.time()
+
+    #     context, metadata = hip_attention(
+    #         **hip_1k_kwargs,
+    #         previous_metadata=metadata,
+    #     )
         
-        if ((i + 1) % (8 if is_decode else 1)) == 0:
-            metadata = None
+    #     if ((i + 1) % (8 if is_decode else 1)) == 0:
+    #         metadata = None
         
-        end.synchronize()
-        print(start.elapsed_time(end))
+    #     if Event is not None:
+    #         end.record()
+    #         end.synchronize()
+    #         print(start.elapsed_time(end))
+    #     else:
+    #         synchronize()
+    #         print((time.time() - start) * 1000)
     
     print('-' * 20)
     
-    torch.cuda.synchronize()
-    torch.cuda.empty_cache()
+    synchronize()
+    empty_cache()
     
-    metadata = None
-    for i in range(min(num_samples, 24)):
-        start = torch.cuda.Event(True)
-        end = torch.cuda.Event(True)
-         
-        start.record()
-        context, metadata = hip_attention(
-            **hip_512_kwargs,
-            previous_metadata=metadata,
-        )
-        end.record()
+    # metadata = None
+    # for i in range(min(num_samples, 24)):
+    #     if Event is not None:
+    #         start = Event(True)
+    #         end = Event(True)
+    #         start.record()
+    #     else:
+    #         start = time.time()
+
+    #     context, metadata = hip_attention(
+    #         **hip_512_kwargs,
+    #         previous_metadata=metadata,
+    #     )
         
-        if ((i + 1) % (8 if is_decode else 1)) == 0:
-            metadata = None
+    #     if ((i + 1) % (8 if is_decode else 1)) == 0:
+    #         metadata = None
         
-        end.synchronize()
-        print(start.elapsed_time(end))
+    #     if Event is not None:
+    #         end.record()
+    #         end.synchronize()
+    #         print(start.elapsed_time(end))
+    #     else:
+    #         synchronize()
+    #         print((time.time() - start) * 1000)
     
     print('-' * 20)
     
     for i in range(min(num_samples, 5)):
-        start = torch.cuda.Event(True)
-        end = torch.cuda.Event(True)
+        if Event is not None:
+            start = Event(True)
+            end = Event(True)
+            start.record()
+        else:
+            start = time.time()
         
-        start.record()
-        if q.shape[1] == 1:
-            flash_attn_with_kvcache(
-                q, k, v, causal=True,
+        if flash_attn_func is None:
+            torch.nn.functional.scaled_dot_product_attention(
+                q.permute(0, 2, 1, 3), 
+                k.permute(0, 2, 1, 3), 
+                v.permute(0, 2, 1, 3),
+                is_causal=True,
+                enable_gqa=True,
             )
         else:
-            flash_attn_func(
-                q, k, v, causal=True
-            )
-        end.record()
+            if q.shape[1] == 1:
+                flash_attn_with_kvcache(
+                    q, k, v, causal=True,
+                )
+            else:
+                flash_attn_func(
+                    q, k, v, causal=True
+                )
         
-        end.synchronize()
-        print(start.elapsed_time(end))
+        if Event is not None:
+            end.record()
+            end.synchronize()
+            print(start.elapsed_time(end))
+        else:
+            synchronize()
+            print((time.time() - start) * 1000)
 
 if __name__ == '__main__':
     main_debug()

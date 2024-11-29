@@ -11,6 +11,8 @@ from hip.models.hip_attention.attention1_block_gpu_kernel.paged_cache_vllm_compa
 
 if hasattr(tl.math, 'round'):
     tl_device_round = tl.math.round
+elif hasattr(tl.extra, 'intel'):
+    tl_device_round = tl.extra.intel.libdevice.round
 else:
     tl_device_round = tl.extra.cuda.libdevice.round
 

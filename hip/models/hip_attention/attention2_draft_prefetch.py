@@ -42,7 +42,11 @@ from hip.utils.triton_argsort import argsort as tl_argsort
 try:
     from vllm_flash_attn import flash_attn_func, flash_attn_with_kvcache
 except ImportError:
-    from flash_attn import flash_attn_func, flash_attn_with_kvcache
+    try:
+        from flash_attn import flash_attn_func, flash_attn_with_kvcache
+    except ImportError:
+        # warnings.warn("flash attention import is failed!")
+        flash_attn_with_kvcache = flash_attn_func = None
 
 def cdiv_python(a, b):
     return math.ceil(float(a) / float(b))
@@ -2698,14 +2702,18 @@ def masking_iteration_draft_python_epilog(
 def get_masking_iteration_draft_cuda_fused_configs():
     autotune_disabled = os.getenv('HIP_DISABLE_AUTOTUNE', '0') == '1'
     if autotune_disabled:
-        device_name = torch.cuda.get_device_name()
+        device_name = torch.cuda.get_device_name() if torch.cuda.is_available() else 'None'
         defaults = {
             'NVIDIA A100-SXM4-80GB': dict(
                 num_warps=4, 
                 num_stages=2, 
-                maxnreg=512,
+                # maxnreg=512,
             ),
-        }.get(device_name, dict(num_warps=4, num_stages=2, maxnreg=512))
+        }.get(device_name, dict(
+            num_warps=4, 
+            num_stages=2, 
+            # maxnreg=512
+        ))
         return [triton.Config({}, **defaults)]
     if os.getenv('HIP_DISABLE_AUTOTUNE_WARNINGS', '0') == '0':
         warnings.warn('triton autotuning is activated. this should be disabled for faster startup. if you want set HIP_DISABLE_AUTOTUNE=1')
@@ -2720,7 +2728,7 @@ def get_masking_iteration_draft_cuda_fused_configs():
                     {}, 
                     num_warps=num_warps, 
                     num_stages=num_stages,
-                    maxnreg=num_regs,
+                    # maxnreg=num_regs,
                 ))
     return configs
 
@@ -4849,7 +4857,7 @@ def block_sparse_attention_cuda_step(
                 allow_tf32=True,
             ).to(tl.float32)
             if LOGIT_SOFTCAP is not None:
-                qk = tl.extra.cuda.libdevice.tanh(qk / LOGIT_SOFTCAP) * LOGIT_SOFTCAP
+                qk = tl.extra.intel.libdevice.tanh(qk / LOGIT_SOFTCAP) * LOGIT_SOFTCAP
             qk = qk * 1.44269504
         elif EXTEND_BACKEND == 'dynamic_extend':
             assert COS is not None
@@ -4929,7 +4937,7 @@ def block_sparse_attention_cuda_step(
             ).to(tl.float32)
             
             if LOGIT_SOFTCAP is not None:
-                qk = tl.extra.cuda.libdevice.tanh(qk / LOGIT_SOFTCAP) * LOGIT_SOFTCAP
+                qk = tl.extra.intel.libdevice.tanh(qk / LOGIT_SOFTCAP) * LOGIT_SOFTCAP
             qk = qk * 1.44269504
         else:
             raise Exception()
@@ -4941,7 +4949,7 @@ def block_sparse_attention_cuda_step(
             allow_tf32=True,
         ).to(tl.float32)
         if LOGIT_SOFTCAP is not None:
-            qk = tl.extra.cuda.libdevice.tanh(qk / LOGIT_SOFTCAP) * LOGIT_SOFTCAP
+            qk = tl.extra.intel.libdevice.tanh(qk / LOGIT_SOFTCAP) * LOGIT_SOFTCAP
         qk = qk * 1.44269504
     
     # qk_mask = (
@@ -5021,7 +5029,7 @@ def block_sparse_attention_cuda_step(
 def get_block_sparse_attention_configs():
     autotune_disabled = os.getenv('HIP_DISABLE_AUTOTUNE', '0') == '1'
     if autotune_disabled:
-        device_name = torch.cuda.get_device_name()
+        device_name = torch.cuda.get_device_name() if torch.cuda.is_available() else 'None'
         defaults = {
             'NVIDIA A100-SXM4-80GB': dict(
                 num_warps=4, 
@@ -5054,19 +5062,19 @@ def get_block_sparse_attention_configs():
 #         return 0
 #     return 999999999 # run might fails
 
-@triton.autotune(
-    configs=get_block_sparse_attention_configs(),
-    key=[
-        'BLOCK_SIZE_K',
-        'BLOCK_SIZE_Q',
-        'HID',
-        'TDST_NEXT_POWER_OF_2',
-    ],
-    # prune_configs_by={
-    #     'perf_model': perf_model_block_sparse_attention,
-    #     'top_k': 24,
-    # }
-)
+# @triton.autotune(
+#     configs=get_block_sparse_attention_configs(),
+#     key=[
+#         'BLOCK_SIZE_K',
+#         'BLOCK_SIZE_Q',
+#         'HID',
+#         'TDST_NEXT_POWER_OF_2',
+#     ],
+#     # prune_configs_by={
+#     #     'perf_model': perf_model_block_sparse_attention,
+#     #     'top_k': 24,
+#     # }
+# )
 @triton.jit
 def block_sparse_attention_cuda(
     Q, stride_q_bsz, stride_q_tdst, stride_q_head, stride_q_hid,
@@ -5699,7 +5707,7 @@ def block_sparse_attention_cuda(
                 EXTEND_BACKEND=EXTEND_BACKEND,
             )
     
-    if (sliding_window_size > 0):
+    if (sliding_window_size > 0) and True:
         CURR_TSRC = tl.max(pos_tdst)
         # CURR_TSRC = (idx_bdst + 1) * BLOCK_SIZE_Q + MAX_TSRC - MAX_TDST
         i_tsrc_range_start = tl.maximum(0, CURR_TSRC - sliding_window_size - BLOCK_SIZE_Q)
@@ -5970,7 +5978,7 @@ def block_sparse_attention(
     #     BLOCK_BK = 256 // block_size_k
     # BLOCK_BK = 64 // args.block_size_k
     
-    max_block_size = int(os.getenv('SA_BLOCK_SIZE', '32'))
+    max_block_size = int(os.getenv('SA_BLOCK_SIZE', '32' if torch.cuda.is_available() else '16'))
     BLOCK_BK = max_block_size // args.block_size_k
     BLOCK_BK = max(1, min(max_block_size, BLOCK_BK))
     if 'SA_BLOCK_BK' in os.environ:
@@ -6001,12 +6009,14 @@ def block_sparse_attention(
     assert seq_lens.ndim == 2
     
     grid = (HEAD, BDST, BSZ)
-    pre_device = torch.get_default_device()
-    torch.set_default_device(q.device)
+    # pre_device = torch.get_default_device()
+    # torch.set_default_device(q.device)
     
     # print(indices.shape, indices[0, -1], ks_start_end[0, -1])
     # if indices.shape[1] == 1:
     #     input()
+
+    # torch.xpu.synchronize()
     
     block_sparse_attention_cuda[grid](
         q, *args.safe_stride(q, 4),
@@ -6041,10 +6051,10 @@ def block_sparse_attention(
         BLOCK_BK=BLOCK_BK,
         EXTEND_BACKEND=EXTEND_BACKEND,
         
-        # num_warps=4,
+        # num_warps=1,
         # num_stages=2 if not using_extend else 1,
     )
-    torch.set_default_device(pre_device)
+    # torch.set_default_device(pre_device)
     
     if (os.getenv('HIP_CUMSUM', '0') == '1') and isinstance(v, Tensor) and q.shape[1] > 1:
         v_cumsum = v.cumsum(dim=1) / torch.arange(1, v.shape[1] + 1, device=v.device)[None, :, None, None]
