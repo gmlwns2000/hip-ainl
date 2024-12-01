@@ -197,6 +197,13 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=o
                         print([f'{x.item():.5f}' for x in samples])
                     neg_log_likelihood = min(samples)
 
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            elif torch.xpu.is_available():
+                torch.xpu.synchronize()
+            else:
+                raise Exception()
+            
             nlls.append(neg_log_likelihood.cpu())
 
             prev_end_loc = end_loc

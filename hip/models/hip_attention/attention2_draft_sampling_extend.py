@@ -31,9 +31,19 @@ import numpy as np
 import cv2
 import numba
 
+last_tick = time.time()
 def synced_breakpoint(message):
-    torch.xpu.synchronize()
-    print('breakpoint', time.time(), message, flush=True)
+    return
+    global last_tick
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    elif torch.xpu.is_available():
+        torch.xpu.synchronize()
+    else:
+        raise Exception()
+    elapsed = time.time() - last_tick
+    last_tick = time.time()
+    print('breakpoint', elapsed * 1000, message, flush=True)
 
 @dataclass
 class Stage:
@@ -573,8 +583,9 @@ def chunk_controllable_sampling_mask_cuda(
     queries_sum = tl.zeros((BLOCK_SIZE_Q // STRIDE_Q, BLOCK_HID), dtype=tl.float32)
     queries_counter = tl.zeros((BLOCK_SIZE_Q // STRIDE_Q,), dtype=tl.int32)
     tl.static_assert(BLOCK_SIZE_Q // STRIDE_Q > 0)
-    
-    for i_offset in tl.static_range(STRIDE_Q):
+
+    tdst_chunk = tl.minimum(STRIDE_Q, TDST)
+    for i_offset in range(tdst_chunk):
         idx_tdst_iter = idx_tdst + i_offset
         mask_tdst_iter = mask_tdst & (idx_tdst_iter < TDST)
         queries_iter = tl.load(
@@ -1913,6 +1924,7 @@ def dual_stage_quadratic_hip_attention(
         args.block_size_k = stages[-1].stage_chunk_size
         args.mask_k = second_stage_k
         args.using_extend = args.using_extend and True
+        args.block_size_q = min(stages[-1].stage_block_size_q, block_sparse_block_size_q)
         
         assert cached_metadata is not None
         indices = cached_metadata.indices

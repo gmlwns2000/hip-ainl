@@ -116,7 +116,10 @@ def custom_attention(
             key_states = key_states.contiguous()
             value_states = value_states.contiguous()
 
-        from flash_attn import flash_attn_qkvpacked_func, flash_attn_func, flash_attn_with_kvcache
+        try:
+            from flash_attn import flash_attn_qkvpacked_func, flash_attn_func, flash_attn_with_kvcache
+        except ModuleNotFoundError:
+            flash_attn_qkvpacked_func, flash_attn_func, flash_attn_with_kvcache = None, None, None
         
         if is_prompt:
             if attention_method in ['none', 'fa2']:
@@ -135,7 +138,7 @@ def custom_attention(
                     softcap=attn_logit_softcapping,
                     window_size=(model_sliding_window, model_sliding_window) if model_sliding_window is not None else (-1, -1),
                 ).permute(0, 2, 1, 3)
-            elif attention_method in ['spda']:
+            elif attention_method in ['sdpa']:
                 from torch.nn.attention import SDPBackend, sdpa_kernel
                 with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
                     attn_output = torch.nn.functional.scaled_dot_product_attention(
@@ -147,7 +150,7 @@ def custom_attention(
                         dropout_p=attention_dropout,
                     )
             else:
-                raise Exception()
+                raise Exception(attention_method)
         else:
             if attention_method in ['none', 'fa2']:
                 attn_output = flash_attn_with_kvcache(
@@ -170,6 +173,8 @@ def custom_attention(
                         is_causal=causal_mask is None,
                         dropout_p=attention_dropout,
                     )
+            else:
+                raise Exception(attention_method)
 
         if os.environ.get('CHECKOUT_STATES', '0') == '1':
             os.makedirs('./cache/llama/', exist_ok=True)

@@ -169,7 +169,13 @@ def load_model(args):
     if args.model.startswith('sglang'):
         return load_sglang_model(args)
     
-    device = 'cuda:0'
+    if torch.cuda.is_available():
+        device = 'cuda:0'
+    elif torch.xpu.is_available():
+        device = 'xpu:0'
+    else:
+        raise Exception()
+
     if args.model in MODELS:
         model_id = MODELS[args.model]
     else:

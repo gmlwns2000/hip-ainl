@@ -5,7 +5,10 @@ from tqdm import tqdm
 import json
 import numpy as np
 from hip.dataset.passkey import Passkey
-from vllm import LLM, SamplingParams
+try:
+    from vllm import LLM, SamplingParams
+except ModuleNotFoundError:
+    LLM = SamplingParams = None
 from hip.models.sglang_model import SglangModel
 
 def get_numbers(s, cnt):

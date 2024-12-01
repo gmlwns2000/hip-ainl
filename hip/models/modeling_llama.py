@@ -681,7 +681,7 @@ class LlamaCustomAttention(LlamaAttention):
                 attention_dropout=self.attention_dropout if self.training else 0.0,
 
                 # Attention method
-                attention_method='fa2' if ((self.layer_idx in self.tree_dense_layers) and (not force_extend)) else self.attention_method,
+                attention_method='fa2' if ((self.layer_idx in self.tree_dense_layers) and (not force_extend) and (self.attention_method == 'hip')) else self.attention_method,
                 tree_reformer=self.tree_reformer,
                 tree_performer=self.tree_performer,
 
@@ -1461,9 +1461,13 @@ class LlamaModel(LlamaPreTrainedModel):
 
             hidden_states = layer_outputs[0]
             
-            if hidden_states.shape[1] >= 4096:
-                torch.cuda.current_stream().synchronize()
-                # torch.cuda.synchronize()
+            if hidden_states.shape[1] >= 512:
+                if torch.cuda.is_available():
+                    torch.cuda.current_stream().synchronize()
+                elif torch.xpu.is_available():
+                    torch.xpu.current_stream().synchronize()
+                else:
+                    raise Exception()
 
             if use_cache:
                 next_decoder_cache = layer_outputs[2 if output_attentions else 1]
@@ -1674,7 +1678,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
 
         loss = None
         hidden_states = outputs[0]
-        if not self.training and not output_logits and past_key_values is None and num_logits_to_keep == 0:
+        if torch.cuda.is_available() and (not self.training) and (not output_logits) and (past_key_values is None) and (num_logits_to_keep == 0):
             # NOTE: to avoid stroing of logits, which is useless for measuring PPL
             if labels is not None:
                 from hip.models.hip_attention.memory_efficient_llm_ce import memory_efficient_llm_ce

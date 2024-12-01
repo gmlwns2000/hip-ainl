@@ -68,11 +68,13 @@ def test_index(target_idx):
     )
     
     # lookup_idx = lookup_canary = 0
+    torch.xpu.synchronize()
+    end = time.time()
     lookup_idx = out[0, 0, 0, 0].item() * 65536
     lookup_canary = out[0, 0, 0, -1].item()
-    torch.xpu.synchronize()
-    print('bsa', (time.time() - start) * 1000, target_idx, lookup_idx, lookup_canary)
+    print('bsa', (end - start) * 1000, target_idx, lookup_idx, lookup_canary)
 
+    torch.xpu.synchronize()
     start = time.time()
     torch.nn.functional.scaled_dot_product_attention(
         q.permute(0, 2, 1, 3), 
