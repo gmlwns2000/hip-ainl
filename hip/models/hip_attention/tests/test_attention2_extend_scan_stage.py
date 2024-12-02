@@ -64,7 +64,7 @@ def exp(args):
                     rope_cos=cos,
                     rope_sin=sin,
                 ),
-                second_stage_k=1024,
+                second_stage_k=2048,
                 stages=[
                     ScanStage(
                         stage_block_size_q=16,
