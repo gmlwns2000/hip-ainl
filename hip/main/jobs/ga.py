@@ -854,7 +854,7 @@ def job_ga(
     
     while True:
         new_populations = []
-        new_populations_set = set()
+        existing_population_set = set(json.dumps(p, cls=InstanceEncoder) for p in population)
         while len(new_populations) < num_population:
             # more elites
             # p1, p2 = random.sample(population, counts=(len(population) - np.arange(0, len(population))).tolist(), k=2)
@@ -867,12 +867,12 @@ def job_ga(
             
             p1_latency = evaluate_latency_of_candidate(model, p1)
             p2_latency = evaluate_latency_of_candidate(model, p2)
-            if p1_latency < (seed_latency * 2) and json.dumps(p1, cls=InstanceEncoder) not in new_populations_set:
+            if p1_latency < (seed_latency * 2) and json.dumps(p1, cls=InstanceEncoder) not in existing_population_set:
                 new_populations.append(p1)
-                new_populations_set.add(json.dumps(p1, cls=InstanceEncoder))
-            if p2_latency < (seed_latency * 2) and json.dumps(p2, cls=InstanceEncoder) not in new_populations_set:
+                existing_population_set.add(json.dumps(p1, cls=InstanceEncoder))
+            if p2_latency < (seed_latency * 2) and json.dumps(p2, cls=InstanceEncoder) not in existing_population_set:
                 new_populations.append(p2)
-                new_populations_set.add(json.dumps(p2, cls=InstanceEncoder))
+                existing_population_set.add(json.dumps(p2, cls=InstanceEncoder))
         new_scores = evaluate_population(new_populations, model, evaluate_ds)
         
         population = population + new_populations
