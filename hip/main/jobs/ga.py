@@ -8,6 +8,7 @@ import os
 import random
 import traceback
 from itertools import islice
+import pypareto
 
 import numpy as np
 import torch, transformers
@@ -930,7 +931,6 @@ def job_ga(
         # best_args = list(map(lambda x: x[0], list(sorted(zip(range(len(scores)), scores), key=lambda x: x[1][1], reverse=False))[:num_population]))
         
         # pareto front
-        import pypareto
         values = list(map(lambda x: (x[0], x[1],), scores))
         chain = pypareto.Comparison(pypareto.by_value, pypareto.MaxMinList(pypareto.MaxMin.MIN, pypareto.MaxMin.MIN,)).as_chain()
         best_values = chain.split_by_pareto(values)
