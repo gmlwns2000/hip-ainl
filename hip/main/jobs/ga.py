@@ -206,7 +206,10 @@ def evaluate_corpus(
     if evaluate_method == 'kd':
         samples = []
         for line in corpus:
-            samples.append(torch.cat([shared_prompt, line.input_ids, line.output_ids]))
+            samples.append((
+                torch.cat([shared_prompt, line.input_ids, line.output_ids]),
+                line.output_ids,
+            ))
         
         def set_method(method: str):
             for m in model.modules():
@@ -215,7 +218,7 @@ def evaluate_corpus(
         
         loss_sum = 0
         loss_count = 0
-        for i_sample, sample in enumerate(samples):
+        for i_sample, (sample, output_ids) in enumerate(samples):
             with torch.cuda.stream(stream), torch.autocast('cuda', torch.bfloat16):
                 set_method('fa2')
                 logit_truth = None
@@ -240,11 +243,12 @@ def evaluate_corpus(
                 output_student = model(
                     input_ids=sample.to(stream.device, non_blocking=True).unsqueeze(0),
                     use_cache=False,
-                    num_logits_to_keep=16384,
+                    num_logits_to_keep=len(output_ids),
                 )
                 logit_student = output_student.logits.view(-1, output_student.logits.shape[-1])
                 
-                
+                logit_truth = logit_truth[-logit_student.shape[0]:, :]
+
                 loss = torch.nn.functional.kl_div(
                     input=logit_student.float().log_softmax(dim=-1),
                     target=logit_truth.float().softmax(dim=-1),
@@ -284,12 +288,16 @@ def evaluate_corpus(
                 except triton.runtime.errors.OutOfResources as ex:
                     print(ex)
                     return 99999999
+                except RuntimeError as ex:
+                    traceback.print_exc()
+                    print(ex)
+                    return 99999999
             state = output.past_key_values
             
             # stream.synchronize()
             
             logits = []
-            step_size = output_ids.shape[-1]
+            step_size = 1 #output_ids.shape[-1]
             for i in range(0, output_ids.shape[-1], step_size):
                 with torch.cuda.stream(stream), torch.autocast('cuda', torch.bfloat16):
                     output = model(
@@ -338,7 +346,7 @@ class TextDataset:
     shared_input_ids: torch.Tensor
     corpus: List[TextCorpus]
     eval_method: Optional[str] = None
-    
+
     def __repr__(self):
         return f'TextDataset(shared_input_ids={self.shared_input_ids.shape}, corpus=TextCorpus[{len(self.corpus)}])'
 
@@ -367,7 +375,7 @@ class TextDataset:
             )
 
         ds.eval_method = eval_method
-        
+
         return ds
 
 from hip.models.hip_attention.attention2_draft_sampling_extend import (
@@ -761,7 +769,7 @@ def job_ga(
                     gc.collect()
                     torch.cuda.empty_cache()
                     traceback.print_exc()
-                    print(ex)
+                    print('thread main failed due to', ex)
                     results.append((jid, 999999999999))
         
         torch.cuda.synchronize()
@@ -831,17 +839,46 @@ def job_ga(
     print('shared prompt size', evaluate_ds)
     
     # run GA
+    load_population = os.getenv('LOAD_POPULATION', '0') == '1'
     population = [seed]
-    for _ in range(num_population):
-        t = copy.deepcopy(seed)
-        for _ in range(10):
-            t = mutate(t)
-        population.append(t)
+    if not load_population:
+        for _ in range(num_population):
+            t = copy.deepcopy(seed)
+            for _ in range(10):
+                t = mutate(t)
+            population.append(t)
     scores = evaluate_population(population, model, evaluate_ds)
     seed_score = copy.deepcopy(scores[0])
     seed_latency, seed_loss = seed_score
+    print(population[0])
+    print(scores)
     print('seed', seed_score)
     
+    if load_population:
+        # {
+        #     'generation': current_generation,
+        #     'best_idx': best_idx,
+        #     'best_candidate': population[best_idx],
+        #     'scores': scores,
+        #     'population': population,
+        # }
+        checkpoint = './saves/pareto/population.json'
+        with open(checkpoint, 'r') as f:
+            state = json.load(f)
+        population = state['population']
+        for p in population:
+            for l in p:
+                for i in range(len(l['stages'])):
+                    ss = l['stages'][i]
+                    l['stages'][i] = ScanStage(
+                        stage_block_size_q=ss['stage_block_size_q'],
+                        stage_block_stride_q=ss['stage_block_stride_q'],
+                        stage_chunk_size=ss['stage_chunk_size'],
+                        stage_k=ss['stage_k'],
+                        stage_stride=ss['stage_stride'],
+                    )
+        scores = state['scores']
+
     run = wandb.init(
         project="hip-ga",
         config={
@@ -956,6 +993,7 @@ def job_ga(
         if ((current_generation % 1) == 0):
             with open(f'./saves/pareto/population_gen{current_generation}.json', 'w') as f:
                json.dump(json_data, f, indent=2, cls=EnhancedJSONEncoder)
+        print(population[best_idx])
         print('=====> gen', current_generation, scores[best_idx], '<=====')
         
         latencies = list(map(lambda x: [x[0]], scores))
