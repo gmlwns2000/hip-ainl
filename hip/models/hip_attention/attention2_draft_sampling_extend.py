@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, asdict
 import math
 import os
 import time
@@ -26,6 +27,7 @@ import triton.language as tl
 import numpy as np
 import cv2
 import numba
+from json import JSONEncoder
 
 @dataclass
 class Stage:
@@ -64,6 +66,13 @@ class EnsembleScoreStage(Stage):
     reduce_method: str = 'sum'
     require_reset_score: bool = True
     require_post_sort: bool = True
+
+
+class InstanceEncoder(JSONEncoder):
+    def default(self, o):
+        if isinstance(o, Stage):
+            return {'type': o.__class__.__name__, **asdict(o)}
+        return o.__dict__
 
 @numba.njit(parallel=True)
 def render_plot(

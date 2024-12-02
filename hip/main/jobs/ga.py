@@ -1,13 +1,17 @@
 import copy
 import gc
 import math
+import re
 import threading
 import time
 import os
 import random
 import traceback
+from itertools import islice
+
 import numpy as np
 import torch, transformers
+from tqdm import trange
 from transformers import AutoTokenizer
 from typing import List, Literal, Tuple, Dict, Optional
 import dataclasses, json
@@ -45,7 +49,11 @@ def load_loft_retrieval_chat_corpus() -> List[Tuple[str, str]]:
 
 from datasets import load_dataset, Value, Sequence, Features
 
-def load_infinite_bench_subset(split: str, tokenizer, seq_len: int, count: int):
+def load_infinite_bench_subset(
+        split: str, tokenizer, seq_len: int, count: int,
+        add_system_prompt: bool = True,
+        all_answers: bool = False,
+):
     ft = Features({
         "id": Value("int64"), 
         "context": Value("string"), 
@@ -56,20 +64,35 @@ def load_infinite_bench_subset(split: str, tokenizer, seq_len: int, count: int):
     dataset = load_dataset("xinrongzhang2022/InfiniteBench", features=ft)
     
     lines = []
-    for idx in range(min(count, len(dataset[split]))):
+    for idx in trange(min(count, len(dataset[split])), desc='Loading InfiniteBench', dynamic_ncols=True):
         entry = dataset[split][random.randint(0, len(dataset[split]) - 1)]
-        context = f"""You are a helpful assistant.
+        if add_system_prompt:
+            context = f"""You are a helpful assistant.
 
-Please read given text careful and answer user\'s query after it.
+Please read the given text carefully and answer the user\'s query after it.
 
 ------------------------------------------------------
-- From here, document is started.
+- From here, the document starts.
 ------------------------------------------------------
 
 {entry["context"]}
 
 ------------------------------------------------------
-- The document is ended. Now, please answer user's query.
+- The document has ended. Now, please answer the user's query.
+------------------------------------------------------
+
+"""
+        else:
+            context = f"""Please read the given text carefully and answer the query after it.
+
+------------------------------------------------------
+- From here, the document starts.
+------------------------------------------------------
+
+{entry["context"]}
+
+------------------------------------------------------
+- The document has ended. Now, please answer the query.
 ------------------------------------------------------
 
 """
@@ -79,42 +102,75 @@ Please read given text careful and answer user\'s query after it.
         context = tokenizer.decode(context_ids)
         context = context + f"""
 
-Before you start, here is rules that you have to follow.
-- Please be concise.
-- Only answer that I asked. Do not put any words except the answer. For example, if I ask some values or passkey, just answer only passkey and values.
-{entry["input"]}
+Before you start, here are rules that you have to follow.
+- IMPORTANT: Please **be concise**. Only state the necessary information.
+- Only answer what I asked. Do not put any other words besides the answer. For example, if I ask for some values or a passkey, just answer with only the passkey or the values.
+
 Now, answer my question: {entry["input"]}"""
-        lines.append((context, entry['answer'][0]))
+        if all_answers:
+            lines.append((context, entry['answer']))
+        else:
+            lines.append((context, entry['answer'][0]))
     
+    return lines
+
+
+def load_pos_neg_bench_subset(path: str, offset: int, count: int):
+    lines = []
+    with open(path, 'r') as f:
+        for line in islice(f, offset, offset + count):
+            line = json.loads(line)
+            question = line['question']
+            gt_answers = [gt_ans.strip('"') for gt_ans in line['gt_answers']]
+            prev_answers = set(gt_ans.lower().strip() for gt_ans in gt_answers)
+            all_answers = [(gt_ans, 'Y') for gt_ans in gt_answers]
+            for ans_str in line['answers']:
+                ans_str = re.sub(r'Candidate Answer #\d+: ', '', ans_str)
+                ans_str = ans_str.replace('<|eot_id|>', '')
+                ans_str, is_correct = ans_str.split('; Is Correct? ')
+                if ans_str.lower().strip() in prev_answers:
+                    continue
+                if any(gt_ans.lower().strip() in ans_str.lower() for gt_ans in gt_answers):
+                    is_correct = 'Y'  # Be lenient with the correct answers
+                prev_answers.add(ans_str.lower().strip())
+                all_answers.append((ans_str, is_correct))
+
+            for ans_str, is_correct in all_answers:
+                lines.append((question, ans_str, is_correct))
+
     return lines
 
 def format_chat_corpus(args, corpus: List[str]) -> List[str]:
     if 'llama3' in args.model:
         ret = []
-        for prompt, output in corpus:
+        for prompt, output, *other in corpus:
             updated = f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
-Cutting Knowledge Date: December 2023
-Today Date: 26 Jul 2024
+Knowledge Cutoff Date: December 2023
+Today's Date: 26 Jul 2024
 
 <|eot_id|><|start_header_id|>user<|end_header_id|>
 
 {prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>"""
-            ret.append((updated, '\n\n' + output + '<|eot_id|>'))
+            ret.append((updated, '\n\n' + output + '<|eot_id|>', *other))
         return ret
     else:
         raise Exception()
 
 def tokenizing_and_find_shared_prompt_on_corpus(
     tokenizer: transformers.LlamaTokenizer, 
-    corpus: List[str],
+    corpus: List[Tuple[str, str]],
     shared_prompt_max_len: int = 999999999,
 ):
     count = len(corpus)
-    iterator = map(lambda line: (tokenizer.encode(line[0], add_special_tokens=False), tokenizer.encode(line[1], add_special_tokens=False)), corpus)
+    iterator = list(map(lambda item: (
+        tokenizer.encode(item[0], add_special_tokens=False),
+        tokenizer.encode(item[1], add_special_tokens=False),
+        *item[2:],
+    ), corpus))
     corpus = []
     shared_prompt = None
-    for input_ids, output_ids in tqdm.tqdm(iterator, total=count, dynamic_ncols=True):
+    for input_ids, output_ids, *other in tqdm.tqdm(iterator, total=count, dynamic_ncols=True):
         if shared_prompt is None:
             shared_prompt = input_ids
         else:
@@ -122,9 +178,13 @@ def tokenizing_and_find_shared_prompt_on_corpus(
                 if s != c:
                     shared_prompt = shared_prompt[:i]
                     break
-        corpus.append([input_ids, output_ids])
-    shared_prompt = shared_prompt[:shared_prompt_max_len]
-    corpus = list(map(lambda ids: (torch.tensor(ids[0][len(shared_prompt):], dtype=torch.int64), torch.tensor(ids[1], dtype=torch.int64)), corpus))
+        corpus.append([input_ids, output_ids, *other])
+    shared_prompt = shared_prompt[:shared_prompt_max_len][:-1]
+    corpus = list(map(lambda item: (
+        torch.tensor(item[0][len(shared_prompt):], dtype=torch.int64),
+        torch.tensor(item[1], dtype=torch.int64),
+        *item[2:],
+    ), corpus))
     shared_prompt = torch.tensor(shared_prompt)
     return shared_prompt, corpus
 
@@ -138,8 +198,11 @@ def evaluate_corpus(
     tokenizer: transformers.LlamaTokenizer, 
     shared_prompt: torch.Tensor, 
     corpus: List["TextCorpus"],
-    evaluate_method: Literal['kd', 'output'] = 'kd'
+    evaluate_method: Literal['kd', 'output'] = None
 ):
+    if evaluate_method is None:
+        evaluate_method = 'output'
+
     if evaluate_method == 'kd':
         samples = []
         for line in corpus:
@@ -208,6 +271,7 @@ def evaluate_corpus(
             output_ids = line.output_ids
             input_ids = input_ids.to(stream.device, non_blocking=True)
             output_ids = output_ids.to(stream.device, non_blocking=True)
+            is_correct = line.is_correct is None or line.is_correct == 'Y'
             state = copy.deepcopy(shared_output.past_key_values)
             
             with torch.cuda.stream(stream), torch.autocast('cuda', torch.bfloat16):
@@ -249,9 +313,13 @@ def evaluate_corpus(
                 
                 if stream.device_index == 0:
                     # tqdm.tqdm.write(f'{loss_probs.item():.5f} ({seq_probs.item():.5f}), {loss_ce.item():.5f}, {tokenizer.decode(logits[:-1].argmax(dim=-1))}, {tokenizer.decode(output_ids[1:])}')
-                    tqdm.tqdm.write(f'{loss_ce.item():.5f}, {tokenizer.decode(logits[:-1].argmax(dim=-1))}, {tokenizer.decode(output_ids[1:])}')
-                
-                loss_sum += loss_ce
+                    #tqdm.tqdm.write(f'({"Y" if is_correct else "N"}) {loss_ce.item():.5f}, {tokenizer.decode(logits[:-1].argmax(dim=-1))}, {tokenizer.decode(output_ids[1:])}')
+                    tqdm.tqdm.write(f'({"Y" if is_correct else "N"}) {loss_ce.item():.5f}')
+
+                if is_correct:
+                    loss_sum += loss_ce
+                else:
+                    loss_sum -= loss_ce
                 loss_count += 1
             
             stream.synchronize()
@@ -264,16 +332,18 @@ def evaluate_corpus(
 class TextCorpus:
     input_ids: torch.Tensor
     output_ids: torch.Tensor
+    is_correct: Optional[str] = None
 
 class TextDataset:
     shared_input_ids: torch.Tensor
     corpus: List[TextCorpus]
+    eval_method: Optional[str] = None
     
     def __repr__(self):
         return f'TextDataset(shared_input_ids={self.shared_input_ids.shape}, corpus=TextCorpus[{len(self.corpus)}])'
 
     @staticmethod
-    def from_corpus(args, tokenizer, corpus):
+    def from_corpus(args, tokenizer, corpus, eval_method=None):
         ds = TextDataset()
         
         corpus = format_chat_corpus(args, corpus)
@@ -285,21 +355,24 @@ class TextDataset:
         
         ds.shared_input_ids = shared_prompt
         ds.corpus = []
-        for input_ids, output_ids in corpus:
+        for input_ids, output_ids, *other in corpus:
             assert input_ids.dtype == torch.int64, input_ids.shape
             assert output_ids.dtype == torch.int64
             ds.corpus.append(
                 TextCorpus(
                     input_ids=input_ids,
                     output_ids=output_ids,
+                    is_correct=other[0] if other else None,
                 )
             )
+
+        ds.eval_method = eval_method
         
         return ds
 
 from hip.models.hip_attention.attention2_draft_sampling_extend import (
-    ScanStage, 
-    dual_stage_quadratic_hip_attention
+    ScanStage,
+    dual_stage_quadratic_hip_attention, InstanceEncoder
 )
 
 @torch.inference_mode
@@ -374,7 +447,7 @@ def job_ga(
             ]
         } for _ in range(2)
     ]
-    
+
     def mutate_inner(p):
         p = copy.deepcopy(p)
         
@@ -669,7 +742,7 @@ def job_ga(
         
         def thread_main(tid, args, jobs):
             stream, model = args
-            for jid, job in tqdm.tqdm(jobs, position=tid, dynamic_ncols=True, leave=False):
+            for jid, job in tqdm.tqdm(jobs, position=tid, dynamic_ncols=True, leave=False, desc=f'thread {tid} jobs'):
                 try:
                     # with lock:
                     #     torch.set_default_device(tid)
@@ -678,7 +751,7 @@ def job_ga(
                         apply_setting(model, job)
                         ppls = []
                         for ds in evaluate_ds:
-                            ppl = evaluate_corpus(stream, model, tokenizer, ds.shared_input_ids, ds.corpus)
+                            ppl = evaluate_corpus(stream, model, tokenizer, ds.shared_input_ids, ds.corpus, ds.eval_method)
                             ppls.append(ppl)
                         ppl = sum(ppls) / len(ppls)
                     # stream.synchronize()
@@ -727,26 +800,32 @@ def job_ga(
     
     evaluate_ds = [
         # TextDataset.from_corpus(
-        #     args, tokenizer, 
-        #     load_loft_retrieval_chat_corpus()[:1] +\
-        #     load_loft_rag_chat_corpus()[:1],
+        #     args, tokenizer,
+        #     load_loft_retrieval_chat_corpus() +
+        #     load_loft_rag_chat_corpus(),
         # ),
         # TextDataset.from_corpus(
-        #     args, tokenizer, 
-        #     load_loft_rag_chat_corpus()[:1],
-        # ),
-        # TextDataset.from_corpus(
-        #     args, tokenizer, 
-        #     load_infinite_bench_subset('passkey', tokenizer, 131072, 2),
-        # ),
-        # TextDataset.from_corpus(
-        #     args, tokenizer, 
-        #     load_infinite_bench_subset('kv_retrieval', tokenizer, 131072, 2),
+        #     args, tokenizer,
+        #     load_loft_rag_chat_corpus(),
         # ),
         TextDataset.from_corpus(
-            args, tokenizer, 
-            load_infinite_bench_subset('longbook_qa_eng', tokenizer, 65536, 1),
+            args, tokenizer,
+            load_infinite_bench_subset('passkey', tokenizer, 131072, 2),
+            eval_method='kd',
         ),
+        # TextDataset.from_corpus(
+        #     args, tokenizer,
+        #     load_infinite_bench_subset('kv_retrieval', tokenizer, 131072, 50),
+        # ),
+        # TextDataset.from_corpus(
+        #     args, tokenizer,
+        #     load_infinite_bench_subset('longbook_qa_eng', tokenizer, 65536, 50),
+        # ),
+        *[TextDataset.from_corpus(
+            args, tokenizer,
+            load_pos_neg_bench_subset('./saves/output.jsonl', offset, 1),
+            eval_method='output',
+        ) for offset in range(8)]
     ]
     
     print('shared prompt size', evaluate_ds)
@@ -775,8 +854,8 @@ def job_ga(
     
     while True:
         new_populations = []
-        population = list(map(lambda x:x[1], sorted(zip(scores, population), key=lambda x:x[0][1])))
-        for _ in range(num_population):
+        new_populations_set = set()
+        while len(new_populations) < num_population:
             # more elites
             # p1, p2 = random.sample(population, counts=(len(population) - np.arange(0, len(population))).tolist(), k=2)
             p1, p2 = random.sample(population, counts=[1, ] * len(population), k=2)
@@ -788,10 +867,12 @@ def job_ga(
             
             p1_latency = evaluate_latency_of_candidate(model, p1)
             p2_latency = evaluate_latency_of_candidate(model, p2)
-            if p1_latency < (seed_latency * 2):
+            if p1_latency < (seed_latency * 2) and json.dumps(p1, cls=InstanceEncoder) not in new_populations_set:
                 new_populations.append(p1)
-            if p2_latency < (seed_latency * 2):
+                new_populations_set.add(json.dumps(p1, cls=InstanceEncoder))
+            if p2_latency < (seed_latency * 2) and json.dumps(p2, cls=InstanceEncoder) not in new_populations_set:
                 new_populations.append(p2)
+                new_populations_set.add(json.dumps(p2, cls=InstanceEncoder))
         new_scores = evaluate_population(new_populations, model, evaluate_ds)
         
         population = population + new_populations
