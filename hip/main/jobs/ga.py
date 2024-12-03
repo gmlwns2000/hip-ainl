@@ -8,6 +8,8 @@ import os
 import random
 import traceback
 from itertools import islice
+from multiprocessing import Process
+
 import pypareto
 
 import numpy as np
@@ -384,6 +386,360 @@ from hip.models.hip_attention.attention2_draft_sampling_extend import (
     dual_stage_quadratic_hip_attention, InstanceEncoder
 )
 
+
+def mutate_inner(p):
+    p = copy.deepcopy(p)
+
+    stage_job = random.choice([
+        'pass',
+        'swap_layer',
+        'swap_stage',
+        'copy_stage',
+        'drop_stage',
+    ])
+    if stage_job == 'pass':
+        pass
+    elif stage_job == 'swap_layer':
+        a = random.randint(0, len(p) - 1)
+        b = random.randint(0, len(p) - 1)
+        layer_a = p[a]
+        layer_b = p[b]
+        p[a] = layer_b
+        p[b] = layer_a
+    elif stage_job == 'swap_stage':
+        target_layer = random.randint(0, len(p) - 1)
+        layer = p[target_layer]['stages']
+        if len(layer) > 2:
+            a = random.randint(1, len(layer) - 1)
+            b = random.randint(1, len(layer) - 1)
+            stage_a = layer[a]
+            stage_b = layer[b]
+            layer[a] = stage_b
+            layer[b] = stage_a
+    elif stage_job == 'copy_stage':
+        target_layer = random.randint(0, len(p) - 1)
+        layer = p[target_layer]['stages']  # type: list
+        if len(layer) > 2:
+            a = random.randint(1, len(layer) - 1)
+            stage = layer[a]
+            layer.insert(a, copy.deepcopy(stage))
+    elif stage_job == 'drop_stage':
+        target_layer = random.randint(0, len(p) - 1)
+        layer = p[target_layer]['stages']
+        if len(layer) > 2:
+            layer.pop(-1)
+    else:
+        raise Exception()
+
+    num_param_jobs = random.randint(0, 10)
+    for _ in range(num_param_jobs):
+        param_job = random.choice([
+            'pass',
+            'sliding_window_size',
+            'sink_token_size',
+            'sa_extend_backend',
+            'stage_extend_backend',
+            'second_stage_k',
+            'block_size_q',
+            'block_stride_q',
+            'chunk_size',
+            'k',
+            'stride'
+        ])
+        target_layer = random.randint(0, len(p) - 1)
+        layer = p[target_layer]['stages']
+        target_stage = random.randint(0, len(layer) - 1)
+        stage = layer[target_stage]
+
+        if param_job == 'pass':
+            pass
+        elif param_job == 'sliding_window_size':
+            if random.random() > 0.5:
+                p[target_layer]['sliding_window_size'] *= 2
+            else:
+                p[target_layer]['sliding_window_size'] //= 2
+        elif param_job == 'sink_token_size':
+            if random.random() > 0.5:
+                p[target_layer]['sink_token_size'] *= 2
+            else:
+                p[target_layer]['sink_token_size'] //= 2
+        elif param_job == 'sa_extend_backend':
+            p[target_layer]['sa_extend_backend'] = random.choice(['streaming', 'dynamic_extend'])
+        elif param_job == 'stage_extend_backend':
+            stage.stage_extend_backend = random.choice(['streaming', 'dynamic_extend', 'relative'])
+        elif param_job == 'second_stage_k':
+            if random.random() > 0.5:
+                p[target_layer]['second_stage_k'] *= 2
+            else:
+                p[target_layer]['second_stage_k'] //= 2
+        elif param_job == 'block_size_q':
+            if random.random() > 0.5:
+                stage.stage_block_size_q *= 2
+            else:
+                stage.stage_block_size_q //= 2
+        elif param_job == 'block_stride_q':
+            if random.random() > 0.5:
+                stage.stage_block_stride_q *= 2
+            else:
+                stage.stage_block_stride_q //= 2
+        elif param_job == 'k':
+            if stage.stage_k is not None:
+                if random.random() > 0.5:
+                    stage.stage_k *= 2
+                else:
+                    stage.stage_k //= 2
+        elif param_job == 'chunk_size':
+            if random.random() > 0.5:
+                stage.stage_chunk_size *= 2
+            else:
+                stage.stage_chunk_size //= 2
+        elif param_job == 'stride':
+            if random.random() > 0.5:
+                stage.stage_stride *= 2
+            else:
+                stage.stage_stride //= 2
+        else:
+            raise Exception()
+    return p
+
+
+def validate(p, model):
+    assert len(p) in [2, model.config.num_hidden_layers], 'layer count must match'
+    for layer in p:
+        layer_meta = layer
+        layer = layer['stages']
+        assert layer_meta['second_stage_k'] > 0
+        assert layer_meta['second_stage_k'] <= 8192  # we have to restrict this to prevent full dense attention...
+        assert layer_meta['sliding_window_size'] >= 64
+        assert layer_meta['sliding_window_size'] <= 8192
+        assert layer_meta['sink_token_size'] >= 4
+        assert layer_meta['sink_token_size'] <= 8192
+        assert len(layer) >= 2, 'too small'
+        assert len(layer) <= 7, 'too large'
+        assert layer[0].stage_k == None, 'first quadratic'
+        assert layer[-1].stage_chunk_size <= 32, 'too large k'
+        assert layer[-1].stage_chunk_size > 0, 'too large k'
+        assert (layer_meta['second_stage_k'] % layer[-1].stage_chunk_size) == 0
+
+        stage_block_size_q = 987654321
+        stage_stride = 987654321
+        stage_k = 987654321
+        stage_chunk_size = 987654321
+
+        for stage in layer:
+            assert (stage.stage_k is None) or (stage.stage_k > 0)
+            assert stage.stage_stride > 0
+            assert stage.stage_block_size_q > 0
+            assert stage.stage_block_stride_q > 0
+            assert stage.stage_chunk_size > 0
+            assert (stage.stage_k is None) or (stage.stage_k <= 131072)
+            assert stage.stage_stride <= 16
+            assert stage.stage_block_size_q <= 512
+            assert stage.stage_block_stride_q <= 16
+            assert stage.stage_chunk_size <= 512
+            assert (stage.stage_block_size_q // stage.stage_block_stride_q) >= 16
+            assert (stage.stage_k is None) or ((stage.stage_k % stage.stage_chunk_size) == 0)
+
+            assert (stage.stage_k is None) or (stage.stage_k <= stage_k)
+            assert stage.stage_stride <= stage_stride
+            assert stage.stage_block_size_q <= stage_block_size_q
+            assert stage.stage_chunk_size <= stage_chunk_size
+
+            stage_block_size_q = stage.stage_block_size_q
+            stage_stride = stage.stage_stride
+            stage_chunk_size = stage.stage_chunk_size
+            if stage.stage_k is not None:
+                stage_k = stage.stage_k
+
+
+def mutate(p, model):
+    while True:
+        try:
+            p1 = mutate_inner(p)
+            validate(p1, model)
+            return p1
+        except AssertionError as ex:
+            # print(ex)
+            pass
+
+
+def crossover(p1, p2):
+    assert len(p1) == len(p2)
+    pt = random.randint(0, len(p1))
+
+    p1_top = p1[:pt]
+    p1_bot = p2[pt:]
+
+    p2_top = p1[pt:]
+    p2_bot = p2[:pt]
+
+    p1_new = copy.deepcopy(p1_top) + copy.deepcopy(p1_bot)
+    p2_new = copy.deepcopy(p2_top) + copy.deepcopy(p2_bot)
+    assert len(p1_new) == len(p1)
+    assert len(p2_new) == len(p2)
+
+    return p1_new, p2_new
+
+
+def apply_setting(model, setting):
+    for m in model.modules():
+        if hasattr(m, 'tree_extend_stages'):
+            idx = m.layer_idx
+            if setting is None:
+                m.attention_method = 'fa2'
+            else:
+                m.attention_method = 'hip'
+                if len(setting) == 2:
+                    if idx < 4:
+                        m.tree_extend_stages = setting[0]
+                    else:
+                        m.tree_extend_stages = setting[1]
+                else:
+                    m.tree_extend_stages = setting[idx]
+
+
+latency_cache = {}
+
+
+def evaluate_latency(model, stages):
+    hash_id = str(stages)
+    if hash_id in latency_cache:
+        return latency_cache[hash_id]
+    else:
+        device = 0
+        HEAD = 32
+        HEAD_KV = 8
+        TDST = 8192
+        TSRC = 131072
+        HID = 128
+        q = torch.empty((1, TDST, HEAD, HID), dtype=torch.bfloat16, device=device)
+        k = torch.empty((1, TSRC, HEAD_KV, HID), dtype=torch.bfloat16, device=device)
+        v = torch.empty((1, TSRC, HEAD_KV, HID), dtype=torch.bfloat16, device=device)
+        latency_sum = 0
+        latency_count = 0
+        for i in range(10):
+            if i == 2:
+                latency_sum = latency_count = 0
+            start = torch.cuda.Event(True)
+            end = torch.cuda.Event(True)
+
+            start.record()
+            dual_stage_quadratic_hip_attention(
+                q, k, v,
+                args=HiPAttentionArgs11(
+                    block_size_k=64,
+                    block_stride_k=1,
+                    sliding_window_size=stages['sliding_window_size'],
+                    sink_token_size=stages['sink_token_size'],
+                ),
+                second_stage_k=stages['second_stage_k'],
+                stages=stages['stages'],
+                block_sparse_block_size_q=64,
+                model_context_length=131072,
+                scan_extend_backend='relative',
+                sa_extend_backend=stages['sa_extend_backend'],
+            )
+            end.record()
+
+            end.synchronize()
+            latency_sum += start.elapsed_time(end)
+            latency_count += 1
+        latency = latency_sum / latency_count
+        latency_cache[hash_id] = latency
+        return latency
+
+
+def evaluate_latency_of_candidate(model, p):
+    latency_sum = 0
+    latency_count = 0
+    if len(p) == 2:
+        latency_sum += evaluate_latency(model, p[0]) * 4
+        latency_count += 4
+        latency_sum += evaluate_latency(model, p[1]) * 28
+        latency_count += 28
+    else:
+        for stage in p:
+            latency_sum += evaluate_latency(model, stage)
+            latency_count += 1
+    return latency_sum / latency_count
+
+
+def evaluate_population(population, model, tokenizer, evaluate_ds: List[TextDataset]):
+    torch.cuda.synchronize()
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    ret = evaluate_population_inner(population, model, tokenizer, evaluate_ds)
+
+    torch.cuda.synchronize()
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    return ret
+
+
+def evaluate_population_inner(population, model, tokenizer, evaluate_ds: List[TextDataset]):
+    n_threads = torch.cuda.device_count()
+    jobs = [[(i, p) for i, p in enumerate(population) if (i % n_threads) == tid] for tid in range(n_threads)]
+    results = []
+    models = [(torch.cuda.Stream(device=0), model)]
+    for tid in range(1, n_threads):
+        models.append((torch.cuda.Stream(device=tid), copy.deepcopy(model).to(tid)))
+
+    def thread_main(tid, args, jobs):
+        stream, model = args
+        for jid, job in tqdm.tqdm(jobs, position=tid, dynamic_ncols=True, leave=False, desc=f'thread {tid} jobs'):
+            try:
+                # with lock:
+                #     torch.set_default_device(tid)
+                #     torch.cuda.set_device(tid)
+                tqdm.tqdm.write(f'thread {tid} job {jid}')
+                tqdm.tqdm.write("----------------\njob=")
+                tqdm.tqdm.write(str(job))
+                tqdm.tqdm.write("----------------")
+                with torch.cuda.stream(stream):
+                    apply_setting(model, job)
+                    ppls = []
+                    for ds in evaluate_ds:
+                        ppl = evaluate_corpus(stream, model, tokenizer, ds.shared_input_ids, ds.corpus, ds.eval_method)
+                        ppls.append(ppl)
+                    ppl = sum(ppls) / len(ppls)
+                # stream.synchronize()
+                results.append((jid, ppl))
+            except Exception as ex:
+                print(f'Error in thread {tid} job {jid}:')
+                print("----------------\njob=")
+                print(str(job))
+                print("----------------")
+                torch.cuda.synchronize()
+                gc.collect()
+                torch.cuda.empty_cache()
+                traceback.print_exc()
+                print('thread main failed due to', ex)
+                results.append((jid, 999999999999))
+
+    torch.cuda.synchronize()
+    threads = [threading.Thread(target=thread_main, args=(tid, models[tid], jobs[tid])) for tid in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    torch.cuda.synchronize()
+
+    torch.set_default_device(0)
+    torch.cuda.set_device(0)
+
+    ppls = list(map(lambda x: x[1], sorted(results, key=lambda x: x[0])))
+
+    latencies = []
+    for p in tqdm.tqdm(population, desc='eval latency', leave=False, dynamic_ncols=True):
+        apply_setting(model, p)
+        latency = evaluate_latency_of_candidate(model, p)
+        latencies.append(latency)
+    scores = list(zip(latencies, ppls))
+    return scores
+
+
 @torch.inference_mode
 def job_ga(
     args, 
@@ -392,7 +748,7 @@ def job_ga(
     device, 
 ):
     model.eval()
-    
+
     # seed = [
     #     {
     #         'second_stage_k': 2048,
@@ -424,7 +780,7 @@ def job_ga(
     #         ]
     #     } for _ in range(model.config.num_hidden_layers)
     # ]
-    
+
     seed = [
         {
             'second_stage_k': 2048,
@@ -456,341 +812,6 @@ def job_ga(
             ]
         } for _ in range(2)
     ]
-
-    def mutate_inner(p):
-        p = copy.deepcopy(p)
-        
-        stage_job = random.choice([
-            'pass', 
-            'swap_layer', 
-            'swap_stage',
-            'copy_stage',
-            'drop_stage',
-        ])
-        if stage_job == 'pass':
-            pass
-        elif stage_job == 'swap_layer':
-            a = random.randint(0, len(p) - 1)
-            b = random.randint(0, len(p) - 1)
-            layer_a = p[a]
-            layer_b = p[b]
-            p[a] = layer_b
-            p[b] = layer_a
-        elif stage_job == 'swap_stage':
-            target_layer = random.randint(0, len(p) - 1)
-            layer = p[target_layer]['stages']
-            if len(layer) > 2:
-                a = random.randint(1, len(layer) - 1)
-                b = random.randint(1, len(layer) - 1)
-                stage_a = layer[a]
-                stage_b = layer[b]
-                layer[a] = stage_b
-                layer[b] = stage_a
-        elif stage_job == 'copy_stage':
-            target_layer = random.randint(0, len(p) - 1)
-            layer = p[target_layer]['stages'] # type: list
-            if len(layer) > 2:
-                a = random.randint(1, len(layer) - 1)
-                stage = layer[a]
-                layer.insert(a, copy.deepcopy(stage))
-        elif stage_job == 'drop_stage':
-            target_layer = random.randint(0, len(p) - 1)
-            layer = p[target_layer]['stages']
-            if len(layer) > 2:
-                layer.pop(-1)
-        else:
-            raise Exception()
-
-        num_param_jobs = random.randint(0, 10)
-        for _ in range(num_param_jobs):
-            param_job = random.choice([
-                'pass', 
-                'sliding_window_size',
-                'sink_token_size',
-                'sa_extend_backend',
-                'stage_extend_backend',
-                'second_stage_k',
-                'block_size_q', 
-                'block_stride_q', 
-                'chunk_size', 
-                'k', 
-                'stride'
-            ])
-            target_layer = random.randint(0, len(p) - 1)
-            layer = p[target_layer]['stages']
-            target_stage = random.randint(0, len(layer) - 1)
-            stage = layer[target_stage]
-            
-            if param_job == 'pass':
-                pass
-            elif param_job == 'sliding_window_size':
-                if random.random() > 0.5:
-                    p[target_layer]['sliding_window_size'] *= 2
-                else:
-                    p[target_layer]['sliding_window_size'] //= 2
-            elif param_job == 'sink_token_size':
-                if random.random() > 0.5:
-                    p[target_layer]['sink_token_size'] *= 2
-                else:
-                    p[target_layer]['sink_token_size'] //= 2
-            elif param_job == 'sa_extend_backend':
-                p[target_layer]['sa_extend_backend'] = random.choice(['streaming', 'dynamic_extend'])
-            elif param_job == 'stage_extend_backend':
-                stage.stage_extend_backend = random.choice(['streaming', 'dynamic_extend', 'relative'])
-            elif param_job == 'second_stage_k':
-                if random.random() > 0.5:
-                    p[target_layer]['second_stage_k'] *= 2
-                else:
-                    p[target_layer]['second_stage_k'] //= 2
-            elif param_job == 'block_size_q':
-                if random.random() > 0.5:
-                    stage.stage_block_size_q *= 2
-                else:
-                    stage.stage_block_size_q //= 2
-            elif param_job == 'block_stride_q':
-                if random.random() > 0.5:
-                    stage.stage_block_stride_q *= 2
-                else:
-                    stage.stage_block_stride_q //= 2
-            elif param_job == 'k':
-                if stage.stage_k is not None:
-                    if random.random() > 0.5:
-                        stage.stage_k *= 2
-                    else:
-                        stage.stage_k //= 2
-            elif param_job == 'chunk_size':
-                if random.random() > 0.5:
-                    stage.stage_chunk_size *= 2
-                else:
-                    stage.stage_chunk_size //= 2
-            elif param_job == 'stride':
-                if random.random() > 0.5:
-                    stage.stage_stride *= 2
-                else:
-                    stage.stage_stride //= 2
-            else:
-                raise Exception()
-        return p
-
-    def validate(p):
-        assert len(p) in [2, model.config.num_hidden_layers], 'layer count must match'
-        for layer in p:
-            layer_meta = layer
-            layer = layer['stages']
-            assert layer_meta['second_stage_k'] > 0
-            assert layer_meta['second_stage_k'] <= 8192 # we have to restrict this to prevent full dense attention...
-            assert layer_meta['sliding_window_size'] >= 64
-            assert layer_meta['sliding_window_size'] <= 8192
-            assert layer_meta['sink_token_size'] >= 4
-            assert layer_meta['sink_token_size'] <= 8192
-            assert len(layer) >= 2, 'too small'
-            assert len(layer) <= 7, 'too large'
-            assert layer[0].stage_k == None, 'first quadratic'
-            assert layer[-1].stage_chunk_size <= 32, 'too large k'
-            assert layer[-1].stage_chunk_size > 0, 'too large k'
-            assert (layer_meta['second_stage_k'] % layer[-1].stage_chunk_size) == 0
-            
-            stage_block_size_q = 987654321
-            stage_stride = 987654321
-            stage_k = 987654321
-            stage_chunk_size = 987654321
-            
-            for stage in layer:
-                assert (stage.stage_k is None) or (stage.stage_k > 0)
-                assert stage.stage_stride > 0
-                assert stage.stage_block_size_q > 0
-                assert stage.stage_block_stride_q > 0
-                assert stage.stage_chunk_size > 0
-                assert (stage.stage_k is None) or (stage.stage_k <= 131072)
-                assert stage.stage_stride <= 16
-                assert stage.stage_block_size_q <= 512
-                assert stage.stage_block_stride_q <= 16
-                assert stage.stage_chunk_size <= 512
-                assert (stage.stage_block_size_q // stage.stage_block_stride_q) >= 16
-                assert (stage.stage_k is None) or ((stage.stage_k % stage.stage_chunk_size) == 0)
-                
-                assert (stage.stage_k is None) or (stage.stage_k <= stage_k)
-                assert stage.stage_stride <= stage_stride
-                assert stage.stage_block_size_q <= stage_block_size_q
-                assert stage.stage_chunk_size <= stage_chunk_size
-                
-                stage_block_size_q = stage.stage_block_size_q
-                stage_stride = stage.stage_stride
-                stage_chunk_size = stage.stage_chunk_size
-                if stage.stage_k is not None:
-                    stage_k = stage.stage_k
-
-    def mutate(p):
-        while True:
-            try:
-                p1 = mutate_inner(p)
-                validate(p1)
-                return p1
-            except AssertionError as ex:
-                # print(ex)
-                pass
-    
-    def crossover(p1, p2):
-        assert len(p1) == len(p2)
-        pt = random.randint(0, len(p1))
-        
-        p1_top = p1[:pt]
-        p1_bot = p2[pt:]
-        
-        p2_top = p1[pt:]
-        p2_bot = p2[:pt]
-        
-        p1_new = copy.deepcopy(p1_top) + copy.deepcopy(p1_bot)
-        p2_new = copy.deepcopy(p2_top) + copy.deepcopy(p2_bot)
-        assert len(p1_new) == len(p1)
-        assert len(p2_new) == len(p2)
-        
-        return p1_new, p2_new
-
-    def apply_setting(model, setting):
-        for m in model.modules():
-            if hasattr(m, 'tree_extend_stages'):
-                idx = m.layer_idx
-                if setting is None:
-                    m.attention_method = 'fa2'
-                else:
-                    m.attention_method = 'hip'
-                    if len(setting) == 2:
-                        if idx < 4:
-                            m.tree_extend_stages = setting[0]
-                        else:
-                            m.tree_extend_stages = setting[1]
-                    else:
-                        m.tree_extend_stages = setting[idx]
-
-    latency_cache = {}
-    
-    def evaluate_latency(model, stages):
-        hash_id = str(stages)
-        if hash_id in latency_cache:
-            return latency_cache[hash_id]
-        else:
-            device = 0
-            HEAD = 32
-            HEAD_KV = 8
-            TDST = 8192
-            TSRC = 131072
-            HID = 128
-            q = torch.empty((1, TDST, HEAD, HID), dtype=torch.bfloat16, device=device)
-            k = torch.empty((1, TSRC, HEAD_KV, HID), dtype=torch.bfloat16, device=device)
-            v = torch.empty((1, TSRC, HEAD_KV, HID), dtype=torch.bfloat16, device=device)
-            latency_sum = 0
-            latency_count = 0
-            for i in range(10):
-                if i == 2:
-                    latency_sum = latency_count = 0
-                start = torch.cuda.Event(True)
-                end = torch.cuda.Event(True)
-                
-                start.record()
-                dual_stage_quadratic_hip_attention(
-                    q, k, v, 
-                    args=HiPAttentionArgs11(
-                        block_size_k=64,
-                        block_stride_k=1,
-                        sliding_window_size=stages['sliding_window_size'],
-                        sink_token_size=stages['sink_token_size'],
-                    ),
-                    second_stage_k=stages['second_stage_k'],
-                    stages=stages['stages'],
-                    block_sparse_block_size_q=64,
-                    model_context_length=131072,
-                    scan_extend_backend='relative',
-                    sa_extend_backend=stages['sa_extend_backend'],
-                )
-                end.record()
-                
-                end.synchronize()
-                latency_sum += start.elapsed_time(end)
-                latency_count += 1
-            latency = latency_sum / latency_count
-            latency_cache[hash_id] = latency
-            return latency
-    
-    def evaluate_latency_of_candidate(model, p):
-        latency_sum = 0
-        latency_count = 0
-        if len(p) == 2:
-            latency_sum += evaluate_latency(model, p[0]) * 4
-            latency_count += 4
-            latency_sum += evaluate_latency(model, p[1]) * 28
-            latency_count += 28
-        else:
-            for stage in p:
-                latency_sum += evaluate_latency(model, stage)
-                latency_count += 1
-        return latency_sum / latency_count
-    
-    def evaluate_population(population, model, evaluate_ds: List[TextDataset]):
-        torch.cuda.synchronize()
-        gc.collect()
-        torch.cuda.empty_cache()
-        
-        ret = evaluate_population_inner(population, model, evaluate_ds)
-        
-        torch.cuda.synchronize()
-        gc.collect()
-        torch.cuda.empty_cache()
-        
-        return ret
-    
-    def evaluate_population_inner(population, model, evaluate_ds: List[TextDataset]):
-        import threading, queue
-        
-        n_threads = torch.cuda.device_count()
-        jobs = [[(i, p) for i, p in enumerate(population) if (i % n_threads) == tid] for tid in range(n_threads)]
-        results = []
-        models = [(torch.cuda.Stream(device=0), model)]
-        for tid in range(1, n_threads):
-            models.append((torch.cuda.Stream(device=tid), copy.deepcopy(model).to(tid)))
-        
-        def thread_main(tid, args, jobs):
-            stream, model = args
-            for jid, job in tqdm.tqdm(jobs, position=tid, dynamic_ncols=True, leave=False, desc=f'thread {tid} jobs'):
-                try:
-                    # with lock:
-                    #     torch.set_default_device(tid)
-                    #     torch.cuda.set_device(tid)
-                    with torch.cuda.stream(stream):
-                        apply_setting(model, job)
-                        ppls = []
-                        for ds in evaluate_ds:
-                            ppl = evaluate_corpus(stream, model, tokenizer, ds.shared_input_ids, ds.corpus, ds.eval_method)
-                            ppls.append(ppl)
-                        ppl = sum(ppls) / len(ppls)
-                    # stream.synchronize()
-                    results.append((jid, ppl))
-                except Exception as ex:
-                    torch.cuda.synchronize()
-                    gc.collect()
-                    torch.cuda.empty_cache()
-                    traceback.print_exc()
-                    print('thread main failed due to', ex)
-                    results.append((jid, 999999999999))
-        
-        torch.cuda.synchronize()
-        threads = [threading.Thread(target=thread_main, args=(tid, models[tid], jobs[tid]), daemon=True) for tid in range(n_threads)]
-        list(map(lambda x: x.start(), threads))
-        list(map(lambda x: x.join(), threads))
-        torch.cuda.synchronize()
-        
-        torch.set_default_device(0)
-        torch.cuda.set_device(0)
-        
-        ppls = list(map(lambda x: x[1], sorted(results, key=lambda x: x[0])))
-        
-        latencies = []
-        for p in tqdm.tqdm(population, desc='eval latency', leave=False, dynamic_ncols=True):
-            apply_setting(model, p)
-            latency = evaluate_latency_of_candidate(model, p)
-            latencies.append(latency)
-        scores = list(zip(latencies, ppls))
-        return scores
 
     # settings
     num_population = 25
@@ -846,9 +867,10 @@ def job_ga(
         for _ in range(num_population):
             t = copy.deepcopy(seed)
             for _ in range(10):
-                t = mutate(t)
+                t = mutate(t, model)
             population.append(t)
-    scores = evaluate_population(population, model, evaluate_ds)
+    print("Evaluating initial population")
+    scores = evaluate_population(population, model, tokenizer, evaluate_ds)
     seed_score = copy.deepcopy(scores[0])
     seed_latency, seed_loss = seed_score
     print(population[0])
@@ -899,9 +921,9 @@ def job_ga(
             p1, p2 = random.sample(population, counts=[1, ] * len(population), k=2)
             p1, p2 = crossover(p1, p2)
             for _ in range(random.randint(0, 2) if random.random() < 0.5 else random.randint(0, 10)):
-                p1 = mutate(p1)
+                p1 = mutate(p1, model)
             for _ in range(random.randint(0, 2) if random.random() < 0.5 else random.randint(0, 10)):
-                p2 = mutate(p2)
+                p2 = mutate(p2, model)
             
             p1_latency = evaluate_latency_of_candidate(model, p1)
             p2_latency = evaluate_latency_of_candidate(model, p2)
@@ -911,7 +933,7 @@ def job_ga(
             if p2_latency < (seed_latency * 2) and json.dumps(p2, cls=InstanceEncoder) not in existing_population_set:
                 new_populations.append(p2)
                 existing_population_set.add(json.dumps(p2, cls=InstanceEncoder))
-        new_scores = evaluate_population(new_populations, model, evaluate_ds)
+        new_scores = evaluate_population(new_populations, model, tokenizer, evaluate_ds)
         
         population = population + new_populations
         scores = scores + new_scores

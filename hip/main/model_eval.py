@@ -1,3 +1,4 @@
+import multiprocessing
 import os
 import pathlib
 import warnings
@@ -163,13 +164,12 @@ def load_sglang_model(args: ArgsType):
     
     return model, tokenizer, torch.device('cpu')
 
-def load_model(args):
+def load_model(args, device='cuda:0'):
     if args.model.startswith('vllm'):
         return load_vllm_model(args)
     if args.model.startswith('sglang'):
         return load_sglang_model(args)
-    
-    device = 'cuda:0'
+
     if args.model in MODELS:
         model_id = MODELS[args.model]
     else:
@@ -307,13 +307,27 @@ def load_model(args):
 
 
 def main():
+    multiprocessing.set_start_method('spawn')
     args = eval_args()
-    
+    if args.processes > 0:
+        processes = [
+            multiprocessing.Process(target=thread_main, args=(args, tid))
+            for tid in range(args.processes)
+        ]
+        for p in processes:
+            p.start()
+        for p in processes:
+            p.join()
+    else:
+        thread_main(args)
+
+
+def thread_main(args, tid=0):
     seed(seed=args.seed)
     
     assert args.job in ['ppl', 'stream', 'mmlu', 'bench_single_layer', 'booksum', 'merge_lora', 'stream_demo', 'greedy_replace', 'passkey', 'ga']
     
-    model, tokenizer, device = load_model(args)
+    model, tokenizer, device = load_model(args, device=f'cuda:{tid}')
 
     if args.job == 'ppl':
         job_ppl(args, model, tokenizer, device)
