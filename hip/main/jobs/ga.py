@@ -298,7 +298,7 @@ def evaluate_corpus(
             # stream.synchronize()
             
             logits = []
-            step_size = 1 #output_ids.shape[-1]
+            step_size = output_ids.shape[-1]  # FIXME: changing this to 1 should be more realistic but also might cause runtime error
             for i in range(0, output_ids.shape[-1], step_size):
                 with torch.cuda.stream(stream), torch.autocast('cuda', torch.bfloat16):
                     output = model(
