@@ -59,3 +59,6 @@ third_party/
 dummy*.png
 dummy*.jpg
 flux-dev.png
+
+test.xml
+test.bin

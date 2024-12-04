@@ -18,7 +18,7 @@ def seed(random_seed=42):
     random.seed(random_seed)
 seed()
 
-N, TDST, TSRC, H, HKV, D = 1, 1, 131072, 8, 8, 128
+N, TDST, TSRC, H, HKV, D = 1, 256, 131072, 32, 32, 128
 
 queries = np.random.randn(N, TDST, H, D).astype(np.float16)
 keys = np.random.randn(N, TSRC, HKV, D).astype(np.float16)
@@ -27,7 +27,7 @@ pos_tdst = np.zeros((N, TDST, ), dtype=np.int64) + TSRC - 1
 
 NSINK = 64
 NSLIDING = 2048
-BLOCK_SIZE_Q = min(TDST, 16)
+BLOCK_SIZE_Q = min(TDST, 64)
 
 IS_SDPA = False
 
@@ -44,10 +44,11 @@ def create_model() -> ov.Model:
 
     # body
     out_cum = None
-    for idx_layer in range(16):
+    for idx_layer in range(1):
         if IS_SDPA:
+            out_node = q_node
             out_node = opset15.scaled_dot_product_attention(
-                query=opset15.transpose(opset15.add(q_node, op.Constant(np.array(idx_layer, dtype=np.float16))), [0, 2, 1, 3]),
+                query=opset15.transpose(opset15.add(out_node, op.Constant(np.array(idx_layer, dtype=np.float16))), [0, 2, 1, 3]),
                 key=opset15.transpose(k_node, [0, 2, 1, 3]),
                 value=opset15.transpose(v_node, [0, 2, 1, 3]),
             )
@@ -56,64 +57,70 @@ def create_model() -> ov.Model:
                 out_cum = out_node
             out_cum = out_cum + out_node
         else:
+            out_node = q_node
             out_bsz = []
             for idx_n in range(N):
                 out_tdsts = []
                 for idx_tdst in range(0, TDST, BLOCK_SIZE_Q):
-                    out_heads = []
+                    # out_heads = None
+                    idx_keys_all_heads = []
                     for idx_head in range(H):
-                        # BLOCK_SIZE_Q x D
-                        
-                        # queries = q_node[idx_n, idx_tdst:idx_tdst+BLOCK_SIZE_Q, idx_head, :]
-                        queries = opset15.slice(
-                            opset15.add(q_node, op.Constant(np.array(idx_layer, dtype=np.float16))), 
-                            [idx_n], [idx_n+1], [1], axes=[0]
-                        )
-                        queries = opset15.slice(queries, [idx_tdst], [idx_tdst+BLOCK_SIZE_Q], [1], axes=[1])
-                        queries = opset15.slice(queries, [idx_head], [idx_head+1], [1], axes=[2])
-                        queries = opset15.reshape(queries, ov.Shape([1, BLOCK_SIZE_Q, D]), special_zero=False)
-
                         pos_tdst = opset15.slice(pos_tdst_node, [idx_n], [idx_n+1], [1], axes=[0])
                         pos_tdst = opset15.slice(pos_tdst, [idx_tdst], [idx_tdst+1], [1], axes=[1])
                         pos_tdst = opset15.reshape(idx_tdst, ov.Shape([1,]), special_zero=False)
                         idx_keys_sink = opset15.range(0, NSINK, 1, ov.Type.i64)
                         idx_keys_sw = opset15.add(opset15.range(0, NSLIDING, 1, ov.Type.i64), opset15.subtract(pos_tdst, NSLIDING + idx_layer))
                         idx_keys = opset15.concat([idx_keys_sink, idx_keys_sw], axis=0)
-                        idx_keys = opset15.reshape(idx_keys, ov.Shape([NSINK + NSLIDING]), special_zero=False)
-                        # NOTE: idx_keys acts like page table
+                        idx_keys = opset15.reshape(idx_keys, ov.Shape([NSINK + NSLIDING, 1]), special_zero=False)
+                        idx_keys_all_heads.append(idx_keys)
+                    idx_keys_all_heads = opset15.concat(idx_keys_all_heads, axis=1)
+                    idx_keys_all_heads = opset15.reshape(idx_keys_all_heads, [1, NSINK + NSLIDING, H, 1], special_zero=False)
+                    idx_keys_all_heads = opset15.gather(idx_keys_all_heads, op.Constant(np.zeros(N, dtype=np.int64)), axis=0)
+                    idx_keys_all_heads = opset15.gather(idx_keys_all_heads, op.Constant(np.zeros(D, dtype=np.int64)), axis=-1)
+
+                    # NOTE: idx_keys acts like page table
+                    # BLOCK_SIZE_Q x D
                         
-                        #keys = k_node[idx_n, idx_keys, idx_head // (H // HKV), :]
-                        keys = k_node
-                        keys = opset15.slice(keys, [idx_n], [idx_n+1], [1], axes=[0])
-                        keys = opset15.slice(keys, [idx_head//(H//HKV)], [idx_head//(H//HKV)+1], [1], axes=[2])
-                        keys = opset15.gather(keys, idx_keys, axis=1)
-                        # keys = opset15.slice(keys, [0], [NSINK + NSLIDING], [1], axes=[1])
-                        keys = opset15.reshape(keys, ov.Shape([1, NSINK + NSLIDING, D]), special_zero=False)
+                    # queries = q_node[idx_n, idx_tdst:idx_tdst+BLOCK_SIZE_Q, idx_head, :]
+                    queries = opset15.slice(
+                        opset15.add(out_node, op.Constant(np.array(idx_layer, dtype=np.float16))), 
+                        [idx_n], [idx_n+1], [1], axes=[0]
+                    )
+                    queries = opset15.slice(queries, [idx_tdst], [idx_tdst+BLOCK_SIZE_Q], [1], axes=[1])
+                    queries = opset15.slice(queries, [idx_head], [idx_head+1], [1], axes=[2])
+                    queries = opset15.reshape(queries, ov.Shape([1, BLOCK_SIZE_Q, D]), special_zero=False)
+                    
+                    #keys = k_node[idx_n, idx_keys, idx_head // (H // HKV), :]
+                    keys = k_node
+                    keys = opset15.slice(keys, [idx_n], [idx_n+1], [1], axes=[0])
+                    keys_all_heads = []
+                    # keys = opset15.slice(keys, [idx_head//(H//HKV)], [idx_head//(H//HKV)+1], [1], axes=[2])
+                    keys = opset15.gather_elements(keys, idx_keys_all_heads, axis=1)
+                    keys = opset15.reshape(opset15.transpose(keys, [0, 2, 1, 3]), ov.Shape([H, NSINK + NSLIDING, D]), special_zero=False)
 
-                        #values = v_node[idx_n, idx_keys, idx_head // (H // HKV), :]
-                        values = v_node
-                        values = opset15.slice(values, [idx_n], [idx_n+1], [1], axes=[0])
-                        values = opset15.slice(values, [idx_head//(H//HKV)], [idx_head//(H//HKV)+1], [1], axes=[2])
-                        values = opset15.gather(values, idx_keys, axis=1)
-                        # values = opset15.slice(values, [0], [NSINK + NSLIDING], [1], axes=[1])
-                        values = opset15.reshape(values, ov.Shape([1, NSINK + NSLIDING, D]), special_zero=False)
+                    #values = v_node[idx_n, idx_keys, idx_head // (H // HKV), :]
+                    values = v_node
+                    values = opset15.slice(values, [idx_n], [idx_n+1], [1], axes=[0])
+                    # values = opset15.slice(values, [idx_head//(H//HKV)], [idx_head//(H//HKV)+1], [1], axes=[2])
+                    values = opset15.gather_elements(values, idx_keys_all_heads, axis=1)
+                    # values = opset15.slice(values, [0], [NSINK + NSLIDING], [1], axes=[1])
+                    values = opset15.reshape(opset15.transpose(values, [0, 2, 1, 3]), ov.Shape([H, NSINK + NSLIDING, D]), special_zero=False)
 
-                        # fused
-                        out = opset15.scaled_dot_product_attention(
-                            query=queries,
-                            key=keys,
-                            value=values,
-                        )
+                    # fused
+                    out_heads = opset15.scaled_dot_product_attention(
+                        query=queries,
+                        key=keys,
+                        value=values,
+                    )
 
-                        # vs. vanila
-                        # out = opset15.matmul(queries, keys, False, True)
-                        # out = opset15.softmax(out, axis=-1)
-                        # out = opset15.matmul(out, values, False, False)
+                    # vs. vanila
+                    # out = opset15.matmul(queries, keys, False, True)
+                    # out = opset15.softmax(out, axis=-1)
+                    # out = opset15.matmul(out, values, False, False)
 
-                        out = opset15.reshape(out, ov.Shape([1, BLOCK_SIZE_Q, 1, D]), special_zero=False)
+                    out_heads = opset15.reshape(out_heads, ov.Shape([1, H, BLOCK_SIZE_Q, D]), special_zero=False)
+                    out_heads = opset15.transpose(out_heads, [0, 2, 1, 3])
 
-                        out_heads.append(out)
-                    out_heads = opset15.concat(out_heads, axis=2)
                     out_tdsts.append(out_heads)
                 out_tdsts = opset15.concat(out_tdsts, axis=1)
                 out_bsz.append(out_tdsts)
@@ -138,6 +145,7 @@ def create_model() -> ov.Model:
     )
 
 model = create_model()
+ov.save_model(model, 'test.xml')
 
 core = ov.Core()
 
@@ -147,8 +155,8 @@ core = ov.Core()
 device = 'GPU'
 
 config = {
-    props.hint.performance_mode: props.hint.PerformanceMode.THROUGHPUT,
-    # props.hint.performance_mode: props.hint.PerformanceMode.LATENCY,
+    # props.hint.performance_mode: props.hint.PerformanceMode.THROUGHPUT,
+    props.hint.performance_mode: props.hint.PerformanceMode.LATENCY,
     props.hint.inference_precision: ov.Type.f16,
 }
 compiled_model = core.compile_model(model, device, config=config)
@@ -188,7 +196,7 @@ if device in  ['GPU', 'NPU']:
 # print(type(query_port), key_port, value_port, output_port)
 
 sampled = []
-for i in tqdm.tqdm(range(100)):
+for i in tqdm.tqdm(range(1000)):
     start = time.perf_counter()
     output = request.infer(
         inputs=[
@@ -203,7 +211,7 @@ for i in tqdm.tqdm(range(100)):
             pos_tdst,
         ],
         share_inputs=True,
-        share_outputs=True,
+        share_outputs=False,
         decode_strings=False
     )
     elapsed = (time.perf_counter() - start) * 1000
