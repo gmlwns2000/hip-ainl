@@ -4,8 +4,6 @@ from typing import Literal, Optional
 
 @dataclass
 class ArgsType:
-    processes: int = -1
-
     model: str = 'llama3.1_8b'
     job: str = 'ppl'
     method: str = 'fa2'
@@ -87,7 +85,6 @@ def eval_args(
     parser.add_argument('--dataset', default=ArgsType.dataset, type=str)
     parser.add_argument('--endpoint', default=ArgsType.endpoint, type=str)
     parser.add_argument('--seed', type=int, default=ArgsType.seed)
-    parser.add_argument('--processes', type=int, default=-1)
     args = parser.parse_args()
     print(args)
     return args

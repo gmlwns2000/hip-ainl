@@ -1,6 +1,7 @@
 import copy
 import gc
 import math
+import multiprocessing
 import re
 import threading
 import time
@@ -33,6 +34,11 @@ from hip.dataset.calib_loft_retrieval import (
 )
 from hip import HiPAttentionArgs11
 import matplotlib.pyplot as plt
+
+from hip.main.eval_args import eval_args
+from hip.main.model_eval import load_model
+import hip.utils
+
 
 def load_loft_rag_chat_corpus() -> List[Tuple[str, str]]:
     lines = []
@@ -196,9 +202,8 @@ STORAGE = {}
 
 @torch.inference_mode
 def evaluate_corpus(
-    stream: torch.cuda.Stream, 
-    model: torch.nn.Module, 
-    tokenizer: transformers.LlamaTokenizer, 
+    stream: torch.cuda.Stream,
+    model: torch.nn.Module,
     shared_prompt: torch.Tensor, 
     corpus: List["TextCorpus"],
     evaluate_method: Literal['kd', 'output'] = None
@@ -311,17 +316,17 @@ def evaluate_corpus(
                     state = output.past_key_values
                     logits.append(output.logits.view(-1, output.logits.shape[-1]))
                 # stream.synchronize()
-            
+
             with torch.cuda.stream(stream):
                 logits = torch.cat(logits, dim=0)
-                
+
                 loss_ce = torch.nn.functional.cross_entropy(logits[:-1].to(torch.float32), output_ids[1:])
-                
+
                 # probs = logits[:-1].to(torch.float32).softmax(dim=-1).to(torch.float64)
                 # probs = probs.gather(dim=-1, index=output_ids[1:].unsqueeze(-1))
                 # seq_probs = probs.cumprod(0)[-1]
                 # loss_probs = -torch.log(seq_probs)
-                
+
                 if stream.device_index == 0:
                     # tqdm.tqdm.write(f'{loss_probs.item():.5f} ({seq_probs.item():.5f}), {loss_ce.item():.5f}, {tokenizer.decode(logits[:-1].argmax(dim=-1))}, {tokenizer.decode(output_ids[1:])}')
                     #tqdm.tqdm.write(f'({"Y" if is_correct else "N"}) {loss_ce.item():.5f}, {tokenizer.decode(logits[:-1].argmax(dim=-1))}, {tokenizer.decode(output_ids[1:])}')
@@ -514,8 +519,8 @@ def validate(p, model):
         assert layer_meta['sliding_window_size'] <= 8192
         assert layer_meta['sink_token_size'] >= 4
         assert layer_meta['sink_token_size'] <= 8192
-        assert len(layer) >= 2, 'too small'
-        assert len(layer) <= 7, 'too large'
+        assert len(layer) >= 3, 'too small'
+        assert len(layer) <= 10, 'too large'
         assert layer[0].stage_k == None, 'first quadratic'
         assert layer[-1].stage_chunk_size <= 32, 'too large k'
         assert layer[-1].stage_chunk_size > 0, 'too large k'
@@ -664,12 +669,12 @@ def evaluate_latency_of_candidate(model, p):
     return latency_sum / latency_count
 
 
-def evaluate_population(population, model, tokenizer, evaluate_ds: List[TextDataset]):
+def evaluate_population(args, threads, job_queue, result_queue, population, model):
     torch.cuda.synchronize()
     gc.collect()
     torch.cuda.empty_cache()
 
-    ret = evaluate_population_inner(population, model, tokenizer, evaluate_ds)
+    ret = evaluate_population_inner(args, threads, job_queue, result_queue, population, model)
 
     torch.cuda.synchronize()
     gc.collect()
@@ -678,58 +683,92 @@ def evaluate_population(population, model, tokenizer, evaluate_ds: List[TextData
     return ret
 
 
-def evaluate_population_inner(population, model, tokenizer, evaluate_ds: List[TextDataset]):
+def make_evaluate_ds(args, tokenizer):
+    evaluate_ds = [
+        # TextDataset.from_corpus(
+        #     args, tokenizer,
+        #     load_loft_retrieval_chat_corpus() +
+        #     load_loft_rag_chat_corpus(),
+        # ),
+        # TextDataset.from_corpus(
+        #     args, tokenizer,
+        #     load_loft_rag_chat_corpus(),
+        # ),
+        TextDataset.from_corpus(
+            args, tokenizer,
+            load_infinite_bench_subset('passkey', tokenizer, 131072, 2),
+            eval_method='kd',
+        ),
+        # TextDataset.from_corpus(
+        #     args, tokenizer,
+        #     load_infinite_bench_subset('kv_retrieval', tokenizer, 131072, 50),
+        # ),
+        # TextDataset.from_corpus(
+        #     args, tokenizer,
+        #     load_infinite_bench_subset('longbook_qa_eng', tokenizer, 65536, 50),
+        # ),
+        *[TextDataset.from_corpus(
+            args, tokenizer,
+            load_pos_neg_bench_subset('./saves/output.jsonl', offset, 1),
+            eval_method='output',
+        ) for offset in range(8)]
+    ]
+    return evaluate_ds
+
+
+def thread_main(tid, args, job_queue, result_queue):
+    stream = torch.cuda.Stream(device=f'cuda:{tid}')
+
+    model, tokenizer, device = load_model(args, f'cuda:{tid}')
+    evaluate_ds = make_evaluate_ds(args, tokenizer)
+
+    print('shared prompt size', evaluate_ds)
+
+    job, jid = job_queue.get()
+
+    try:
+        # with lock:
+        #     torch.set_default_device(tid)
+        #     torch.cuda.set_device(tid)
+        tqdm.tqdm.write(f'thread {tid} job {jid}')
+        tqdm.tqdm.write("----------------\njob=")
+        tqdm.tqdm.write(str(job))
+        tqdm.tqdm.write("----------------")
+        with torch.cuda.stream(stream):
+            apply_setting(model, job)
+            ppls = []
+            for ds in evaluate_ds:
+                ppl = evaluate_corpus(stream, model, ds.shared_input_ids, ds.corpus, ds.eval_method)
+                ppls.append(ppl)
+            ppl = sum(ppls) / len(ppls)
+        # stream.synchronize()
+        result_queue.put((jid, ppl))
+    except Exception as ex:
+        print(f'Error in thread {tid} job {jid}:')
+        print("----------------\njob=")
+        print(str(job))
+        print("----------------")
+        torch.cuda.synchronize()
+        gc.collect()
+        torch.cuda.empty_cache()
+        traceback.print_exc()
+        print('thread main failed due to', ex)
+        result_queue.put((jid, 999999999999))
+
+
+def evaluate_population_inner(args, threads, job_queue, result_queue, population, model):
     n_threads = torch.cuda.device_count()
-    jobs = [[(i, p) for i, p in enumerate(population) if (i % n_threads) == tid] for tid in range(n_threads)]
     results = []
-    models = [(torch.cuda.Stream(device=0), model)]
-    for tid in range(1, n_threads):
-        models.append((torch.cuda.Stream(device=tid), copy.deepcopy(model).to(tid)))
 
-    def thread_main(tid, args, jobs):
-        stream, model = args
-        for jid, job in tqdm.tqdm(jobs, position=tid, dynamic_ncols=True, leave=False, desc=f'thread {tid} jobs'):
-            try:
-                # with lock:
-                #     torch.set_default_device(tid)
-                #     torch.cuda.set_device(tid)
-                tqdm.tqdm.write(f'thread {tid} job {jid}')
-                tqdm.tqdm.write("----------------\njob=")
-                tqdm.tqdm.write(str(job))
-                tqdm.tqdm.write("----------------")
-                with torch.cuda.stream(stream):
-                    apply_setting(model, job)
-                    ppls = []
-                    for ds in evaluate_ds:
-                        ppl = evaluate_corpus(stream, model, tokenizer, ds.shared_input_ids, ds.corpus, ds.eval_method)
-                        ppls.append(ppl)
-                    ppl = sum(ppls) / len(ppls)
-                # stream.synchronize()
-                results.append((jid, ppl))
-            except Exception as ex:
-                print(f'Error in thread {tid} job {jid}:')
-                print("----------------\njob=")
-                print(str(job))
-                print("----------------")
-                torch.cuda.synchronize()
-                gc.collect()
-                torch.cuda.empty_cache()
-                traceback.print_exc()
-                print('thread main failed due to', ex)
-                results.append((jid, 999999999999))
+    for tid in range(n_threads):
+        for i, p in enumerate(population):
+            if (i % n_threads) == tid:
+                job_queue.put((p, i))
 
-    torch.cuda.synchronize()
-    threads = [threading.Thread(target=thread_main, args=(tid, models[tid], jobs[tid])) for tid in range(n_threads)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    torch.cuda.synchronize()
-
-    torch.set_default_device(0)
-    torch.cuda.set_device(0)
-
-    ppls = list(map(lambda x: x[1], sorted(results, key=lambda x: x[0])))
+    ppls = [999999999999] * len(population)
+    for _ in range(len(population)):
+        jid, ppl = result_queue.get()
+        ppls[jid] = ppl
 
     latencies = []
     for p in tqdm.tqdm(population, desc='eval latency', leave=False, dynamic_ncols=True):
@@ -741,13 +780,14 @@ def evaluate_population_inner(population, model, tokenizer, evaluate_ds: List[Te
 
 
 @torch.inference_mode
-def job_ga(
-    args, 
-    model, 
-    tokenizer: transformers.LlamaTokenizer,
-    device, 
-):
-    model.eval()
+def job_ga():
+    multiprocessing.set_start_method('spawn')
+    args = eval_args()
+    hip.utils.seed(seed=args.seed)
+    assert args.job in ['ga']
+
+    model, tokenizer, device = load_model(args, 'meta')
+    evaluate_ds = make_evaluate_ds(args, tokenizer)
 
     # seed = [
     #     {
@@ -828,38 +868,6 @@ def job_ga(
     #     tokenizer, corpus
     # )
     
-    evaluate_ds = [
-        # TextDataset.from_corpus(
-        #     args, tokenizer,
-        #     load_loft_retrieval_chat_corpus() +
-        #     load_loft_rag_chat_corpus(),
-        # ),
-        # TextDataset.from_corpus(
-        #     args, tokenizer,
-        #     load_loft_rag_chat_corpus(),
-        # ),
-        TextDataset.from_corpus(
-            args, tokenizer,
-            load_infinite_bench_subset('passkey', tokenizer, 131072, 2),
-            eval_method='kd',
-        ),
-        # TextDataset.from_corpus(
-        #     args, tokenizer,
-        #     load_infinite_bench_subset('kv_retrieval', tokenizer, 131072, 50),
-        # ),
-        # TextDataset.from_corpus(
-        #     args, tokenizer,
-        #     load_infinite_bench_subset('longbook_qa_eng', tokenizer, 65536, 50),
-        # ),
-        *[TextDataset.from_corpus(
-            args, tokenizer,
-            load_pos_neg_bench_subset('./saves/output.jsonl', offset, 1),
-            eval_method='output',
-        ) for offset in range(8)]
-    ]
-    
-    print('shared prompt size', evaluate_ds)
-    
     # run GA
     load_population = os.getenv('LOAD_POPULATION', '0') == '1'
     population = [seed]
@@ -869,8 +877,21 @@ def job_ga(
             for _ in range(10):
                 t = mutate(t, model)
             population.append(t)
+
     print("Evaluating initial population")
-    scores = evaluate_population(population, model, tokenizer, evaluate_ds)
+    n_threads = torch.cuda.device_count()
+
+    job_queue = multiprocessing.Queue()
+    result_queue = multiprocessing.Queue()
+
+    threads = [
+        multiprocessing.Process(target=thread_main, args=(tid, args, job_queue, result_queue))
+        for tid in range(n_threads)
+    ]
+    for t in threads:
+        t.start()
+
+    scores = evaluate_population(args, threads, job_queue, result_queue, population, model)
     seed_score = copy.deepcopy(scores[0])
     seed_latency, seed_loss = seed_score
     print(population[0])
@@ -933,7 +954,7 @@ def job_ga(
             if p2_latency < (seed_latency * 2) and json.dumps(p2, cls=InstanceEncoder) not in existing_population_set:
                 new_populations.append(p2)
                 existing_population_set.add(json.dumps(p2, cls=InstanceEncoder))
-        new_scores = evaluate_population(new_populations, model, tokenizer, evaluate_ds)
+        new_scores = evaluate_population(args, job_queue, result_queue, new_populations, model)
         
         population = population + new_populations
         scores = scores + new_scores
@@ -1045,3 +1066,7 @@ def job_ga(
         torch.cuda.empty_cache()
         
         current_generation += 1
+
+
+if __name__ == '__main__':
+    job_ga()
