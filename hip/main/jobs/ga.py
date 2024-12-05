@@ -750,6 +750,10 @@ def thread_main(tid, args, job_queue, result_queue):
             print("----------------\njob=")
             print(str(job))
             print("----------------")
+            if 'CUDA error' in str(ex):
+                print('CUDA error detected, exiting thread')
+                result_queue.put(('exit', tid, jid))
+                return
             torch.cuda.synchronize()
             gc.collect()
             torch.cuda.empty_cache()
@@ -767,9 +771,21 @@ def evaluate_population_inner(args, threads, job_queues, result_queue, populatio
                 job_queues[tid].put((p, i))
 
     ppls = [999999999999] * len(population)
-    for _ in range(len(population)):
-        jid, ppl = result_queue.get()
-        ppls[jid] = ppl
+    cnt = 0
+    while cnt < len(population):
+        item = result_queue.get()
+        if item[0] == 'exit':
+            exited_tid, exited_jid = item[1], item[2]
+            print("====================================")
+            print("Restarting thread", exited_tid)
+            threads[exited_tid].join()
+            threads[exited_tid] = multiprocessing.Process(target=thread_main, args=(exited_tid, args, job_queues[exited_tid], result_queue))
+            threads[exited_tid].start()
+            job_queues[exited_tid].put((population[exited_jid], exited_jid))
+        else:
+            jid, ppl = item
+            ppls[jid] = ppl
+            cnt += 1
 
     latencies = []
     for p in tqdm.tqdm(population, desc='eval latency', leave=False, dynamic_ncols=True):
@@ -892,13 +908,11 @@ def job_ga():
     for t in threads:
         t.start()
 
-    scores = evaluate_population(args, threads, job_queues, result_queue, population, model)
-    seed_score = copy.deepcopy(scores[0])
+    seed_score, = evaluate_population(args, threads, job_queues, result_queue, [seed], model)
     seed_latency, seed_loss = seed_score
-    print(population[0])
-    print(scores)
-    print('seed', seed_score)
-    
+
+    current_generation = 0
+
     if load_population:
         # {
         #     'generation': current_generation,
@@ -911,6 +925,8 @@ def job_ga():
         with open(checkpoint, 'r') as f:
             state = json.load(f)
         population = state['population']
+        current_generation = state['generation']
+        print("Resuming from generation", current_generation)
         for p in population:
             for l in p:
                 for i in range(len(l['stages'])):
@@ -923,6 +939,11 @@ def job_ga():
                         stage_stride=ss['stage_stride'],
                     )
         scores = state['scores']
+    else:
+        scores = evaluate_population(args, threads, job_queues, result_queue, population, model)
+
+    print(scores)
+    print('seed', seed_score)
 
     run = wandb.init(
         project="hip-ga",
@@ -931,8 +952,7 @@ def job_ga():
             "corpus_setting": f"{evaluate_ds}",
         },
     )
-    
-    current_generation = 0
+
     
     while True:
         new_populations = []
