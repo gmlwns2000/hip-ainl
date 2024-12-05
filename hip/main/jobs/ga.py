@@ -669,12 +669,12 @@ def evaluate_latency_of_candidate(model, p):
     return latency_sum / latency_count
 
 
-def evaluate_population(args, threads, job_queue, result_queue, population, model):
+def evaluate_population(args, threads, job_queues, result_queue, population, model):
     torch.cuda.synchronize()
     gc.collect()
     torch.cuda.empty_cache()
 
-    ret = evaluate_population_inner(args, threads, job_queue, result_queue, population, model)
+    ret = evaluate_population_inner(args, threads, job_queues, result_queue, population, model)
 
     torch.cuda.synchronize()
     gc.collect()
@@ -717,6 +717,9 @@ def make_evaluate_ds(args, tokenizer):
 
 
 def thread_main(tid, args, job_queue, result_queue):
+    hip.utils.seed(seed=args.seed)
+    #torch.set_default_device(tid)
+    torch.cuda.set_device(tid)
     stream = torch.cuda.Stream(device=f'cuda:{tid}')
 
     model, tokenizer, device = load_model(args, f'cuda:{tid}')
@@ -724,46 +727,44 @@ def thread_main(tid, args, job_queue, result_queue):
 
     print('shared prompt size', evaluate_ds)
 
-    job, jid = job_queue.get()
+    while True:
+        job, jid = job_queue.get()
 
-    try:
-        # with lock:
-        #     torch.set_default_device(tid)
-        #     torch.cuda.set_device(tid)
-        tqdm.tqdm.write(f'thread {tid} job {jid}')
-        tqdm.tqdm.write("----------------\njob=")
-        tqdm.tqdm.write(str(job))
-        tqdm.tqdm.write("----------------")
-        with torch.cuda.stream(stream):
-            apply_setting(model, job)
-            ppls = []
-            for ds in evaluate_ds:
-                ppl = evaluate_corpus(stream, model, ds.shared_input_ids, ds.corpus, ds.eval_method)
-                ppls.append(ppl)
-            ppl = sum(ppls) / len(ppls)
-        # stream.synchronize()
-        result_queue.put((jid, ppl))
-    except Exception as ex:
-        print(f'Error in thread {tid} job {jid}:')
-        print("----------------\njob=")
-        print(str(job))
-        print("----------------")
-        torch.cuda.synchronize()
-        gc.collect()
-        torch.cuda.empty_cache()
-        traceback.print_exc()
-        print('thread main failed due to', ex)
-        result_queue.put((jid, 999999999999))
+        try:
+            # with lock:
+            tqdm.tqdm.write(f'thread {tid} job {jid}')
+            tqdm.tqdm.write("----------------\njob=")
+            tqdm.tqdm.write(str(job))
+            tqdm.tqdm.write("----------------")
+            with torch.cuda.stream(stream):
+                apply_setting(model, job)
+                ppls = []
+                for ds in evaluate_ds:
+                    ppl = evaluate_corpus(stream, model, ds.shared_input_ids, ds.corpus, ds.eval_method)
+                    ppls.append(ppl)
+                ppl = sum(ppls) / len(ppls)
+            # stream.synchronize()
+            result_queue.put((jid, ppl))
+        except Exception as ex:
+            print(f'Error in thread {tid} job {jid}:')
+            print("----------------\njob=")
+            print(str(job))
+            print("----------------")
+            torch.cuda.synchronize()
+            gc.collect()
+            torch.cuda.empty_cache()
+            traceback.print_exc()
+            print('thread main failed due to', ex)
+            result_queue.put((jid, 999999999999))
 
 
-def evaluate_population_inner(args, threads, job_queue, result_queue, population, model):
+def evaluate_population_inner(args, threads, job_queues, result_queue, population, model):
     n_threads = torch.cuda.device_count()
-    results = []
 
     for tid in range(n_threads):
         for i, p in enumerate(population):
             if (i % n_threads) == tid:
-                job_queue.put((p, i))
+                job_queues[tid].put((p, i))
 
     ppls = [999999999999] * len(population)
     for _ in range(len(population)):
@@ -881,17 +882,17 @@ def job_ga():
     print("Evaluating initial population")
     n_threads = torch.cuda.device_count()
 
-    job_queue = multiprocessing.Queue()
+    job_queues = [multiprocessing.Queue() for _ in range(n_threads)]
     result_queue = multiprocessing.Queue()
 
     threads = [
-        multiprocessing.Process(target=thread_main, args=(tid, args, job_queue, result_queue))
+        multiprocessing.Process(target=thread_main, args=(tid, args, job_queues[tid], result_queue))
         for tid in range(n_threads)
     ]
     for t in threads:
         t.start()
 
-    scores = evaluate_population(args, threads, job_queue, result_queue, population, model)
+    scores = evaluate_population(args, threads, job_queues, result_queue, population, model)
     seed_score = copy.deepcopy(scores[0])
     seed_latency, seed_loss = seed_score
     print(population[0])
@@ -954,7 +955,7 @@ def job_ga():
             if p2_latency < (seed_latency * 2) and json.dumps(p2, cls=InstanceEncoder) not in existing_population_set:
                 new_populations.append(p2)
                 existing_population_set.add(json.dumps(p2, cls=InstanceEncoder))
-        new_scores = evaluate_population(args, job_queue, result_queue, new_populations, model)
+        new_scores = evaluate_population(args, threads, job_queues, result_queue, new_populations, model)
         
         population = population + new_populations
         scores = scores + new_scores
