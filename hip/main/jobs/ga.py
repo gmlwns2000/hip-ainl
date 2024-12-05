@@ -750,7 +750,7 @@ def thread_main(tid, args, job_queue, result_queue):
             print("----------------\njob=")
             print(str(job))
             print("----------------")
-            if 'CUDA error' in str(ex):
+            if 'CUDA error' in str(ex) or 'CUDA out of memory' in str(ex):
                 print('CUDA error detected, exiting thread')
                 result_queue.put(('exit', tid, jid))
                 return
