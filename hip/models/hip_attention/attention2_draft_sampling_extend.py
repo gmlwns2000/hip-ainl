@@ -3,6 +3,7 @@ from dataclasses import dataclass, asdict
 import math
 import os
 import time
+import cv2
 
 from matplotlib import pyplot as plt
 from hip.models.hip_attention.attention2_draft_prefetch import (
@@ -1254,6 +1255,302 @@ def calculate_chunk_score(
                 mask=mask_chunk,
             )
 
+@triton.jit
+def compute_v_cos(
+    V,
+    stride_v_bsz,
+    stride_v_tsrc,
+    stride_v_head_kv,
+    stride_v_hid,
+    INDICES, 
+    stride_indices_bsz, 
+    stride_indices_bdst, 
+    stride_indices_head, 
+    strdie_indices_k,
+    POS,
+    stride_pos_bsz,
+    stride_pos_tdst,
+    
+    OUT_SCORES,
+    stride_out_scores_bsz,
+    stride_out_scores_bdst, 
+    stride_out_scores_head,
+    stride_out_scores_k,
+    
+    # paged attention args template
+    USING_PAGES: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    K_CACHE, 
+    stride_k_cache_page, 
+    stride_k_cache_offset, 
+    stride_k_cache_kv_head, 
+    stride_k_cache_hid,
+    V_CACHE,
+    stride_v_cache_page, 
+    stride_v_cache_offset, 
+    stride_v_cache_kv_head, 
+    stride_v_cache_hid,
+    BLOCK_TABLE,
+    stride_block_table_bsz,
+    stride_block_table_page,
+    CACHE_SEQ_LENS,
+    stride_cache_seq_lens_b,
+    
+    # offload cache args template
+    USING_OFFLOAD_CACHE: tl.constexpr,
+    OFFLOAD_CACHE_METHOD: tl.constexpr,
+    OFFLOAD_CACHE_BUDGET: tl.constexpr,
+    OFFLOAD_CACHE_KV_HEAD: tl.constexpr,
+    OFFLOAD_CACHE_K_TABLES,
+    stride_offload_cache_k_tables_n,
+    stride_offload_cache_k_tables_t,
+    OFFLOAD_CACHE_K_BANKS,
+    stride_offload_cache_k_banks_n,
+    stride_offload_cache_k_banks_page,
+    stride_offload_cache_k_banks_offset,
+    stride_offload_cache_k_banks_hid,
+    OFFLOAD_CACHE_K_BANK_STATS,
+    stride_offload_cache_k_bank_stats_n,
+    stride_offload_cache_k_bank_stats_page,
+    stride_offload_cache_k_bank_stats_k,
+    OFFLOAD_CACHE_COUNTERS,
+    stride_offload_cache_counters_n,
+    stride_offload_cache_counters_k,
+    
+    TDST,
+    TSRC,
+    HEAD,
+    KS,
+    
+    HEAD_GROUP: tl.constexpr,
+    GROUP_K: tl.constexpr,
+    BLOCK_SIZE_Q: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    BLOCK_STRIDE_Q: tl.constexpr,
+    BLOCK_STRIDE_K: tl.constexpr,
+    BLOCK_HID: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    
+    idx_head = pid % HEAD
+    pid = pid // HEAD
+    
+    idx_bk = pid % tl.cdiv(KS, GROUP_K)
+    idx_k = idx_bk * GROUP_K + tl.arange(0, GROUP_K)
+    mask_k = idx_k < KS
+    pid = pid // tl.cdiv(KS, GROUP_K)
+    
+    idx_bdst = pid % tl.cdiv(TDST, BLOCK_SIZE_Q)
+    idx_tdst = idx_bdst * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q // BLOCK_STRIDE_Q) * BLOCK_STRIDE_Q
+    mask_tdst = idx_tdst < TDST
+    idx_bsz = pid // tl.cdiv(TDST, BLOCK_SIZE_Q)
+    
+    idx_hid = tl.arange(0, BLOCK_HID)
+    
+    pos_tdst = tl.load(
+        POS + \
+            idx_bsz * stride_pos_bsz +\
+            idx_tdst * stride_pos_tdst,
+        mask=mask_tdst,
+        other=0,
+    )
+    mask_tdst = mask_tdst & (pos_tdst < TSRC)
+    seq_len = tl.max(pos_tdst)# + 1
+    
+    indices = tl.load(
+        INDICES +\
+            idx_bsz * stride_indices_bsz +\
+            idx_bdst * stride_indices_bdst +\
+            idx_head * stride_indices_head +\
+            idx_k * strdie_indices_k,
+        mask=mask_k,
+        other=seq_len + 2 * BLOCK_SIZE_K,
+    )
+    indices = indices // BLOCK_SIZE_K * BLOCK_SIZE_K
+    
+    idx_tsrc = tl.ravel(indices[:, None] + tl.arange(0, BLOCK_SIZE_K)[None, :])
+    mask_tsrc = (idx_tsrc < seq_len) & (idx_tsrc >= 0)
+    
+    # values_tdst = tl.load(
+    #     V +\
+    #         idx_bsz * stride_v_bsz+\
+    #         idx_tdst[:, None] * stride_v_tsrc+\
+    #         (idx_head // HEAD_GROUP) * stride_v_head_kv +\
+    #         idx_hid[None, :] * strdie_v_hid,
+    #     mask=mask_tdst[:, None],
+    #     other=0,
+    # )
+    
+    tl.static_assert(not USING_OFFLOAD_CACHE)
+    values_tdst = load_tokens(
+        V, 
+        stride_v_bsz,
+        stride_v_tsrc,
+        stride_v_head_kv,
+        stride_v_hid,
+        
+        USING_PAGES,
+        PAGE_SIZE,
+        V_CACHE,
+        stride_v_cache_page,
+        stride_v_cache_offset,
+        stride_v_cache_kv_head,
+        stride_v_cache_hid,
+        BLOCK_TABLE,
+        stride_block_table_bsz,
+        stride_block_table_page,
+        CACHE_SEQ_LENS,
+        stride_cache_seq_lens_b,
+        
+        USING_OFFLOAD_CACHE,
+        OFFLOAD_CACHE_METHOD,
+        OFFLOAD_CACHE_BUDGET,
+        OFFLOAD_CACHE_KV_HEAD,
+        True,
+        OFFLOAD_CACHE_K_TABLES,
+        stride_offload_cache_k_tables_n,
+        stride_offload_cache_k_tables_t,
+        OFFLOAD_CACHE_K_BANKS,
+        stride_offload_cache_k_banks_n,
+        stride_offload_cache_k_banks_page,
+        stride_offload_cache_k_banks_offset,
+        stride_offload_cache_k_banks_hid,
+        OFFLOAD_CACHE_K_BANK_STATS,
+        stride_offload_cache_k_bank_stats_n,
+        stride_offload_cache_k_bank_stats_page,
+        stride_offload_cache_k_bank_stats_k,
+        OFFLOAD_CACHE_COUNTERS,
+        stride_offload_cache_counters_n,
+        stride_offload_cache_counters_k,
+        
+        idx_bsz,
+        pos_tdst[:, None],
+        idx_head // HEAD_GROUP,
+        idx_hid[None, :],
+        
+        mask_tdst[:, None],
+        
+        BLOCK_SIZE_Q // BLOCK_STRIDE_Q,
+    ).to(tl.bfloat16)
+    
+    # values_tdst = (
+    #     tl.sum(values_tdst, axis=0) /\
+    #     tl.sum(mask_tdst.to(tl.int32))
+    # )
+    
+    # values_tsrc = tl.load(
+    #     V +\
+    #         idx_bsz * stride_v_bsz +\
+    #         idx_tsrc[:, None] * stride_v_tsrc +\
+    #         (idx_head // HEAD_GROUP) * stride_v_head_kv +\
+    #         idx_hid[None, :] * strdie_v_hid,
+    #     mask=mask_tsrc[:, None],
+    #     other=0,
+    # )
+    
+    values_tsrc = load_tokens(
+        V, 
+        stride_v_bsz,
+        stride_v_tsrc,
+        stride_v_head_kv,
+        stride_v_hid,
+        
+        USING_PAGES,
+        PAGE_SIZE,
+        V_CACHE,
+        stride_v_cache_page,
+        stride_v_cache_offset,
+        stride_v_cache_kv_head,
+        stride_v_cache_hid,
+        BLOCK_TABLE,
+        stride_block_table_bsz,
+        stride_block_table_page,
+        CACHE_SEQ_LENS,
+        stride_cache_seq_lens_b,
+        
+        USING_OFFLOAD_CACHE,
+        OFFLOAD_CACHE_METHOD,
+        OFFLOAD_CACHE_BUDGET,
+        OFFLOAD_CACHE_KV_HEAD,
+        True,
+        OFFLOAD_CACHE_K_TABLES,
+        stride_offload_cache_k_tables_n,
+        stride_offload_cache_k_tables_t,
+        OFFLOAD_CACHE_K_BANKS,
+        stride_offload_cache_k_banks_n,
+        stride_offload_cache_k_banks_page,
+        stride_offload_cache_k_banks_offset,
+        stride_offload_cache_k_banks_hid,
+        OFFLOAD_CACHE_K_BANK_STATS,
+        stride_offload_cache_k_bank_stats_n,
+        stride_offload_cache_k_bank_stats_page,
+        stride_offload_cache_k_bank_stats_k,
+        OFFLOAD_CACHE_COUNTERS,
+        stride_offload_cache_counters_n,
+        stride_offload_cache_counters_k,
+        
+        idx_bsz,
+        idx_tsrc[:, None],
+        idx_head // HEAD_GROUP,
+        idx_hid[None, :],
+        
+        mask_tsrc[:, None],
+        
+        GROUP_K * BLOCK_SIZE_K,
+    ).to(tl.bfloat16)
+
+    # values_tsrc = (
+    #     tl.sum(tl.reshape(values_tsrc, [GROUP_K, BLOCK_SIZE_K, BLOCK_HID]), axis=1) /\
+    #     tl.sum(tl.reshape(mask_tsrc.to(tl.int32), [GROUP_K, BLOCK_SIZE_K, 1]), axis=1)
+    # )
+    
+    values_tdst_norm = tl.sqrt(tl.sum(values_tdst.to(tl.float32) * values_tdst.to(tl.float32), axis=-1))
+    values_tsrc_norm = tl.sqrt(tl.sum(values_tsrc.to(tl.float32) * values_tsrc.to(tl.float32), axis=-1))
+    
+    normalized_values_tdst = values_tdst
+    normalized_values_tsrc = values_tsrc
+    # normalized_values_tdst = values_tdst / tl.maximum(values_tdst_norm[:, None], 1e-20)
+    # normalized_values_tsrc = values_tsrc / tl.maximum(values_tsrc_norm[:, None], 1e-20)
+    
+    # - 
+    # cos_sim_scores = tl.sum(normalized_values_tdst[None, :] * normalized_values_tsrc, axis=-1)
+    cos_sim_scores = tl.dot(normalized_values_tdst, tl.trans(normalized_values_tsrc, 1, 0))
+    # cos_sim_scores = ((cos_sim_scores + 1) * 0.5).to(tl.float32)
+    cos_sim_scores = cos_sim_scores# * cos_sim_scores * cos_sim_scores
+    
+    scores = tl.reshape(cos_sim_scores, (BLOCK_SIZE_Q // BLOCK_STRIDE_Q, GROUP_K, BLOCK_SIZE_K))
+    # scores = tl.reshape(values_tsrc_norm, (GROUP_K, BLOCK_SIZE_K))
+    mask_scores = tl.reshape(mask_tdst[:, None] & mask_tsrc[None, :], (BLOCK_SIZE_Q // BLOCK_STRIDE_Q, GROUP_K, BLOCK_SIZE_K))
+    scores = scores * mask_scores
+    
+    # reduce-mean
+    mask_scores = tl.sum(mask_scores.to(scores.dtype), axis=-1)
+    scores = tl.sum(scores, axis=-1)
+    mask_scores = tl.sum(mask_scores.to(scores.dtype), axis=0)
+    scores = tl.sum(scores, axis=0) / tl.maximum(mask_scores, 1e-20)
+    # - 
+
+    # scores = tl.sum(values_tdst[None, :] * values_tsrc, axis=1)
+    
+    # reduce max
+    # scores = tl.max(tl.max(scores, axis=-1), axis=0)
+
+    # norm reduce-mean
+    # scores = tl.reshape(values_tsrc_norm, (GROUP_K, BLOCK_SIZE_K))
+    # scores = tl.sum(scores, axis=-1) / tl.maximum(tl.sum(tl.reshape(mask_tsrc, (GROUP_K, BLOCK_SIZE_K)), axis=-1), 1e-20)
+
+    # scores = tl.sum(values_tdst[None, :] * values_tsrc)
+    
+    tl.store(
+        OUT_SCORES +\
+            idx_bsz * stride_out_scores_bsz +\
+            idx_bdst * stride_out_scores_bdst +\
+            idx_head * stride_out_scores_head +\
+            idx_k * stride_out_scores_k,
+        value=scores,
+        mask=mask_k,
+    )
+
 def dual_stage_quadratic_hip_attention(
     q: Tensor, 
     k: Optional[Tensor], 
@@ -1291,7 +1588,7 @@ def dual_stage_quadratic_hip_attention(
     sa_extend_backend: str = 'streaming',
     low_percent: float = 0.0,
     low_k_ratio: float = 1.0,
-    dim_to_lower: Literal['head', 'seq'] = 1,
+    dim_to_lower: Literal['head', 'seq'] = 'head',
     cached_metadata: Optional[HiPAttentionOutputMetadata] = None,
     q_mask: Optional[torch.Tensor] = None,
     k_mask: Optional[torch.Tensor] = None,
@@ -1360,7 +1657,7 @@ def dual_stage_quadratic_hip_attention(
         out_scores = torch.full(
             (BSZ, BDST_SCAN, HEAD, triton.next_power_of_2(chunk_count)), 
             device=q.device,
-            dtype=q.dtype,
+            dtype=torch.float32,
             fill_value=-32000.0
         )
         
@@ -1700,6 +1997,71 @@ def dual_stage_quadratic_hip_attention(
             torch.cuda.set_device(pre_device)
 
             if stage_info.require_post_sort:
+                apply_v_dot = (os.getenv('APPLY_V_DOT', '0') == '1')
+                # apply_v_dot = apply_v_dot and (i_stage == (len(stages) - 1))
+                apply_v_dot = apply_v_dot and (i_stage != 0)
+                if apply_v_dot:
+                    v_scores = torch.zeros_like(out_scores, dtype=torch.float32)
+                    V_BLOCK_SIZE_K = 8
+                    V_BLOCK_STRIDE_Q = 1
+                    V_BLOCK_STRIDE_K = 1
+                    V_GROUP_K = 64 // V_BLOCK_SIZE_K
+                    # V_GROUP_K = indices_left.shape[3]
+                    grid = (
+                        v_scores.shape[0] *\
+                        v_scores.shape[1] *\
+                        v_scores.shape[2] *\
+                        triton.cdiv(indices_left.shape[3], V_GROUP_K),
+                    )
+                    compute_v_cos[grid](
+                        v, *args.safe_stride(v, 4),
+                        indices_left, *indices_left.stride(),
+                        position_ids, *position_ids.stride(),
+                        
+                        v_scores, *v_scores.stride(),
+                        
+                        *args.args_paged_kv_cache(),
+                        *args.args_offload_cache(is_masking=True),
+                        
+                        TDST,
+                        MAX_TSRC,
+                        HEAD,
+                        indices_left.shape[3],
+                        
+                        HEAD_GROUP=HEAD // HEAD_KV,
+                        GROUP_K=V_GROUP_K,
+                        BLOCK_SIZE_Q=BLOCK_SIZE_Q,
+                        BLOCK_SIZE_K=V_BLOCK_SIZE_K,
+                        BLOCK_STRIDE_Q=V_BLOCK_STRIDE_Q,
+                        BLOCK_STRIDE_K=V_BLOCK_STRIDE_K,
+                        BLOCK_HID=q.shape[-1],
+                    )
+                    
+                    if out_scores.dtype != torch.float32:
+                        out_scores = out_scores.to(torch.float32)
+                    out_scores = out_scores - out_scores.min(dim=-1, keepdim=True).values
+
+                    # print(indices_left[0, -1, DEBUG_HEAD, :])
+                    # print(out_scores[0, -1, DEBUG_HEAD, :])
+                    # print(v_scores[0, -1, DEBUG_HEAD, :])
+                    
+                    if DEBUG and DEBUG_RENDER:
+                        img = v_scores[0, :, DEBUG_HEAD, :].cpu().float().numpy()
+                        plt.clf()
+                        plt.imshow(img)
+                        plt.colorbar()
+                        plt.savefig('dummy_v_scores.png')
+                    
+                    # out_scores = torch.where(
+                    #     torch.isnan(v_scores),
+                    #     out_scores,
+                    #     out_scores * v_scores
+                    # )
+
+                    # out_scores = out_scores * v_scores
+
+                    out_scores = out_scores + v_scores * 0.8
+                
                 if (i_stage < (len(stages) - 1)):
                     # print(indices_left.shape, (stages[i_stage + 1].stage_k // stages[i_stage + 1].stage_chunk_size))
                     next_stage_k = (stages[i_stage + 1].stage_k // stages[i_stage].stage_chunk_size)
@@ -1866,6 +2228,30 @@ def dual_stage_quadratic_hip_attention(
         ks_start_end = cached_metadata.ks_start_end
     
     args.block_size_q = min(args.block_size_q, triton.next_power_of_2(TDST))
+    
+    # if DEBUG and DEBUG_RENDER and not torch.cuda.is_current_stream_capturing() and (BDST > 10):
+    #     # test_v = v[0, :, :, :] # type: torch.Tensor
+    #     # test_v = test_v.square().sum(dim=-1).sqrt().sum(dim=-1)
+    #     # test_v = torch.nn.functional.avg_pool1d(test_v.unsqueeze(0), 11, padding=5).squeeze(0)
+    #     # test_v = test_v.cpu().float().numpy().tolist()
+    #     # plt.figure(figsize=(100, 3))
+    #     # plt.plot(test_v, linewidth=0.5)
+    #     # plt.savefig('dummy_v_norm.png', bbox_inches='tight', pad_inches=0)
+        
+    #     # plt.figure(figsize=(64,1))
+    #     # plt.clf()
+    #     # test_v = v[0, ::1, DEBUG_HEAD, :].to(torch.float32)
+    #     # test_v = test_v / (test_v.square().sum(-1, keepdim=True).sqrt())
+    #     # test_v = -(test_v[-128:, :] @ test_v.T - 1)
+    #     # test_v = test_v.to(torch.float32).cpu().numpy()
+    #     # hm = cv2.normalize(test_v, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+    #     # hm = cv2.applyColorMap(hm, cv2.COLORMAP_HOT)
+    #     # cv2.imwrite("dummy_v_matrix.png", hm)
+    #     # plt.figure(figsize=(4,3))
+        
+    #     # plt.imshow(test_v, interpolation='nearest')
+    #     # plt.axis('off')
+    #     # plt.savefig('dummy_v_matrix.png', dpi=1000, bbox_inches='tight', pad_inches=0)
     
     context = block_sparse_attention(
         q=q, 
@@ -2039,7 +2425,7 @@ def main_debug():
             ScanStage(
                 stage_block_size_q=64,
                 stage_block_stride_q=1,
-                stage_chunk_size=8,
+                stage_chunk_size=16,
                 stage_k=8192,
                 stage_stride=1,
             ),

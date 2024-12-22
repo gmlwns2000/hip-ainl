@@ -462,6 +462,7 @@ def custom_attention(
                     block_sparse_block_size_q=block_size,
                     model_context_length=model_context_length,
                     scan_extend_backend='streaming' if layer_idx < 3 else 'relative',
+                    # scan_extend_backend='relative',
                     sa_extend_backend='streaming' if extend_stages is None else extend_stages['sa_extend_backend'],
                     stage_early_terminate=k_group_size,
                     mask_only=mask_only,
