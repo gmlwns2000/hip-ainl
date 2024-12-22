@@ -806,38 +806,6 @@ def job_ga():
     model, tokenizer, device = load_model(args, 'meta')
     evaluate_ds = make_evaluate_ds(args, tokenizer)
 
-    # seed = [
-    #     {
-    #         'second_stage_k': 2048,
-    #         'sliding_window_size': 1024,
-    #         'sink_token_size': 256,
-    #         'sa_extend_backend': 'streaming',
-    #         'stages': [
-    #             ScanStage(
-    #                 stage_block_size_q=64,
-    #                 stage_block_stride_q=4,
-    #                 stage_chunk_size=256,
-    #                 stage_k=None,
-    #                 stage_stride=1,
-    #             ),
-    #             ScanStage(
-    #                 stage_block_size_q=64,
-    #                 stage_block_stride_q=4,
-    #                 stage_chunk_size=32,
-    #                 stage_k=32768,
-    #                 stage_stride=1,
-    #             ),
-    #             ScanStage(
-    #                 stage_block_size_q=64,
-    #                 stage_block_stride_q=1,
-    #                 stage_chunk_size=8,
-    #                 stage_k=8192,
-    #                 stage_stride=1,
-    #             ),
-    #         ]
-    #     } for _ in range(model.config.num_hidden_layers)
-    # ]
-
     seed = [
         {
             'second_stage_k': 2048,
@@ -867,8 +835,40 @@ def job_ga():
                     stage_stride=1,
                 ),
             ]
-        } for _ in range(2)
+        } for _ in range(model.config.num_hidden_layers)
     ]
+
+    #seed = [
+    #    {
+    #        'second_stage_k': 2048,
+    #        'sliding_window_size': 1024,
+    #        'sink_token_size': 256,
+    #        'sa_extend_backend': 'streaming',
+    #        'stages': [
+    #            ScanStage(
+    #                stage_block_size_q=64,
+    #                stage_block_stride_q=4,
+    #                stage_chunk_size=256,
+    #                stage_k=None,
+    #                stage_stride=1,
+    #            ),
+    #            ScanStage(
+    #                stage_block_size_q=64,
+    #                stage_block_stride_q=4,
+    #                stage_chunk_size=32,
+    #                stage_k=32768,
+    #                stage_stride=1,
+    #            ),
+    #            ScanStage(
+    #                stage_block_size_q=64,
+    #                stage_block_stride_q=1,
+    #                stage_chunk_size=8,
+    #                stage_k=8192,
+    #                stage_stride=1,
+    #            ),
+    #        ]
+    #    } for _ in range(2)
+    #]
 
     # settings
     num_population = 25
@@ -925,7 +925,7 @@ def job_ga():
         with open(checkpoint, 'r') as f:
             state = json.load(f)
         population = state['population']
-        current_generation = state['generation']
+        current_generation = state['generation'] + 1
         print("Resuming from generation", current_generation)
         for p in population:
             for l in p:
@@ -942,9 +942,6 @@ def job_ga():
     else:
         scores = evaluate_population(args, threads, job_queues, result_queue, population, model)
 
-    print(scores)
-    print('seed', seed_score)
-
     run = wandb.init(
         project="hip-ga",
         config={
@@ -953,6 +950,8 @@ def job_ga():
         },
     )
 
+    print(scores)
+    print('seed', seed_score)
     
     while True:
         new_populations = []
@@ -1042,7 +1041,10 @@ def job_ga():
             'best_idx': best_idx,
             'best_candidate': population[best_idx],
             'scores': scores, 
-            'population': population, 
+            'population': population,
+            'seed': seed,
+            'seed_score': seed_score,
+            'seed_latency': seed_latency,
         }
         
         class EnhancedJSONEncoder(json.JSONEncoder):
