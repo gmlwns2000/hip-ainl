@@ -2030,7 +2030,7 @@ def dual_stage_quadratic_hip_attention(
         
         assert cached_metadata is not None
         indices = cached_metadata.indices
-        ks = cached_metadata.indices
+        ks = cached_metadata.ks
         ks_count = cached_metadata.ks_count
         ks_start_end = cached_metadata.ks_start_end
     
