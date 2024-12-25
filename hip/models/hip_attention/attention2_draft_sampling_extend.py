@@ -1621,14 +1621,7 @@ def dual_stage_quadratic_hip_attention(
         MAX_TSRC = TSRC
     else:
         MAX_TSRC = args.k_cache.shape[0] * args.k_cache.shape[1]
-<<<<<<< HEAD
         MAX_TSRC = extend_context_length
-        if 'EXTEND_LEN' in os.environ:
-            MAX_TSRC = int(os.environ['EXTEND_LEN']) * 1024
-=======
-        # MAX_TSRC = int(os.getenv('EXTEND_LEN', '128')) * 1024
-        MAX_TSRC = extend_context_length
->>>>>>> e6092d87cfb843683f3707e89adffc2a111999f7
         HEAD_KV = args.k_cache.shape[-2]
         TSRC = MAX_TSRC
         # print('asdf', args.k_cache.shape, MAX_TSRC, HEAD_KV, q.shape)
