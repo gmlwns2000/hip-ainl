@@ -15,14 +15,19 @@ ops = load(
     ],
 )
 
-def tensor_from_pointer(ptr: int, shape: Tuple[int], dtype: torch.dtype, device_index):
+def tensor_from_pointer(
+    ptr: int, 
+    shape: Tuple[int], 
+    dtype: torch.dtype, 
+    device_index: int
+) -> torch.Tensor:
     if dtype == torch.float16:
         elem_size = 16
     elif dtype == torch.bfloat16:
         elem_size = 16
     elif dtype == torch.float32:
         elem_size = 32
-    elif dtype == torch.uint8:
+    elif dtype in [torch.uint8, torch.float8_e5m2]:
         elem_size = 8
     else:
         raise NotImplementedError()
