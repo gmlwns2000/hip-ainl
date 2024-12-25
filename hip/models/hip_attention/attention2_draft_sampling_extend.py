@@ -1574,6 +1574,7 @@ def dual_stage_quadratic_hip_attention(
         ),
     ],
     model_context_length = 131072,
+    extend_context_length=192*1024,
     
     # kernel args,
     mask_only = False,
@@ -1612,7 +1613,9 @@ def dual_stage_quadratic_hip_attention(
         MAX_TSRC = TSRC
     else:
         MAX_TSRC = args.k_cache.shape[0] * args.k_cache.shape[1]
-        MAX_TSRC = int(os.getenv('EXTEND_LEN', '128')) * 1024
+        MAX_TSRC = extend_context_length
+        if 'EXTEND_LEN' in os.environ:
+            MAX_TSRC = int(os.environ['EXTEND_LEN']) * 1024
         HEAD_KV = args.k_cache.shape[-2]
         TSRC = MAX_TSRC
         # print('asdf', args.k_cache.shape, MAX_TSRC, HEAD_KV, q.shape)
@@ -1862,6 +1865,8 @@ def dual_stage_quadratic_hip_attention(
                     triton.cdiv(triton.cdiv(TDST, BLOCK_SIZE_Q), STAGE_STRIDE) *\
                     HEAD,
                 )
+                #print("q mask", q_mask)
+                #print("before indices_left", indices_left)
                 chunk_controllable_sampling_mask_cuda[grid](
                     q_mask, *q_mask.stride(),
                     k_mask, *args.safe_stride(k_mask, 4),
@@ -1896,6 +1901,7 @@ def dual_stage_quadratic_hip_attention(
                     TERMINATE_SIZE=stage_early_terminate,
                     SCAN_STRIDE=STAGE_STRIDE,
                 )
+                #print("indices_left", indices_left)
                 
                 # if stage_require_recalculate_score:
                 #     assert STAGE_STRIDE == 1
