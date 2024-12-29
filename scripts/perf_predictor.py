@@ -8,6 +8,8 @@ import random
 
 def predict_perf(configuration, incomplete_evals, task):
     if task == '':
+        pass
+    
     @function
     def predict(s):
         s += system(f"You are a performance estimator for machine translation task, where you will estimate the BLEU score for the test architecture.")

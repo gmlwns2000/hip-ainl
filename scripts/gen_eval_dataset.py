@@ -79,9 +79,10 @@ def main():
         # Launch SGLang server
         print("Launching SGLang server...")
         print('\n' * 2)
-        sglang_process = run_sglang_server(temp_setting_filename.resolve())
+        sglang_process = run_sglang_server(json.dumps({'layers': cur_setting}))
 
         for line in sglang_process.stderr:
+            print(line.decode("utf-8"), end="")
             if "The server is fired up and ready to roll" in line.decode("utf-8"):
                 break
 
@@ -134,7 +135,7 @@ def main():
                 "setting": cur_setting,
                 "results": [
                     {
-                        "task": "rag",
+                        "task": "ret",
                         "result": ret_result,
                     },
                 ],
@@ -374,7 +375,7 @@ def run_infinibench(run_name, task):
         return None
 
 
-def run_sglang_server(population_file):
+def run_sglang_server(hip_config_json):
     return subprocess.Popen(
         [
             str(Path(sys.executable).resolve()),
@@ -395,29 +396,19 @@ def run_sglang_server(population_file):
             "--stream-interval",
             "1",
             "--context-length",
-            "1200000",
+            "196608",
             "--port",
             "33330",
-            "--enable-p2p-check",
-            "--efficient-weight-load"
+            "--disable-cuda-graph",
+            "--enable-hip-attention",
+            "--hip-attention-config",
+            hip_config_json,
         ],
         env=os.environ | {
-            "POPULATION_FILE": population_file,
             "SA_BLOCK_SIZE": "64",
-            "HIP_PRESET": "mid",
-            "HIP_DEBUG_RENDER": "1",
-            "HIP_EXTEND_CONTEXT_LENGTH": "131072",
-            "DEBUG_NAN": "0",
-            "HIP_REFRESH_INTERVAL": "4",
-            "SRT_DEBUG_DECODE_SPECIAL_TOKENS": "1",
-            "HIP_DEBUG": "0",
-            "EXTEND_LEN": "192",
-            "HIP_EXTEND": "1",
+            "SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN": "1",
             "HIP_DISABLE_AUTOTUNE": "1",
-            "SRT_ATTENTION_BACKEND": "HIP_ATTN",
-            "SRT_MAX_BATCH": "-1",
         },
-        #stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
 
