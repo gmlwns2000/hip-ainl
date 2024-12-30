@@ -96,6 +96,30 @@ def main():
         print("Starting evaluation...")
 
         # Run evaluation
+        run_ib = os.environ.get("RUN_IB", "1") == "1"
+        if run_ib:
+            for task in ["choice", "qa", "sum"]:
+                ib_result = run_infinibench(f"eval_{run_id}", f"longbook_{task}_eng")
+                print(f"Infinibench evaluation result for {task}:", ib_result)
+
+                ib_result_table = wandb.Table(columns=["setting", f"{task}_results"])
+                ib_result_table.add_data(json.dumps(cur_setting), ib_result)
+                wandb.log({
+                    f"ib_{task}_result": ib_result_table,
+                }, step=run_idx, commit=True)
+
+                metadata.append({
+                    "run_id": run_id,
+                    "setting": cur_setting,
+                    "results": [
+                        {
+                            "task": f"infinibench_{task}",
+                            "result": ib_result,
+                        },
+                    ],
+                })
+                write_metadata(metadata, metadata_json, run_id)
+
         run_rag = os.environ.get("RUN_RAG", "1") == "1"
         if run_rag:
             rag_result = run_rag_evaluation(f"eval_{run_id}")
@@ -141,30 +165,6 @@ def main():
                 ],
             })
             write_metadata(metadata, metadata_json, run_id)
-
-        run_ib = os.environ.get("RUN_IB", "1") == "1"
-        if run_ib:
-            for task in ["choice", "qa", "sum"]:
-                ib_result = run_infinibench(f"eval_{run_id}", f"longbook_{task}_eng")
-                print(f"Infinibench evaluation result for {task}:", ib_result)
-
-                ib_result_table = wandb.Table(columns=["setting", f"{task}_results"])
-                ib_result_table.add_data(json.dumps(cur_setting), ib_result)
-                wandb.log({
-                    f"ib_{task}_result": ib_result_table,
-                }, step=run_idx, commit=True)
-
-                metadata.append({
-                    "run_id": run_id,
-                    "setting": cur_setting,
-                    "results": [
-                        {
-                            "task": f"infinibench_{task}",
-                            "result": ib_result,
-                        },
-                    ],
-                })
-                write_metadata(metadata, metadata_json, run_id)
 
         os.kill(sglang_process.pid, signal.SIGINT)
         print("SGLang server terminated")
@@ -386,7 +386,7 @@ def run_sglang_server(hip_config_json):
             "--kv-cache-dtype",
             "auto",
             "--mem-fraction-static",
-            "0.6",
+            "0.4",
             "--tp-size",
             f"{torch.cuda.device_count()}",
             "--chunked-prefill-size",
