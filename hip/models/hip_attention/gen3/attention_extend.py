@@ -686,6 +686,7 @@ def chunk_controllable_sampling_mask_cuda(
             stride_mask_access_counter_bsz,
             stride_mask_access_counter_head_kv,
             stride_mask_access_counter_tsrc,
+            
             MASK_CACHE_MISS_COUNTER,
             stride_mask_cache_miss_counter_bsz,
             stride_mask_cache_miss_counter_head_kv,
@@ -1594,10 +1595,10 @@ def dual_stage_quadratic_hip_attention(
     else:
         MAX_PAGE = MAX_TSRC
     
-    mask_access_counter = torch.zeros((BSZ, HEAD_KV, MAX_PAGE), dtype=torch.uint32, device=q.device)
-    mask_cache_miss_counter = torch.zeros((BSZ, HEAD_KV, MAX_PAGE), dtype=torch.uint32, device=q.device)
-    sa_access_counter = torch.zeros((BSZ, HEAD_KV, MAX_PAGE), dtype=torch.uint32, device=q.device)
-    sa_cache_miss_counter = torch.zeros((BSZ, HEAD_KV, MAX_PAGE), dtype=torch.uint32, device=q.device)
+    mask_access_counter = torch.zeros((BSZ, HEAD_KV, MAX_PAGE), dtype=torch.int32, device=q.device)
+    mask_cache_miss_counter = torch.zeros((BSZ, HEAD_KV, MAX_PAGE), dtype=torch.int32, device=q.device)
+    sa_access_counter = torch.zeros((BSZ, HEAD_KV, MAX_PAGE), dtype=torch.int32, device=q.device)
+    sa_cache_miss_counter = torch.zeros((BSZ, HEAD_KV, MAX_PAGE), dtype=torch.int32, device=q.device)
     
     if cached_metadata is None:
         indices_left = torch.zeros(
@@ -2066,10 +2067,10 @@ def dual_stage_quadratic_hip_attention(
         mask_cache_statistics=HiPAttentionCacheAccessStatistics(
             access_counter=mask_access_counter,
             cache_miss_counter=mask_cache_miss_counter,
-        ),
+        ) if (cached_metadata is None) else None,
         sa_cache_statistics=HiPAttentionCacheAccessStatistics(
             access_counter=sa_access_counter,
-            cache_miss_counter=sa_access_counter,
+            cache_miss_counter=sa_cache_miss_counter,
         )
     )
 
