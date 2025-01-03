@@ -1,7 +1,8 @@
 import copy
 from dataclasses import dataclass, field
 from torch import Tensor
-from typing import Dict, Literal, Optional, List, TYPE_CHECKING
+from typing import Dict, Literal, Optional, List, TYPE_CHECKING, Callable
+
 if TYPE_CHECKING:
     from hip.models.hip_attention.gen3.uvm_gpu_cache import (
         HiPOffloadCache
@@ -155,6 +156,8 @@ class HiPAttentionArgs:
     v_cache: Optional[Tensor] = None
     cache_seq_lens: Optional[Tensor] = None
     block_table: Optional[Tensor] = None
+    
+    sparse_attn_backend: Optional[Callable] = None
     
     # to support gemma2
     logit_softcap: Optional[float] = None

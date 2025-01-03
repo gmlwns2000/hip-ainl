@@ -2036,8 +2036,21 @@ def dual_stage_quadratic_hip_attention(
         ks_start_end = cached_metadata.ks_start_end
     
     args.block_size_q = min(args.block_size_q, triton.next_power_of_2(TDST))
-    
-    context = block_sparse_attention(
+
+    sparse_attn_backend = block_sparse_attention
+    if args.sparse_attn_backend is not None:
+        sparse_attn_backend = args.sparse_attn_backend
+        print(q.shape, k, v,
+              position_ids.shape, (position_ids + 1),
+              indices.shape, ks.shape, ks_count.shape, ks_start_end.shape,
+              mask_access_counter.shape, mask_cache_miss_counter.shape,
+              args.sa_extend_backend, args.model_context_length, args.extend_context_length,
+              args.block_table.shape, args.cache_seq_lens.shape, args.cache_seq_lens,
+              args.k_cache.shape, args.v_cache.shape,
+              args.position_ids.shape, args.rope_cos.shape, args.rope_sin.shape,
+              sep='\n')
+
+    context = sparse_attn_backend(
         q=q, 
         k=k, 
         v=v,
@@ -2053,6 +2066,9 @@ def dual_stage_quadratic_hip_attention(
         model_context_length=args.model_context_length,
         extend_context_length=args.extend_context_length,
     )
+
+    if args.sparse_attn_backend is not None:
+        exit(-1)
     
     if DEBUG:
         print('context', context[0, :, DEBUG_HEAD, :], context.shape)
