@@ -22,7 +22,7 @@ from hip.models.modeling_llama_legacy import (
     LlamaLinearScalingRotaryEmbedding, 
     LlamaDynamicNTKScalingRotaryEmbedding,
 )
-from hip.models.modeling_llama_legacy_h2o import (
+from hip.models.modeling_llama import (
     # LlamaLinearScalingRotaryEmbedding, 
     # LlamaDynamicNTKScalingRotaryEmbedding,
     LlamaForCausalLM
@@ -865,7 +865,7 @@ class H2OLlamaForCausalLM(LlamaForCausalLM):
             if layer_idx in config.tree_dense_layers:
                 self.model.layers[layer_idx].self_attn = LlamaCustomAttention(config, layer_idx=layer_idx)
             else:
-                self.model.layers[layer_idx].self_attn = H2OLlamaAttention(config)
+                self.model.layers[layer_idx].self_attn = H2OLlamaAttention(config, layer_idx=layer_idx)
 
 ## H2O KV Cache dropping with Position rolling
 class H2OLlamaAttention_streaming(nn.Module):

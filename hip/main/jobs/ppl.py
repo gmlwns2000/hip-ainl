@@ -177,16 +177,23 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=o
                                     if hasattr(m, '_clean_cache'):
                                         m._clean_cache()
                             elif args.method in ['h2o', 'h2o_stream']:
-                                # NOTE h2o use_cahe == True
                                 outputs = model(
-                                input_ids,
-                                labels=target_ids,
-                                output_logits=False,
+                                    input_ids,
+                                    labels=target_ids,
+                                    output_logits=False,
+                                    use_cache=True,
                                 )
-                                samples.append(outputs.loss)
-                                pbar_sample.set_description(
-                                    f'ppl: {torch.exp(torch.stack(nlls + [outputs.loss.cpu()]).mean()).item():.6f}'
-                                )
+                                if outputs.loss.numel() > 1:
+                                    v, _ = outputs.loss.topk(k=min(len(outputs.loss), nll_topk))
+                                    v = v.cpu()
+                                    topk_nlls = torch.cat([topk_nlls, v])
+                                    topk_nlls, _ = torch.topk(topk_nlls, k=min(len(topk_nlls), nll_topk))
+                                    
+                                    v, _ = outputs.loss.topk(k=min(len(outputs.loss), nll_topk), largest=False)
+                                    v = v.cpu()
+                                    lowk_nlls = torch.cat([lowk_nlls, v])
+                                    lowk_nlls, _ = torch.topk(lowk_nlls, k=min(len(lowk_nlls), nll_topk), largest=False)
+                                samples.append(outputs.loss.mean())
                                 for m in model.modules():
                                     if hasattr(m, '_clean_cache'):
                                         m._clean_cache()

@@ -219,7 +219,7 @@ def load_model(args):
     config.tree_dense_layers = list(range(args.dense_layers))
     config.tree_k = args.k
     
-    if args.job not in ['generation', 'stream', 'passkey']:
+    if args.job not in ['generation', 'stream', 'passkey']: # TODO ga?
         config.is_decoding = False
     else:
         config.is_decoding = True
