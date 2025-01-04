@@ -448,6 +448,7 @@ class LlamaCustomAttention(LlamaAttention):
         self.tree_use_sliding_window = True
         self.tree_sampling_method = 'center'
         self.tree_lp_norm_coeff = 0.5
+        self.tree_extend_stages = None
 
         self.tree_reformer = self.tree_performer = None
 
@@ -515,7 +516,7 @@ class LlamaCustomAttention(LlamaAttention):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
         
-        if self.attention_method == 'hip':
+        if self.attention_method in ['hip', 'skewed']:
             force_extend = True
             need_apply_rope = True
             model_context_length = 131072
@@ -588,7 +589,7 @@ class LlamaCustomAttention(LlamaAttention):
                     )
             
             # NOTE: HiP, FA2 supports GQA, MQA natively.
-            if self.attention_method not in ['hip', 'fa2', 'none']:
+            if self.attention_method not in ['hip', 'fa2', 'none', 'skewed']:
                 key_states = repeat_kv(key_states, self.num_key_value_groups)
                 value_states = repeat_kv(value_states, self.num_key_value_groups)
 
@@ -615,7 +616,7 @@ class LlamaCustomAttention(LlamaAttention):
             #     pass
             # else:
             #     value_states[:, :, :1, :].fill_(0)
-
+            
             DEBUG_KEYS = False
             if DEBUG_KEYS:
                 other = key_states[0, 0]
@@ -634,7 +635,7 @@ class LlamaCustomAttention(LlamaAttention):
             if self.layer_idx in self.tree_high_k_layers:
                 mask_k = self.tree_high_k_layers[self.layer_idx] * mask_k
 
-            if force_extend and (self.layer_idx in self.tree_dense_layers):
+            if force_extend and (self.layer_idx in self.tree_dense_layers) and (self.tree_extend_stages is None):
                 attn_output, cur_cumsum, attn_sparsity_loss = custom_attention(
                     query_states=query_states, 
                     key_states=key_states, 
@@ -681,14 +682,15 @@ class LlamaCustomAttention(LlamaAttention):
                     # Attention sparsity loss
                     output_attn_sparsity_loss=output_attn_sparsity_loss,
                     tree_lp_norm_coeff=self.tree_lp_norm_coeff,
-
+                    
                     # Hyper attention states
                     hyper_attention=self.hyper_attention,
-
+                    
                     sm_scaler=1 / math.sqrt(self.head_dim),
                     model_sliding_window=None if (not force_extend) else 131072,
                     model_context_length=model_context_length,
                     layer_idx=self.layer_idx,
+                    extend_stages=self.tree_extend_stages,
                 )
             else:
                 attn_output, cur_cumsum, attn_sparsity_loss = custom_attention(
@@ -700,7 +702,7 @@ class LlamaCustomAttention(LlamaAttention):
                     attention_dropout=self.attention_dropout if self.training else 0.0,
 
                     # Attention method
-                    attention_method='fa2' if (self.layer_idx in self.tree_dense_layers) else self.attention_method,
+                    attention_method='fa2' if ((self.layer_idx in self.tree_dense_layers) and (not force_extend)) else self.attention_method,
                     tree_reformer=self.tree_reformer,
                     tree_performer=self.tree_performer,
 
@@ -735,14 +737,15 @@ class LlamaCustomAttention(LlamaAttention):
                     # Attention sparsity loss
                     output_attn_sparsity_loss=output_attn_sparsity_loss,
                     tree_lp_norm_coeff=self.tree_lp_norm_coeff,
-
+                    
                     # Hyper attention states
                     hyper_attention=self.hyper_attention,
-
+                    
                     sm_scaler=1 / math.sqrt(self.head_dim),
                     model_sliding_window=None if (not force_extend) else 131072,
                     model_context_length=model_context_length,
                     layer_idx=self.layer_idx,
+                    extend_stages=self.tree_extend_stages,
                 )
 
             # if (self.layer_idx < 3) or (self.layer_idx > 20):
@@ -775,7 +778,7 @@ class LlamaCustomAttention(LlamaAttention):
                 attn_output = attn_output.contiguous()
 
             attn_output = attn_output.view(bsz, q_len, -1)
-            
+
             if self.config.pretraining_tp > 1:
                 attn_output = attn_output.split(self.hidden_size // self.config.pretraining_tp, dim=2)
                 o_proj_slices = self.o_proj.weight.split(self.hidden_size // self.config.pretraining_tp, dim=1)
@@ -1602,7 +1605,8 @@ class LlamaModel(LlamaPreTrainedModel):
             hidden_states = layer_outputs[0]
             
             if hidden_states.shape[1] >= 4096:
-                torch.cuda.synchronize()
+                torch.cuda.current_stream().synchronize()
+                # torch.cuda.synchronize()
 
             if use_cache:
                 next_decoder_cache = layer_outputs[2 if output_attentions else 1]
@@ -1849,6 +1853,9 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             if labels is not None:
                 logits = logits.float()
                 # Shift so that tokens < n predict n
+                if num_logits_to_keep > 0:
+                    labels = labels[..., -num_logits_to_keep:]
+                
                 shift_logits = logits[..., :-1, :].contiguous()
                 shift_labels = labels[..., 1:].contiguous()
                 # Flatten the tokens

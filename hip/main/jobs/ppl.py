@@ -29,6 +29,7 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=o
     
     if args.method not in ['h2o', 'h2o_stream'] or args.reduce_for_gqa == 'average':
         outfile = f'./cache/llama_eval/{args.name}/ppl_{args.dataset}_{args.method}_{safe_name(args.model)}_s{args.stride}_dl{args.dense_layers}_k{args.k}_bq{args.block_size_q}_bk{args.block_size_k}_ckpt{args.checkpoint is not None}.json'
+    else:
         outfile = f'./cache/llama_eval/{args.name}/ppl_{args.dataset}_{args.method}_{safe_name(args.model)}_s{args.stride}_dl{args.dense_layers}_k{args.k}_bq{args.block_size_q}_bk{args.block_size_k}_ckpt{args.checkpoint is not None}_c{args.count}_rgqa{args.reduce_for_gqa}.json'
     pathlib.Path(outfile).parent.mkdir(parents=True, exist_ok=True)
     if not quite:
@@ -83,7 +84,8 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=o
             end_loc = min(begin_loc + max_length, seq_len)
             trg_len = end_loc - prev_end_loc  # may be different from stride on last loop
             input_ids = encodings[:, begin_loc:end_loc].to(device)
-            input_ids[:, 0] = tokenizer.bos_token_id
+            if tokenizer.bos_token_id is not None:
+                input_ids[:, 0] = tokenizer.bos_token_id
             target_ids = input_ids.clone()
             target_ids[:, :-trg_len] = -100
 

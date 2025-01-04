@@ -23,6 +23,7 @@ from hip.main.jobs.stream_demo import job_stream_demo
 from hip.main.jobs.greedy_replace import job_greedy_replace
 from hip.main.jobs.passkey import job_passkey
 from hip.main.jobs.generation import job_generation
+from hip.main.jobs.ga import job_ga
 from hip.models.modeling_llama import LlamaForCausalLM, LlamaConfig
 from hip.models.qwen.modeling_qwen2 import Qwen2ForCausalLM, Qwen2Config
 from hip.models.gemma.modeling_gemma2 import Gemma2ForCausalLM, Gemma2Config
@@ -49,10 +50,14 @@ MODELS = {
     'qwen7b': 'Qwen/Qwen1.5-7B-Chat',
     'qwen1.5b': 'Qwen/Qwen1.5-1.8B-Chat',
     'qwen0.5b': 'Qwen/Qwen1.5-0.5B-Chat',
+    'qwen2.5_1.5b_instruct': 'Qwen/Qwen2.5-1.5B-Instruct',
+    'qwen2.5_3b_instruct': 'Qwen/Qwen2.5-3B-Instruct',
+    'qwen2.5_7b_instruct': 'Qwen/Qwen2.5-7B-Instruct',
     'gemma2_2b': 'google/gemma-2-2b',
     'gemma2_9b': 'google/gemma-2-9b',
     'gemma2_2b_it': 'google/gemma-2-2b-it',
     'gemma2_9b_it': 'google/gemma-2-9b-it',
+    'exaone3.5_7.8b_instruct': 'LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct',
 }
 
 OBSOLATED_VLLM_MODELS = {
@@ -317,11 +322,11 @@ def load_model(args):
 
 
 def main():
-    seed()
-    
     args = eval_args()
     
-    assert args.job in ['ppl', 'stream', 'mmlu', 'bench_single_layer', 'booksum', 'merge_lora', 'stream_demo', 'greedy_replace', 'passkey', 'generation']
+    seed(seed=args.seed)
+    
+    assert args.job in ['ppl', 'stream', 'mmlu', 'bench_single_layer', 'booksum', 'merge_lora', 'stream_demo', 'greedy_replace', 'passkey', 'generation', 'ga']
     
     model, tokenizer, device = load_model(args)
 
@@ -345,6 +350,8 @@ def main():
         job_passkey(args, model, tokenizer, device)
     elif args.job == 'generation':
         job_generation(args, model, tokenizer, device)
+    elif args.job == 'ga':
+        job_ga(args, model, tokenizer, device)
     else:
         raise Exception()
 

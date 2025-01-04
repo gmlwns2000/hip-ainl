@@ -62,6 +62,7 @@ def custom_attention(
     model_sliding_window=None,
     model_context_length=131072,
     layer_idx=10,
+    extend_stages=None,
 ):
     """
     @param query_states: (N, H, TDST, HID)
@@ -105,6 +106,7 @@ def custom_attention(
     is_prompt = (N, T, HID) == (_N, _T, _HID)
     assert (H % _H) == 0
     H_KV = _H
+    last_cumsum = attn_sparsity_loss = None
 
     if attention_method in ['none', 'sdpa', 'fa2']:
         # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
@@ -305,6 +307,76 @@ def custom_attention(
                 k = k.permute(0, 2, 1, 3)
                 v = v.permute(0, 2, 1, 3)
                 
+                null = None
+                true = True
+                
+                # extend_stages = [
+                #     {
+                #         "second_stage_k": 4096,
+                #         "sliding_window_size": 1024,
+                #         "sink_token_size": 256,
+                #         "sa_extend_backend": "dynamic_extend",
+                #         "stages": [
+                #         {
+                #             "stage_block_size_q": 128,
+                #             "stage_block_stride_q": 4,
+                #             "stage_chunk_size": 512,
+                #             "stage_k": null,
+                #             "stage_stride": 1,
+                #             "require_realign_index": true,
+                #             "require_reset_score": true,
+                #             "require_post_sort": true,
+                #             "stage_extend_backend": "streaming"
+                #         },
+                #         {
+                #             "stage_block_size_q": 64,
+                #             "stage_block_stride_q": 4,
+                #             "stage_chunk_size": 32,
+                #             "stage_k": 16384,
+                #             "stage_stride": 1,
+                #             "require_realign_index": true,
+                #             "require_reset_score": true,
+                #             "require_post_sort": true,
+                #             "stage_extend_backend": null
+                #         }
+                #         ]
+                #     },
+                #     {
+                #         "second_stage_k": 16384,
+                #         "sliding_window_size": 2048,
+                #         "sink_token_size": 256,
+                #         "sa_extend_backend": "dynamic_extend",
+                #         "stages": [
+                #         {
+                #             "stage_block_size_q": 256,
+                #             "stage_block_stride_q": 4,
+                #             "stage_chunk_size": 256,
+                #             "stage_k": null,
+                #             "stage_stride": 1,
+                #             "require_realign_index": true,
+                #             "require_reset_score": true,
+                #             "require_post_sort": true,
+                #             "stage_extend_backend": "streaming"
+                #         },
+                #         {
+                #             "stage_block_size_q": 256,
+                #             "stage_block_stride_q": 2,
+                #             "stage_chunk_size": 16,
+                #             "stage_k": 32768,
+                #             "stage_stride": 1,
+                #             "require_realign_index": true,
+                #             "require_reset_score": true,
+                #             "require_post_sort": true,
+                #             "stage_extend_backend": null
+                #         }
+                #         ]
+                #     }
+                # ][0 if layer_idx < 4 else 1]
+                
+                if extend_stages and isinstance(extend_stages['stages'][0], dict):
+                    for i in range(len(extend_stages['stages'])):
+                        extend_stages['stages'][i] = ScanStage(**extend_stages['stages'][i])
+                
                 # if q.shape == k.shape:
                 #     q_quant = q.to(torch.float8_e5m2).view(torch.uint8)#[...,::2]
                 #     k_quant = k.to(torch.float8_e5m2).view(torch.uint8)#[...,::2]
@@ -338,16 +410,22 @@ def custom_attention(
                 block_size = 64
                 HiPAttentionArgs = HiPAttentionArgs11
                 
+                k_mask = k
+                k_group_size = int(os.getenv('K_GROUP_SIZE', '1'))
+                _N, _T, _H, _D = k.shape
+                tk = k_mask.view(_N, _T // k_group_size, k_group_size, _H, _D)
+                k_mask = (tk.min(dim=2, keepdim=True).values + tk.max(dim=2, keepdim=True).values).expand(_N, _T // k_group_size, k_group_size, _H, _D).contiguous().view(*k.shape)
+                
                 dual_stage_kwargs = dict(
                     q=q, k=k, v=v,
                     args=HiPAttentionArgs(
-                        mask_k=256,
-                        block_size_q=64,
-                        block_stride_q=4,
+                        # mask_k=256,
+                        # block_size_q=64,
+                        # block_stride_q=4,
                         block_size_k=64, # BLOCK_CHUNK
-                        block_stride_k=1,
-                        sliding_window_size=1024,
-                        sink_token_size=256,
+                        block_stride_k=k_group_size,
+                        sliding_window_size=1024 if extend_stages is None else extend_stages['sliding_window_size'],
+                        sink_token_size=256 if extend_stages is None else extend_stages['sink_token_size'],
                         # position_ids=position_ids,
                         
                         using_extend=True,
@@ -355,25 +433,41 @@ def custom_attention(
                         rope_sin=sin,
                         need_apply_rope=True,
                     ),
-                    second_stage_k=2*1024,
+                    second_stage_k=2*1024 if extend_stages is None else extend_stages['second_stage_k'],
                     # low_percent = 0.75 if layer_idx >= 3 else 0.25,
                     # low_k_ratio = 0.25,
                     stages=[
                         ScanStage(
+                            stage_block_size_q=64,
+                            stage_block_stride_q=4,
+                            stage_chunk_size=128,
+                            stage_k=None,
+                            stage_stride=1,
+                        ),
+                        ScanStage(
+                            stage_block_size_q=64,
                             stage_block_stride_q=4,
                             stage_chunk_size=32,
                             stage_k=32768,
                             stage_stride=1,
                         ),
-                    ],
-                    scan_stride=1,
+                        ScanStage(
+                            stage_block_size_q=64,
+                            stage_block_stride_q=1,
+                            stage_chunk_size=8,
+                            stage_k=8192,
+                            stage_stride=1,
+                        ),
+                    ] if extend_stages is None else extend_stages['stages'],
                     block_sparse_block_size_q=block_size,
                     model_context_length=model_context_length,
-                    scan_early_terminate=1,
-                    stage_early_terminate=1,
                     scan_extend_backend='streaming' if layer_idx < 3 else 'relative',
-                    sa_extend_backend='streaming',
+                    # scan_extend_backend='relative',
+                    sa_extend_backend='streaming' if extend_stages is None else extend_stages['sa_extend_backend'],
+                    stage_early_terminate=k_group_size,
                     mask_only=mask_only,
+                    q_mask=q,
+                    k_mask=k_mask,
                 )
                 
                 attn_output_hip, metadata = dual_stage_quadratic_hip_attention_extend(
@@ -594,6 +688,18 @@ def custom_attention(
             q, k, v, causal=True, scale=1.0
         )
 
+    elif attention_method == 'skewed':
+        from hip.models.skewed_attention import skewed_attention
+        attn_output = skewed_attention(
+            query_states, 
+            key_states, 
+            value_states, 
+            rope_cos, 
+            rope_sin, 
+            sm_scaler, 
+            layer_idx
+        )
+    
     else:
         raise Exception(attention_method)
 
