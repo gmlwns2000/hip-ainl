@@ -209,16 +209,23 @@ def load_model(args):
     if args.method in ['h2o', 'h2o_stream']:
         if args.method == 'h2o_stream':
             args.streaming = True
+    config.attention_method = args.method
     config.hh_size = args.k // 2
     config.recent_size = args.k // 2
     config._attn_implementation = config.attn_implementation = 'eager'
     config.shift_q_pos = args.shift_q_pos
     config.streaming = args.streaming
     config.reduction_for_gqa = args.reduce_for_gqa
+    config.tree_dense_layers = list(range(args.dense_layers))
+    config.tree_k = args.k
+    
     if args.job not in ['generation', 'stream', 'passkey']:
         config.is_decoding = False
     else:
         config.is_decoding = True
+    
+    from hip.models.h2o_llama import H2OLlamaForCausalLM
+    ModelClass = H2OLlamaForCausalLM
         
     if args.method == 'tova':
         from transformers.models.llama.modeling_llama import LlamaForCausalLM as OriginalLlamaForCausalLM
@@ -313,6 +320,20 @@ def load_model(args):
         for m in model.modules():
             if hasattr(m, 'attention_method'):
                 m.tree_using_context_avg = False
+    
+    # import torch.distributed as dist
+
+    # if not dist.is_initialized():
+    #     dist.init_process_group(backend="nccl", init_method="env://")
+    
+    # # Set local_rank from the distributed process group
+    # local_rank = int(os.environ["LOCAL_RANK"])  # Provided by torchrun
+
+    # torch.cuda.set_device(local_rank)  # Assign GPU to this process
+    # device = torch.device(f"cuda:{local_rank}")
+    
+    # model = model.to(device)
+    # model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
     
     model = model.eval()
     

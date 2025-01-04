@@ -1682,7 +1682,7 @@ def main_latency_benchmark():
     CHUNK_LEN = 1024
     # q: [N*H, T_DST, HID] = [32, 1024, 128]
     # k, v: [N*H_KV, T_SRC, HID] = [8, 1024, 128]
-    q, k, v, out = load_checkouts(idx=0, window=40, seq_len=CHUNK_LEN)
+    q, k, v, out, cos, sin = load_checkouts(idx=0, window=40, seq_len=CHUNK_LEN)
     # head_size = q.shape[0] # NOTE moved
    
     HID = q.shape[-1]

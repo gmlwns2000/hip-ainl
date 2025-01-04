@@ -493,14 +493,6 @@ class LlamaCustomAttention(LlamaAttention):
             cuda=True, 
         )
         
-        
-        from hip.models.h2o_llama import H2OLlamaAttention
-        from hip.models.h2o_llama import H2OLlamaAttention_streaming
-        
-        self.h2o_attention = H2OLlamaAttention(self.config, self.layer_idx)# .to(query_states.device).to(query_states.dtype)
-        # self.h2o_attention_ = H2OLlamaAttention_streaming(self.config, self.layer_idx)# .to(query_states.device).to(query_states.dtype)
-        
-    
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -551,366 +543,243 @@ class LlamaCustomAttention(LlamaAttention):
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         
-        if (self.layer_idx in self.tree_dense_layers) or (self.attention_method not in ['h2o', 'h2o_stream']):
-            if position_embeddings is None:
-                logger.warning_once(
-                    "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
-                    "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
-                    "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.45 `position_ids` will be "
-                    "removed and `position_embeddings` will be mandatory."
-                )
-                cos, sin = self.rotary_emb(value_states, position_ids)
+        if position_embeddings is None:
+            logger.warning_once(
+                "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
+                "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
+                "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.45 `position_ids` will be "
+                "removed and `position_embeddings` will be mandatory."
+            )
+            cos, sin = self.rotary_emb(value_states, position_ids)
+        else:
+            cos, sin = position_embeddings
+
+        query_states_derope = query_states
+        key_states_derope = key_states  
+        if self.layer_idx in self.tree_dense_layers:
+            if not need_apply_rope:
+                query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
             else:
-                cos, sin = position_embeddings
-
-            query_states_derope = query_states
-            key_states_derope = key_states  
-            if self.layer_idx in self.tree_dense_layers:
-                if not need_apply_rope:
-                    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-                else:
-                    cos = sin = None
+                cos = sin = None
+        else:
+            if self.attention_method == 'streaming_llm' or need_apply_rope:
+                cos = sin = None
             else:
-                if self.attention_method == 'streaming_llm' or need_apply_rope:
-                    cos = sin = None
-                else:
-                    # print(query_states.shape, key_states.shape, cos.shape, sin.shape)
-                    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-            # query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+                # print(query_states.shape, key_states.shape, cos.shape, sin.shape)
+                query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        # query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-            if past_key_value is not None:
-                # sin and cos are specific to RoPE models; cache_position needed for the static cache
-                cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-                key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
-                if cos is None:
-                    cos, sin = self.rotary_emb(
-                        value_states,
-                        torch.arange(0, key_states.shape[-2], device=key_states.device)[None, :]
-                    )
-            
-            # NOTE: HiP, FA2 supports GQA, MQA natively.
-            if self.attention_method not in ['hip', 'fa2', 'none', 'skewed']:
-                key_states = repeat_kv(key_states, self.num_key_value_groups)
-                value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-            cos_all, sin_all = self.rotary_emb(value_states, torch.arange(0, key_states.shape[-2], device=query_states.device)[None, :])
-            
-            # attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
-
-            # if attention_mask is not None:  # no matter the length, we just slice it
-            #     causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-            #     attn_weights = attn_weights + causal_mask
-
-            # # upcast attention to fp32
-            # attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-            # attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-            # attn_output = torch.matmul(attn_weights, value_states)
-            
-            causal_mask = attention_mask
-            # if attention_mask is not None and cache_position is not None:
-            if attention_mask is not None:
-                causal_mask = causal_mask[:, :, :, : key_states.shape[-2]]
-
-            sink_token = key_states[:, :, :4, :].clone()
-            # if (self.layer_idx < 3) or (self.layer_idx > 20):
-            #     pass
-            # else:
-            #     value_states[:, :, :1, :].fill_(0)
-            
-            DEBUG_KEYS = False
-            if DEBUG_KEYS:
-                other = key_states[0, 0]
-                sink = sink_token[0, 0]
-                other = other / torch.norm(other, dim=-1, keepdim=True)
-                sink = sink / torch.norm(sink, dim=-1, keepdim=True)
-                score = sink @ other.T[:, :100]
-                import matplotlib.pyplot as plt
-                plt.clf()
-                plt.imshow(score.cpu().float().numpy())
-                plt.colorbar()
-                plt.savefig('dummy_debug_keys.png')
-                input('>>>')
-
-            mask_k = self.tree_k
-            if self.layer_idx in self.tree_high_k_layers:
-                mask_k = self.tree_high_k_layers[self.layer_idx] * mask_k
-
-            if force_extend and (self.layer_idx in self.tree_dense_layers) and (self.tree_extend_stages is None):
-                attn_output, cur_cumsum, attn_sparsity_loss = custom_attention(
-                    query_states=query_states, 
-                    key_states=key_states, 
-                    value_states=value_states,
-                    attention_mask=attention_mask, 
-                    causal_mask=causal_mask,
-                    attention_dropout=self.attention_dropout if self.training else 0.0,
-
-                    # Attention method
-                    attention_method='hip',
-                    tree_reformer=self.tree_reformer,
-                    tree_performer=self.tree_performer,
-
-                    # hip parameters
-                    tree_k=4096,
-                    tree_block_size_q=64,
-                    tree_block_stride_q=4, 
-                    tree_block_size_k=64,
-                    tree_block_stride_k=4, 
-                    tree_dense_queries=self.tree_dense_queries,
-                    tree_last_dense_queries=self.tree_last_dense_queries,
-                    tree_sampling_method=self.tree_sampling_method,
-
-                    # Latency optimization tweaks
-                    tree_enable_flash=self.tree_enable_flash,
-                    tree_enable_sparq=self.tree_enable_sparq,
-                    tree_use_sliding_window=self.tree_use_sliding_window,
-                    tree_sink_token_size=256,
-                    tree_sliding_window_size=2048,
-
-                    # Context averaging parameters
-                    tree_using_context_avg=False,
-                    tree_avgpool_scaler=None,
-                    last_cumsum=None,
-                    hidden_states=hidden_states,
-
-                    # RoPE parameters
-                    tree_rope_method=self.tree_rope_method if not force_extend else 'self_extend',
-                    need_apply_rope=need_apply_rope,
-                    rope_cos=cos_all,
-                    rope_sin=sin_all,
-                    position_ids=position_ids, #.repeat_interleave(self.num_heads, 0),
-
-                    # Attention sparsity loss
-                    output_attn_sparsity_loss=output_attn_sparsity_loss,
-                    tree_lp_norm_coeff=self.tree_lp_norm_coeff,
-                    
-                    # Hyper attention states
-                    hyper_attention=self.hyper_attention,
-                    
-                    sm_scaler=1 / math.sqrt(self.head_dim),
-                    model_sliding_window=None if (not force_extend) else 131072,
-                    model_context_length=model_context_length,
-                    layer_idx=self.layer_idx,
-                    extend_stages=self.tree_extend_stages,
-                )
-            else:
-                attn_output, cur_cumsum, attn_sparsity_loss = custom_attention(
-                    query_states=query_states, 
-                    key_states=key_states, 
-                    value_states=value_states,
-                    attention_mask=attention_mask, 
-                    causal_mask=causal_mask,
-                    attention_dropout=self.attention_dropout if self.training else 0.0,
-
-                    # Attention method
-                    attention_method='fa2' if ((self.layer_idx in self.tree_dense_layers) and (not force_extend)) else self.attention_method,
-                    tree_reformer=self.tree_reformer,
-                    tree_performer=self.tree_performer,
-
-                    # hip parameters
-                    tree_k=mask_k,
-                    tree_block_size_q=self.tree_block_size_q,
-                    tree_block_stride_q=self.tree_block_stride_q, 
-                    tree_block_size_k=self.tree_block_size_k,
-                    tree_block_stride_k=self.tree_block_stride_k, 
-                    tree_dense_queries=self.tree_dense_queries,
-                    tree_last_dense_queries=self.tree_last_dense_queries,
-                    tree_sampling_method=self.tree_sampling_method,
-
-                    # Latency optimization tweaks
-                    tree_enable_flash=self.tree_enable_flash,
-                    tree_enable_sparq=self.tree_enable_sparq,
-                    tree_use_sliding_window=self.tree_use_sliding_window,
-
-                    # Context averaging parameters
-                    tree_using_context_avg=False,
-                    tree_avgpool_scaler=None,
-                    last_cumsum=None,
-                    hidden_states=hidden_states,
-
-                    # RoPE parameters
-                    tree_rope_method=self.tree_rope_method if not force_extend else 'self_extend',
-                    need_apply_rope=need_apply_rope,
-                    rope_cos=cos_all,
-                    rope_sin=sin_all,
-                    position_ids=position_ids, #.repeat_interleave(self.num_heads, 0),
-
-                    # Attention sparsity loss
-                    output_attn_sparsity_loss=output_attn_sparsity_loss,
-                    tree_lp_norm_coeff=self.tree_lp_norm_coeff,
-                    
-                    # Hyper attention states
-                    hyper_attention=self.hyper_attention,
-                    
-                    sm_scaler=1 / math.sqrt(self.head_dim),
-                    model_sliding_window=None if (not force_extend) else 131072,
-                    model_context_length=model_context_length,
-                    layer_idx=self.layer_idx,
-                    extend_stages=self.tree_extend_stages,
-                )
-
-            # if (self.layer_idx < 3) or (self.layer_idx > 20):
-            #     pass
-            # else:
-            #     attn_output = attn_output + sink_token.mean(dim=-2, keepdim=True).repeat_interleave(3, 1) * 0.535
-
-            if os.environ.get('CHECKOUT_STATES_DEROPE', '0') == '1':
-                os.makedirs('./cache/llama/', exist_ok=True)
-                torch.save({
-                    'q': query_states,
-                    'k': key_states,
-                    'v': value_states,
-                    'q_derope': query_states_derope,
-                    'k_derope': key_states_derope,
-                    'out': attn_output,
-                    'cos': cos_all,
-                    'sin': sin_all,
-                }, './cache/llama/qkvout.pth')
-                input('stored. press enter to continue >>> ')
-
-            if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
-                raise ValueError(
-                    f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
-                    f" {attn_output.size()}"
-                )
-
-            attn_output = attn_output.transpose(1, 2) # type: torch.Tensor
-            if not attn_output.is_contiguous():
-                attn_output = attn_output.contiguous()
-
-            attn_output = attn_output.view(bsz, q_len, -1)
-
-            if self.config.pretraining_tp > 1:
-                attn_output = attn_output.split(self.hidden_size // self.config.pretraining_tp, dim=2)
-                o_proj_slices = self.o_proj.weight.split(self.hidden_size // self.config.pretraining_tp, dim=1)
-                attn_output = sum([F.linear(attn_output[i], o_proj_slices[i]) for i in range(self.config.pretraining_tp)])
-            else:
-                attn_output = self.o_proj(attn_output)
-
-            if not output_attentions:
-                attn_weights = None
-
-        elif self.attention_method in ['h2o', 'h2o_stream']:
-            assert self.config.hh_size == self.tree_k//2
-            assert self.config.recent_size == self.tree_k//2
-            assert self.config._attn_implementation == self.config.attn_implementation == 'eager'
-            assert self.config.shift_q_pos is not None
-            assert self.config.reduction_for_gqa is not None
-            
-            if self.attention_method == 'h2o_stream':
-                assert self.config.streaming == True
-            assert use_cache == True
-            
-            self.h2o_attention.o_proj = self.o_proj
-            mask_k = self.tree_k
-            
-            if position_embeddings is None:
-                logger.warning_once(
-                    "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
-                    "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
-                    "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.45 `position_ids` will be "
-                    "removed and `position_embeddings` will be mandatory."
-                )
-                cos, sin = self.rotary_emb(value_states, position_ids)
-            else:
-                cos, sin = position_embeddings
-            
-            if not self.config.is_decoding:
-                position_ids_k = position_ids[:, :mask_k]
-                position_ids_loop = position_ids[:, mask_k:]
-                
-                query_states_k = query_states[:, :, :mask_k, :]
-                query_states_loop = query_states[:, :, mask_k:, :]
-                key_states_k = key_states[:, :, :mask_k, :]
-                key_states_loop = key_states[:, :, mask_k:, :]
-                value_states_k = value_states[:, :, :mask_k, :]
-                value_states_loop = value_states[:, :, mask_k:, :]
-                
-                # assert past_key_value is None # TODO CHECK
-                assert use_cache is True
-                
-                attn_output, attn_weights, past_key_value = self.h2o_attention._h2o_attention( # , hh_score
-                    query_states_k,
-                    key_states_k,
-                    value_states_k,
-                    
-                    position_ids_k,
-                    past_key_value=past_key_value,
-                    output_attentions=output_attentions,
-                    use_cache=use_cache,
-                    # hh_score=hh_score,
-                    bsz=bsz,
-                    cache_position=cache_position,
-                    reduction_for_gqa=self.config.reduction_for_gqa,
-                    kv_seq_len=None,
-                    decoding_loop_for_prefill=True,
-                    compute_final_attn_output=True,
-                    
-                    cos=cos,
-                    sin=sin,
-                )
-                attn_output_loop = torch.zeros(
-                    (attn_output.shape[0], q_len - mask_k, attn_output.shape[-1]), 
-                    dtype=attn_output.dtype, device=attn_output.device
-                )
-                
-                # loop one by one
-                assert query_states_loop.shape[-2] == q_len - mask_k
-                for i in range(q_len - mask_k):
-                    # print(f'>> loop {i}')
-                    attn_output_, attn_weights_, past_key_value = self.h2o_attention._h2o_attention( # , hh_score
-                        query_states_loop[:, :, i, :][:, :, None, :],
-                        key_states_loop[:, :, i, :][:, :, None, :],
-                        value_states_loop[:, :, i, :][:, :, None, :],
-                        
-                        position_ids_loop[:, i][:, None],
-                        past_key_value=past_key_value,
-                        output_attentions=output_attentions,
-                        use_cache=use_cache,
-                        # hh_score=hh_score,
-                        bsz=bsz,
-                        cache_position=cache_position,
-                        reduction_for_gqa=self.config.reduction_for_gqa,
-                        kv_seq_len=None,
-                        decoding_loop_for_prefill=True,
-                        compute_final_attn_output=True,
-                        
-                        cos=cos,
-                        sin=sin,
-                        i=i
-                    )
-                    
-                    attn_output_loop[:, i:i+1, :].copy_(attn_output_, non_blocking=True)
-                    
-                attn_output = torch.cat((attn_output, attn_output_loop), dim=1)
-            
-                if output_attentions:
-                    raise Exception()
-                    attn_weights = torch.cat((attn_weights, attn_weigth_loop), dim=-2)
-                
-            else:
-                assert use_cache is True
-                # compute_final_attn_output = False
-                
-                attn_output, attn_weights, past_key_value = self.h2o_attention._h2o_attention( # , hh_score
-                    query_states,
-                    key_states,
+        if past_key_value is not None:
+            # sin and cos are specific to RoPE models; cache_position needed for the static cache
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            if cos is None:
+                cos, sin = self.rotary_emb(
                     value_states,
-                    
-                    position_ids,
-                    past_key_value=past_key_value,
-                    output_attentions=output_attentions,
-                    use_cache=use_cache,
-                    # hh_score=hh_score,
-                    bsz=bsz,
-                    cache_position=cache_position,
-                    reduction_for_gqa=self.config.reduction_for_gqa,
-                    kv_seq_len=None,
-                    decoding_loop_for_prefill=True,
-                    compute_final_attn_output=True, # compute_final_attn_output
-                    
-                    cos=cos,
-                    sin=sin
+                    torch.arange(0, key_states.shape[-2], device=key_states.device)[None, :]
                 )
+        
+        # NOTE: HiP, FA2 supports GQA, MQA natively.
+        if self.attention_method not in ['hip', 'fa2', 'none', 'skewed']:
+            key_states = repeat_kv(key_states, self.num_key_value_groups)
+            value_states = repeat_kv(value_states, self.num_key_value_groups)
+
+        cos_all, sin_all = self.rotary_emb(value_states, torch.arange(0, key_states.shape[-2], device=query_states.device)[None, :])
+        
+        # attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+
+        # if attention_mask is not None:  # no matter the length, we just slice it
+        #     causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+        #     attn_weights = attn_weights + causal_mask
+
+        # # upcast attention to fp32
+        # attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        # attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+        # attn_output = torch.matmul(attn_weights, value_states)
+        
+        causal_mask = attention_mask
+        # if attention_mask is not None and cache_position is not None:
+        if attention_mask is not None:
+            causal_mask = causal_mask[:, :, :, : key_states.shape[-2]]
+
+        sink_token = key_states[:, :, :4, :].clone()
+        # if (self.layer_idx < 3) or (self.layer_idx > 20):
+        #     pass
+        # else:
+        #     value_states[:, :, :1, :].fill_(0)
+        
+        DEBUG_KEYS = False
+        if DEBUG_KEYS:
+            other = key_states[0, 0]
+            sink = sink_token[0, 0]
+            other = other / torch.norm(other, dim=-1, keepdim=True)
+            sink = sink / torch.norm(sink, dim=-1, keepdim=True)
+            score = sink @ other.T[:, :100]
+            import matplotlib.pyplot as plt
+            plt.clf()
+            plt.imshow(score.cpu().float().numpy())
+            plt.colorbar()
+            plt.savefig('dummy_debug_keys.png')
+            input('>>>')
+
+        mask_k = self.tree_k
+        if self.layer_idx in self.tree_high_k_layers:
+            mask_k = self.tree_high_k_layers[self.layer_idx] * mask_k
+
+        if force_extend and (self.layer_idx in self.tree_dense_layers) and (self.tree_extend_stages is None):
+            attn_output, cur_cumsum, attn_sparsity_loss = custom_attention(
+                query_states=query_states, 
+                key_states=key_states, 
+                value_states=value_states,
+                attention_mask=attention_mask, 
+                causal_mask=causal_mask,
+                attention_dropout=self.attention_dropout if self.training else 0.0,
+
+                # Attention method
+                attention_method='hip',
+                tree_reformer=self.tree_reformer,
+                tree_performer=self.tree_performer,
+
+                # hip parameters
+                tree_k=4096,
+                tree_block_size_q=64,
+                tree_block_stride_q=4, 
+                tree_block_size_k=64,
+                tree_block_stride_k=4, 
+                tree_dense_queries=self.tree_dense_queries,
+                tree_last_dense_queries=self.tree_last_dense_queries,
+                tree_sampling_method=self.tree_sampling_method,
+
+                # Latency optimization tweaks
+                tree_enable_flash=self.tree_enable_flash,
+                tree_enable_sparq=self.tree_enable_sparq,
+                tree_use_sliding_window=self.tree_use_sliding_window,
+                tree_sink_token_size=256,
+                tree_sliding_window_size=2048,
+
+                # Context averaging parameters
+                tree_using_context_avg=False,
+                tree_avgpool_scaler=None,
+                last_cumsum=None,
+                hidden_states=hidden_states,
+
+                # RoPE parameters
+                tree_rope_method=self.tree_rope_method if not force_extend else 'self_extend',
+                need_apply_rope=need_apply_rope,
+                rope_cos=cos_all,
+                rope_sin=sin_all,
+                position_ids=position_ids, #.repeat_interleave(self.num_heads, 0),
+
+                # Attention sparsity loss
+                output_attn_sparsity_loss=output_attn_sparsity_loss,
+                tree_lp_norm_coeff=self.tree_lp_norm_coeff,
+                
+                # Hyper attention states
+                hyper_attention=self.hyper_attention,
+                
+                sm_scaler=1 / math.sqrt(self.head_dim),
+                model_sliding_window=None if (not force_extend) else 131072,
+                model_context_length=model_context_length,
+                layer_idx=self.layer_idx,
+                extend_stages=self.tree_extend_stages,
+            )
+        else:
+            attn_output, cur_cumsum, attn_sparsity_loss = custom_attention(
+                query_states=query_states, 
+                key_states=key_states, 
+                value_states=value_states,
+                attention_mask=attention_mask, 
+                causal_mask=causal_mask,
+                attention_dropout=self.attention_dropout if self.training else 0.0,
+
+                # Attention method
+                attention_method='fa2' if ((self.layer_idx in self.tree_dense_layers) and (not force_extend)) else self.attention_method,
+                tree_reformer=self.tree_reformer,
+                tree_performer=self.tree_performer,
+
+                # hip parameters
+                tree_k=mask_k,
+                tree_block_size_q=self.tree_block_size_q,
+                tree_block_stride_q=self.tree_block_stride_q, 
+                tree_block_size_k=self.tree_block_size_k,
+                tree_block_stride_k=self.tree_block_stride_k, 
+                tree_dense_queries=self.tree_dense_queries,
+                tree_last_dense_queries=self.tree_last_dense_queries,
+                tree_sampling_method=self.tree_sampling_method,
+
+                # Latency optimization tweaks
+                tree_enable_flash=self.tree_enable_flash,
+                tree_enable_sparq=self.tree_enable_sparq,
+                tree_use_sliding_window=self.tree_use_sliding_window,
+
+                # Context averaging parameters
+                tree_using_context_avg=False,
+                tree_avgpool_scaler=None,
+                last_cumsum=None,
+                hidden_states=hidden_states,
+
+                # RoPE parameters
+                tree_rope_method=self.tree_rope_method if not force_extend else 'self_extend',
+                need_apply_rope=need_apply_rope,
+                rope_cos=cos_all,
+                rope_sin=sin_all,
+                position_ids=position_ids, #.repeat_interleave(self.num_heads, 0),
+
+                # Attention sparsity loss
+                output_attn_sparsity_loss=output_attn_sparsity_loss,
+                tree_lp_norm_coeff=self.tree_lp_norm_coeff,
+                
+                # Hyper attention states
+                hyper_attention=self.hyper_attention,
+                
+                sm_scaler=1 / math.sqrt(self.head_dim),
+                model_sliding_window=None if (not force_extend) else 131072,
+                model_context_length=model_context_length,
+                layer_idx=self.layer_idx,
+                extend_stages=self.tree_extend_stages,
+            )
+
+        # if (self.layer_idx < 3) or (self.layer_idx > 20):
+        #     pass
+        # else:
+        #     attn_output = attn_output + sink_token.mean(dim=-2, keepdim=True).repeat_interleave(3, 1) * 0.535
+
+        if os.environ.get('CHECKOUT_STATES_DEROPE', '0') == '1':
+            os.makedirs('./cache/llama/', exist_ok=True)
+            torch.save({
+                'q': query_states,
+                'k': key_states,
+                'v': value_states,
+                'q_derope': query_states_derope,
+                'k_derope': key_states_derope,
+                'out': attn_output,
+                'cos': cos_all,
+                'sin': sin_all,
+            }, './cache/llama/qkvout.pth')
+            input('stored. press enter to continue >>> ')
+
+        if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
+            raise ValueError(
+                f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
+                f" {attn_output.size()}"
+            )
+
+        attn_output = attn_output.transpose(1, 2) # type: torch.Tensor
+        if not attn_output.is_contiguous():
+            attn_output = attn_output.contiguous()
+
+        attn_output = attn_output.view(bsz, q_len, -1)
+
+        if self.config.pretraining_tp > 1:
+            attn_output = attn_output.split(self.hidden_size // self.config.pretraining_tp, dim=2)
+            o_proj_slices = self.o_proj.weight.split(self.hidden_size // self.config.pretraining_tp, dim=1)
+            attn_output = sum([F.linear(attn_output[i], o_proj_slices[i]) for i in range(self.config.pretraining_tp)])
+        else:
+            attn_output = self.o_proj(attn_output)
+
+        if not output_attentions:
+            attn_weights = None
+            
         return attn_output, attn_weights, past_key_value
 
     # # Adapted from LlamaAttention.forward

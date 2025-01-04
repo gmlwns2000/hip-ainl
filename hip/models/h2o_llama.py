@@ -29,9 +29,18 @@ from hip.models.modeling_llama_legacy_h2o import (
 )
 import types
 
+from transformers.utils import (
+    add_start_docstrings,
+    add_start_docstrings_to_model_forward,
+    is_flash_attn_greater_or_equal_2_10,
+    logging,
+    replace_return_docstrings,
+)
+
 __all__ = ["H2OLlamaForCausalLM", "H2OLlamaAttention",
             'H2OLlamaAttention_streaming', 'H2OLlamaForCausalLM_streaming']
 
+logger = logging.get_logger(__name__)
 
 from transformers.configuration_utils import PretrainedConfig
 
@@ -403,6 +412,11 @@ class H2OLlamaAttention(nn.Module):
                 f" and `num_heads`: {self.num_heads})."
             )
         
+        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=self.config.attention_bias)
+        self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=self.config.attention_bias)
+        self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=self.config.attention_bias)
+        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=self.config.attention_bias)
+        
         self._init_rope()
 
         self.kv_cache = H2OKVCache_LayerWise(
@@ -555,6 +569,7 @@ class H2OLlamaAttention(nn.Module):
         i=None
         # position_embeddings=None,
     ):
+        assert use_cache == True
         q_len = query_states.shape[-2]
         
         if decoding_loop_for_prefill:
@@ -678,13 +693,179 @@ class H2OLlamaAttention(nn.Module):
                 attn_weights = None
         
         return attn_output, attn_weights, past_key_value # , hh_score
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        output_attentions: bool = False,
+        use_cache: bool = False,
+        cache_position: Optional[torch.Tensor] = None,
+        position_embeddings: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        
+        bsz, q_len, _ = hidden_states.size()
+
+        if self.config.pretraining_tp > 1:
+            key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
+            query_slices = self.q_proj.weight.split(
+                (self.num_heads * self.head_dim) // self.config.pretraining_tp, dim=0
+            )
+            key_slices = self.k_proj.weight.split(key_value_slicing, dim=0)
+            value_slices = self.v_proj.weight.split(key_value_slicing, dim=0)
+
+            query_states = [F.linear(hidden_states, query_slices[i]) for i in range(self.config.pretraining_tp)]
+            query_states = torch.cat(query_states, dim=-1)
+
+            key_states = [F.linear(hidden_states, key_slices[i]) for i in range(self.config.pretraining_tp)]
+            key_states = torch.cat(key_states, dim=-1)
+
+            value_states = [F.linear(hidden_states, value_slices[i]) for i in range(self.config.pretraining_tp)]
+            value_states = torch.cat(value_states, dim=-1)
+
+        else:
+            query_states = self.q_proj(hidden_states)
+            key_states = self.k_proj(hidden_states)
+            value_states = self.v_proj(hidden_states)
+
+        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        
+        assert self.config.hh_size == self.config.tree_k//2
+        assert self.config.recent_size == self.config.tree_k//2
+        assert self.config._attn_implementation == self.config.attn_implementation == 'eager'
+        assert self.config.shift_q_pos is not None
+        assert self.config.reduction_for_gqa is not None
+        
+        if self.config.attention_method == 'h2o_stream':
+            assert self.config.streaming == True
+        assert use_cache == True
+        
+        mask_k = self.config.tree_k
+        
+        if position_embeddings is None:
+            logger.warning_once(
+                "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
+                "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
+                "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.45 `position_ids` will be "
+                "removed and `position_embeddings` will be mandatory."
+            )
+            cos, sin = self.rotary_emb(value_states, position_ids)
+        else:
+            cos, sin = position_embeddings
+        
+        if not self.config.is_decoding:
+            position_ids_k = position_ids[:, :mask_k]
+            position_ids_loop = position_ids[:, mask_k:]
+            
+            query_states_k = query_states[:, :, :mask_k, :]
+            query_states_loop = query_states[:, :, mask_k:, :]
+            key_states_k = key_states[:, :, :mask_k, :]
+            key_states_loop = key_states[:, :, mask_k:, :]
+            value_states_k = value_states[:, :, :mask_k, :]
+            value_states_loop = value_states[:, :, mask_k:, :]
+            
+            # assert past_key_value is None # TODO CHECK
+            assert use_cache is True
+            
+            attn_output, attn_weights, past_key_value = self._h2o_attention( # , hh_score
+                query_states_k,
+                key_states_k,
+                value_states_k,
+                
+                position_ids_k,
+                past_key_value=past_key_value,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                # hh_score=hh_score,
+                bsz=bsz,
+                cache_position=cache_position,
+                reduction_for_gqa=self.config.reduction_for_gqa,
+                kv_seq_len=None,
+                decoding_loop_for_prefill=True,
+                compute_final_attn_output=True,
+                
+                cos=cos,
+                sin=sin,
+            )
+            attn_output_loop = torch.zeros(
+                (attn_output.shape[0], q_len - mask_k, attn_output.shape[-1]), 
+                dtype=attn_output.dtype, device=attn_output.device
+            )
+            
+            # loop one by one
+            assert query_states_loop.shape[-2] == q_len - mask_k
+            for i in range(q_len - mask_k):
+                # print(f'>> loop {i}')
+                attn_output_, attn_weights_, past_key_value = self._h2o_attention( # , hh_score
+                    query_states_loop[:, :, i, :][:, :, None, :],
+                    key_states_loop[:, :, i, :][:, :, None, :],
+                    value_states_loop[:, :, i, :][:, :, None, :],
+                    
+                    position_ids_loop[:, i][:, None],
+                    past_key_value=past_key_value,
+                    output_attentions=output_attentions,
+                    use_cache=use_cache,
+                    # hh_score=hh_score,
+                    bsz=bsz,
+                    cache_position=cache_position,
+                    reduction_for_gqa=self.config.reduction_for_gqa,
+                    kv_seq_len=None,
+                    decoding_loop_for_prefill=True,
+                    compute_final_attn_output=True,
+                    
+                    cos=cos,
+                    sin=sin,
+                    i=i
+                )
+                
+                attn_output_loop[:, i:i+1, :].copy_(attn_output_, non_blocking=True)
+                
+            attn_output = torch.cat((attn_output, attn_output_loop), dim=1)
+        
+            if output_attentions:
+                raise Exception()
+                attn_weights = torch.cat((attn_weights, attn_weigth_loop), dim=-2)
+            
+        else:
+            assert use_cache is True
+            # compute_final_attn_output = False
+            
+            attn_output, attn_weights, past_key_value = self._h2o_attention( # , hh_score
+                query_states,
+                key_states,
+                value_states,
+                
+                position_ids,
+                past_key_value=past_key_value,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                # hh_score=hh_score,
+                bsz=bsz,
+                cache_position=cache_position,
+                reduction_for_gqa=self.config.reduction_for_gqa,
+                kv_seq_len=None,
+                decoding_loop_for_prefill=True,
+                compute_final_attn_output=True, # compute_final_attn_output
+                
+                cos=cos,
+                sin=sin
+            )
+        return attn_output, attn_weights, past_key_value
+    
+from hip.models.modeling_llama import LlamaCustomAttention
 
 class H2OLlamaForCausalLM(LlamaForCausalLM):
     def __init__(self, config):
         super().__init__(config)
         num_layers = len(self.model.layers)
         for layer_idx in range(num_layers):
-            self.model.layers[layer_idx].self_attn = H2OLlamaAttention(config)
+            if layer_idx in config.tree_dense_layers:
+                self.model.layers[layer_idx].self_attn = LlamaCustomAttention(config, layer_idx=layer_idx)
+            else:
+                self.model.layers[layer_idx].self_attn = H2OLlamaAttention(config)
 
 ## H2O KV Cache dropping with Position rolling
 class H2OLlamaAttention_streaming(nn.Module):
