@@ -407,20 +407,6 @@ class LlamaAttention(nn.Module):
 
         return attn_output, attn_weights, past_key_value
 
-def apply_rotary_pos_emb_single(x, cos, sin, position_ids, unsqueeze_dim=1):
-    # cos, sin : [bsz, seq_len, dim], position_ids : [bsz, seq_len]
-    # Gather values from a according to position_ids along the T dimension (dim=1)
-    _, _, cos_dim = cos.shape
-    bsz, pos_t = position_ids.shape
-    assert sin.shape[-1] == cos_dim
-    assert x.shape[-2] == pos_t
-    cos = torch.gather(cos, 1, position_ids.unsqueeze(-1).expand(bsz, pos_t, cos_dim)).unsqueeze(1)  # [bs, 1, seq_len, dim]
-    sin = torch.gather(sin, 1, position_ids.unsqueeze(-1).expand(bsz, pos_t, cos_dim)).unsqueeze(1)  # [bs, 1, seq_len, dim]
-    
-    x_embed = (x * cos) + (rotate_half(x) * sin) # [bs, head, pos_t, dim]
-    return x_embed
-
-
 class LlamaCustomAttention(LlamaAttention):
     def __init__(
         self, 
