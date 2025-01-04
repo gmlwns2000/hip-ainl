@@ -653,23 +653,6 @@ def custom_attention(
     
     elif attention_method in ['h2o', 'h2o_stream']:
         raise Exception()
-        attn_output, _, _, computed_final_attn_output = h2o_attention( # NOTE call immediately bc we also have to support attention1_block_gpu
-            hidden_states=None,
-            query_states=query_states, 
-            key_states=key_states, 
-            value_states=value_states,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_value=past_key_value if not is_prompt else None, # TODO check!!!!!
-            output_attentions=False,
-            use_cache=True,
-            kv_seq_len=kv_seq_len,
-            shift_q_pos=shift_q_pos,
-            mask_k=tree_k,
-            reduction_for_gqa=reduction_for_gqa,
-            cache_position=cache_position, # must
-            position_embeddings=position_embeddings,
-        )
             
     elif attention_method == 'hyper_attention':
         q = query_states / (query_states.shape[-1] ** 0.5)
