@@ -105,7 +105,7 @@ def job_ppl(args, model, tokenizer: transformers.LlamaTokenizer, device, quite=o
                     samples = []
                     with tqdm(range(sample_counts), dynamic_ncols=True, position=1, disable=sample_counts <= 1) as pbar_sample:
                         for _ in pbar_sample:
-                            if args.method in ['tova'] and os.getenv('TOVA_DEFAULT', '0') == '1':
+                            if args.method in ['tova']:
                                 loss_sum = 0
                                 loss_count = 0
                                 prompt_ids = input_ids[:, :args.k]
