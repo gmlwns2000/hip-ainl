@@ -321,20 +321,6 @@ def load_model(args):
             if hasattr(m, 'attention_method'):
                 m.tree_using_context_avg = False
     
-    # import torch.distributed as dist
-
-    # if not dist.is_initialized():
-    #     dist.init_process_group(backend="nccl", init_method="env://")
-    
-    # # Set local_rank from the distributed process group
-    # local_rank = int(os.environ["LOCAL_RANK"])  # Provided by torchrun
-
-    # torch.cuda.set_device(local_rank)  # Assign GPU to this process
-    # device = torch.device(f"cuda:{local_rank}")
-    
-    # model = model.to(device)
-    # model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
-    
     model = model.eval()
     
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
