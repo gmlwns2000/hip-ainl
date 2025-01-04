@@ -5512,8 +5512,6 @@ def block_sparse_attention_cuda(
                     
                     EXTEND_BACKEND=EXTEND_BACKEND,
                 )
-                # else:
-                #     pass
             else:
                 pass
     
