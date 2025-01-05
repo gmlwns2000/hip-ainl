@@ -20,9 +20,7 @@ import json
 import math
 import os
 import warnings
-from typing import List, Literal, Optional, Tuple, Union
 
-import numba
 import numpy as np
 import torch
 import tqdm
@@ -31,10 +29,7 @@ import triton.language as tl
 from torch import Tensor
 from torch.autograd import Function
 from transformers.utils import logging
-import matplotlib.pyplot as plt
 
-# assert (triton.__version__ in ['2.3.0', '2.2.0', '2.1.0']) or ('nightly' in triton.__version__), triton.__version__
-# assert hasattr(tl, 'sort'), f'check triton version {triton.__version__}'
 
 if not hasattr(tl, 'sort'):
     warnings.warn(
@@ -44,13 +39,7 @@ if not hasattr(tl, 'sort'):
 
 from hip.utils import get_bench, seed
 from hip.models.hip_attention.common import load_checkouts
-from hip.models.hip_attention.attention1_block_gpu_kernel.paged_cache_vllm_compat import (
-    PagedKeyCacheVllmCompat, PagedValueCacheVllmCompat
-)
-from hip.models.hip_attention.attention1_block_gpu_kernel.masking_iteration import masking_iteration
-from hip.models.hip_attention.attention1_block_gpu_kernel.safe_indices import safe_indices
-from hip.models.hip_attention.attention1_block_gpu_kernel.calc_prob_return_context import calc_prob_return_context
-from hip.models.hip_attention.attention1_block_gpu_kernel.calc_score_return_prob import calc_score_return_prob
+
 
 logger = logging.get_logger(__name__)
 timer = lambda x: get_bench().region(x)
