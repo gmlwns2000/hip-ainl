@@ -650,7 +650,7 @@ def custom_attention(
         )
 
         attn_output = attn_output.view(N, H, TDST, HID)  # .to(hidden_states.dtype)
-            
+
     elif attention_method == 'hyper_attention':
         q = query_states / (query_states.shape[-1] ** 0.5)
         k = key_states
@@ -684,4 +684,3 @@ def custom_attention(
         raise Exception(attention_method)
 
     return attn_output, last_cumsum, attn_sparsity_loss
-

@@ -46,7 +46,6 @@ MMLU_SUBJECTS = [
     'anatomy', 
     'human_sexuality', 
     'college_medicine', 
-    #####
     'high_school_government_and_politics', 
     'college_chemistry', 
     'logical_fallacies', 
