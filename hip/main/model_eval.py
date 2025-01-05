@@ -202,7 +202,6 @@ def load_model(args):
     if os.getenv('FORCE_FP32', '0') == '1':
         infer_dtype = torch.float32
 
-    ModelClass = LlamaForCausalLM
     if args.model.startswith('qwen'):
         ModelClass = Qwen2ForCausalLM
         
