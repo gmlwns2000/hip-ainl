@@ -1611,24 +1611,6 @@ from hip.models.hip_attention.attention2_draft_prefetch import hip_attention as 
 def main_latency_benchmark():
     global DEBUG
     
-    MODELS = {
-        'llama1b': 'princeton-nlp/Sheared-LLaMA-1.3B',
-        'llama3b': 'princeton-nlp/Sheared-LLaMA-2.7B',
-        'llama7b': 'meta-llama/Llama-2-7b-chat-hf',
-        'llama32k': 'togethercomputer/LLaMA-2-7B-32K',
-        'llama32k_instruct': 'togethercomputer/Llama-2-7B-32K-Instruct',
-        'llama13b': 'meta-llama/Llama-2-13b-hf',
-        'llama13b_32k': 'Yukang/Llama-2-13b-longlora-32k-ft',
-        'llama13b_32k_instruct': 'Yukang/Llama-2-13b-chat-longlora-32k-sft',
-        'llama3_8b_1m': 'gradientai/Llama-3-8B-Instruct-Gradient-1048k',
-        'llama3.1_8b': 'meta-llama/Meta-Llama-3.1-8B',
-        'llama3.1_8b_instruct': 'meta-llama/Meta-Llama-3.1-8B-Instruct',
-        'qwen14b': 'Qwen/Qwen1.5-14B-Chat',
-        'qwen7b': 'Qwen/Qwen1.5-7B-Chat',
-        'qwen1.5b': 'Qwen/Qwen1.5-1.8B-Chat',
-        'qwen0.5b': 'Qwen/Qwen1.5-0.5B-Chat',
-    }
-    
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--trace', action='store_true')
@@ -1655,8 +1637,7 @@ def main_latency_benchmark():
     parser.add_argument('--h2o-shift-q-pos', action='store_true')
     parser.add_argument('--h2o-reduce-for-gqa', type=str, default='average')
     
-    parser.add_argument('--model', type=str, default='llama3.1_8b')
-    
+    parser.add_argument('--h2o-model', type=str, default='llama3.1_8b')
     
     args = parser.parse_args()
     
@@ -1671,7 +1652,6 @@ def main_latency_benchmark():
     METHOD = args.method
     n_samples = args.samples
     is_causal = not args.not_causal
-    model_id = MODELS[args.model]
     
     if DEBUG:
         seed()
@@ -1741,8 +1721,8 @@ def main_latency_benchmark():
     
     hip_attention_mask = torch.full((q.shape[0], k.shape[1]), True, dtype=torch.bool, device=q.device)
     
-    from hip.models.h2o_llama import H2OLlamaAttention
-    from hip.models.h2o_llama import H2OLlamaAttention_streaming
+    from hip.models.h2o.h2o_llama import H2OLlamaAttention
+    from hip.models.h2o.h2o_llama import H2OLlamaAttention_streaming
     from transformers.models.llama.configuration_llama import LlamaConfig
     
     # import os
@@ -1752,7 +1732,8 @@ def main_latency_benchmark():
     
     past_key_value = None
     if METHOD in ['h2o', 'h2o_stream']:
-        config = LlamaConfig.from_pretrained(model_id)
+        from hip.main.model_eval import MODELS
+        config = LlamaConfig.from_pretrained(MODELS[args.h2o_model])
         config.hh_size = args.k // 2
         config.recent_size = args.k // 2
         config._attn_implementation = config.attn_implementation = 'eager'
@@ -1785,7 +1766,7 @@ def main_latency_benchmark():
                 past_key_value.key_cache.append(k[:, :, -mask_k:, :].clone())
                 past_key_value.value_cache.append(v[:, :, -mask_k:, :].clone())
             
-            from hip.models.h2o_llama import repeat_kv
+            from hip.models.h2o.h2o_llama import repeat_kv
             k = repeat_kv(k, num_key_value_groups)
             v = repeat_kv(v, num_key_value_groups)
                 

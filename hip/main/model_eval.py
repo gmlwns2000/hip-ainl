@@ -207,7 +207,7 @@ def load_model(args):
         ModelClass = Qwen2ForCausalLM
         
     if args.method in ['h2o', 'h2o_stream']:
-        from hip.models.h2o_llama import H2OLlamaForCausalLM
+        from hip.models.h2o.h2o_llama import H2OLlamaForCausalLM
         ModelClass = H2OLlamaForCausalLM
         
         if args.method == 'h2o_stream':
