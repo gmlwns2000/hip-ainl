@@ -54,7 +54,6 @@ def job_passkey(args, model, tokenizer, device):
                     attention_mask=None,
                     # pad_token_id=tokenizer.eos_token_id,
                 )
-                # h2o
                 for m in model.modules():
                     if hasattr(m, '_clean_cache'):
                         m._clean_cache()

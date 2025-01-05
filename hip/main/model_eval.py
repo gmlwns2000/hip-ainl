@@ -22,7 +22,6 @@ from hip.main.jobs.stream import job_stream
 from hip.main.jobs.stream_demo import job_stream_demo
 from hip.main.jobs.greedy_replace import job_greedy_replace
 from hip.main.jobs.passkey import job_passkey
-from hip.main.jobs.generation import job_generation
 from hip.main.jobs.ga import job_ga
 from hip.models.modeling_llama import LlamaForCausalLM, LlamaConfig
 from hip.models.qwen.modeling_qwen2 import Qwen2ForCausalLM, Qwen2Config
@@ -206,26 +205,27 @@ def load_model(args):
     ModelClass = LlamaForCausalLM
     if args.model.startswith('qwen'):
         ModelClass = Qwen2ForCausalLM
+        
     if args.method in ['h2o', 'h2o_stream']:
+        from hip.models.h2o_llama import H2OLlamaForCausalLM
+        ModelClass = H2OLlamaForCausalLM
+        
         if args.method == 'h2o_stream':
-            args.streaming = True
-    config.attention_method = args.method
-    config.hh_size = args.k // 2
-    config.recent_size = args.k // 2
-    config._attn_implementation = config.attn_implementation = 'eager'
-    config.shift_q_pos = args.shift_q_pos
-    config.streaming = args.streaming
-    config.reduction_for_gqa = args.reduce_for_gqa
-    config.tree_dense_layers = list(range(args.dense_layers))
-    config.tree_k = args.k
-    
-    if args.job not in ['generation', 'stream', 'passkey']: # TODO ga?
-        config.is_decoding = False
-    else:
-        config.is_decoding = True
-    
-    from hip.models.h2o_llama import H2OLlamaForCausalLM
-    ModelClass = H2OLlamaForCausalLM
+            args.h2o_streaming = True
+        config.attention_method = args.method
+        config.hh_size = args.k // 2
+        config.recent_size = args.k // 2
+        config._attn_implementation = config.attn_implementation = 'eager'
+        config.h2o_shift_q_pos = args.h2o_shift_q_pos
+        config.h2o_streaming = args.h2o_streaming
+        config.reduction_for_gqa = args.h2o_reduce_for_gqa
+        config.tree_dense_layers = list(range(args.dense_layers))
+        config.tree_k = args.k
+        
+        if args.job not in ['stream', 'passkey']: # TODO ga?
+            config.is_decoding = False
+        else:
+            config.is_decoding = True
         
     if args.method == 'tova':
         from transformers.models.llama.modeling_llama import LlamaForCausalLM as OriginalLlamaForCausalLM
@@ -333,7 +333,7 @@ def main():
     
     seed(seed=args.seed)
     
-    assert args.job in ['ppl', 'stream', 'mmlu', 'bench_single_layer', 'booksum', 'merge_lora', 'stream_demo', 'greedy_replace', 'passkey', 'generation', 'ga']
+    assert args.job in ['ppl', 'stream', 'mmlu', 'bench_single_layer', 'booksum', 'merge_lora', 'stream_demo', 'greedy_replace', 'passkey', 'ga']
     
     model, tokenizer, device = load_model(args)
 
@@ -355,8 +355,6 @@ def main():
         job_greedy_replace(args, model, tokenizer, device)
     elif args.job == 'passkey':
         job_passkey(args, model, tokenizer, device)
-    elif args.job == 'generation':
-        job_generation(args, model, tokenizer, device)
     elif args.job == 'ga':
         job_ga(args, model, tokenizer, device)
     else:

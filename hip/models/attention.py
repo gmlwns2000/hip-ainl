@@ -650,9 +650,6 @@ def custom_attention(
         )
 
         attn_output = attn_output.view(N, H, TDST, HID)  # .to(hidden_states.dtype)
-    
-    elif attention_method in ['h2o', 'h2o_stream']:
-        raise Exception()
             
     elif attention_method == 'hyper_attention':
         q = query_states / (query_states.shape[-1] ** 0.5)

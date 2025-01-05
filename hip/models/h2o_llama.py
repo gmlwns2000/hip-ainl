@@ -587,7 +587,7 @@ class H2OLlamaAttention(nn.Module):
             3. StreamingLLM style RoPE: my own implementation
             """
 
-            if self.config.streaming:
+            if self.config.h2o_streaming:
                 if past_key_value is not None: # and len(past_key_value) != 0:
                     # sin and cos are specific to RoPE models; cache_position needed for the static cache
                     cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
@@ -627,7 +627,7 @@ class H2OLlamaAttention(nn.Module):
                     query_states, 
                     cos, 
                     sin, 
-                    torch.clamp_max(position_ids, kv_seq_len) if self.config.shift_q_pos else position_ids,
+                    torch.clamp_max(position_ids, kv_seq_len) if self.config.h2o_shift_q_pos else position_ids,
                     is_decoding=self.config.is_decoding
                 )
                 key_states = apply_rotary_pos_emb_single(
@@ -736,11 +736,11 @@ class H2OLlamaAttention(nn.Module):
         assert self.config.hh_size == self.config.tree_k//2
         assert self.config.recent_size == self.config.tree_k//2
         assert self.config._attn_implementation == self.config.attn_implementation == 'eager'
-        assert self.config.shift_q_pos is not None
+        assert self.config.h2o_shift_q_pos is not None
         assert self.config.reduction_for_gqa is not None
         
         if self.config.attention_method == 'h2o_stream':
-            assert self.config.streaming == True
+            assert self.config.h2o_streaming == True
         assert use_cache == True
         
         mask_k = self.config.tree_k
@@ -944,7 +944,7 @@ class H2OLlamaAttention_streaming(nn.Module):
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
-        shift_q_pos: bool = False,
+        h2o_shift_q_pos: bool = False,
         mask_k: int = 512,
         reduction_for_gqa: str = 'average',
         cache_position: Optional[torch.Tensor] = None,

@@ -1651,9 +1651,9 @@ def main_latency_benchmark():
     parser.add_argument('--head_groups', type=int, default=1)
     
     # h2o
-    parser.add_argument('--streaming', action='store_true')
-    parser.add_argument('--shift-q-pos', action='store_true')
-    parser.add_argument('--reduce-for-gqa', type=str, default='average')
+    parser.add_argument('--h2o-streaming', action='store_true')
+    parser.add_argument('--h2o-shift-q-pos', action='store_true')
+    parser.add_argument('--h2o-reduce-for-gqa', type=str, default='average')
     
     parser.add_argument('--model', type=str, default='llama3.1_8b')
     
@@ -1756,11 +1756,11 @@ def main_latency_benchmark():
         config.hh_size = args.k // 2
         config.recent_size = args.k // 2
         config._attn_implementation = config.attn_implementation = 'eager'
-        config.shift_q_pos = args.shift_q_pos
-        config.streaming = args.streaming
-        config.reduction_for_gqa = args.reduce_for_gqa
+        config.h2o_shift_q_pos = args.h2o_shift_q_pos
+        config.h2o_streaming = args.h2o_streaming
+        config.reduction_for_gqa = args.h2o_reduce_for_gqa
         if METHOD == 'h2o_stream':
-            config.streaming = True
+            config.h2o_streaming = True
         
         mask_k = args.k
                     

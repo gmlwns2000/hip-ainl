@@ -189,10 +189,9 @@ def evaluate_mmlu(args, model, tokenizer, subject_name):
             'correct': correct,
             'seq_len': seq_len,
         })
-        if args.method in ['h2o', 'h2o_stream', 'tova']:
-            for m in model.modules():
-                if hasattr(m, '_clean_cache'):
-                    m._clean_cache()
+        for m in model.modules():
+            if hasattr(m, '_clean_cache'):
+                m._clean_cache()
                     
     elapsed = time.time() - t_start
     
