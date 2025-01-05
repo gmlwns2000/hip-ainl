@@ -272,6 +272,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
+
 class LlamaAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
@@ -407,6 +408,7 @@ class LlamaAttention(nn.Module):
 
         return attn_output, attn_weights, past_key_value
 
+
 class LlamaCustomAttention(LlamaAttention):
     def __init__(
         self, 
@@ -478,7 +480,7 @@ class LlamaCustomAttention(LlamaAttention):
             min_seq_len=32, # this factor is kind of random. usually smaller better
             cuda=True, 
         )
-        
+    
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -528,7 +530,7 @@ class LlamaCustomAttention(LlamaAttention):
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        
+
         if position_embeddings is None:
             logger.warning_once(
                 "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
@@ -539,9 +541,9 @@ class LlamaCustomAttention(LlamaAttention):
             cos, sin = self.rotary_emb(value_states, position_ids)
         else:
             cos, sin = position_embeddings
-
+        
         query_states_derope = query_states
-        key_states_derope = key_states  
+        key_states_derope = key_states
         if self.layer_idx in self.tree_dense_layers:
             if not need_apply_rope:
                 query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
@@ -743,7 +745,7 @@ class LlamaCustomAttention(LlamaAttention):
                 'sin': sin_all,
             }, './cache/llama/qkvout.pth')
             input('stored. press enter to continue >>> ')
-
+        
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
             raise ValueError(
                 f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
@@ -765,7 +767,7 @@ class LlamaCustomAttention(LlamaAttention):
 
         if not output_attentions:
             attn_weights = None
-            
+
         return attn_output, attn_weights, past_key_value
 
     # # Adapted from LlamaAttention.forward

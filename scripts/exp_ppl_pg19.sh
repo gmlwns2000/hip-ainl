@@ -22,12 +22,6 @@ python hip/main/model_eval.py --method fa2 --model llama3.1_8b --stride $seq --d
 elif [ "${METHOD}" == "streaming_llm" ]; then
 echo run streaming llm
 python hip/main/model_eval.py --method streaming_llm --model llama3.1_8b --stride $seq --dataset pg19 --overwrite
-elif [ "${METHOD}" == "h2o" ]; then
-echo run h2o
-python -m hip.main.model_eval --method h2o --model llama3.1_8b --stride $seq --dataset pg19 --overwrite --count $count
-elif [ "${METHOD}" == "h2o_stream" ]; then
-echo run h2o stream
-python -m hip.main.model_eval --method h2o_stream --model llama3.1_8b --stride $seq --dataset pg19 --overwrite --streaming --count $count
 elif [ "${METHOD}" == "hyper_attention" ]; then
 echo run hyper attention
 if [ "${DENSE_LAYERS}" == "" ]; then
