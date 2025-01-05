@@ -1631,14 +1631,6 @@ def main_latency_benchmark():
     parser.add_argument('--refresh_interval', type=int, default=8)
     parser.add_argument('--not_causal', action='store_true')
     parser.add_argument('--head_groups', type=int, default=1)
-    
-    # h2o
-    parser.add_argument('--h2o-streaming', action='store_true')
-    parser.add_argument('--h2o-shift-q-pos', action='store_true')
-    parser.add_argument('--h2o-reduce-for-gqa', type=str, default='average')
-    
-    parser.add_argument('--h2o-model', type=str, default='llama3.1_8b')
-    
     args = parser.parse_args()
     
     if args.query_size > 1:
@@ -1660,11 +1652,7 @@ def main_latency_benchmark():
     get_bench().synchronize = True
 
     CHUNK_LEN = 1024
-    # q: [N*H, T_DST, HID] = [32, 1024, 128]
-    # k, v: [N*H_KV, T_SRC, HID] = [8, 1024, 128]
-    q, k, v, out, cos, sin = load_checkouts(idx=0, window=40, seq_len=CHUNK_LEN)
-    # head_size = q.shape[0] # NOTE moved
-   
+    q, k, v, out = load_checkouts(idx=0, window=40, seq_len=CHUNK_LEN)
     HID = q.shape[-1]
     
     q = q.cpu()
@@ -1689,10 +1677,10 @@ def main_latency_benchmark():
         v = v.repeat(1, 1, hid_reps)[:, :, :args.hidden_size].contiguous()
         HID = args.hidden_size
     
-    head_size = q.shape[0] # TODO move
-    cos = sin = torch.randn((k.shape[1], k.shape[2]), dtype=k.dtype, device=k.device) # [T, HID]
+    head_size = q.shape[0]
+    cos = sin = torch.randn((k.shape[1], k.shape[2]), dtype=k.dtype, device=k.device)
     
-    if METHOD in ['flash', 'fa2', 'hip1.1']: # N, T, H, HID
+    if METHOD in ['flash', 'fa2', 'hip1.1']:
         q = q.view(BSIZE, -1, QUERY_SIZE, HID).permute(0, 2, 1, 3).contiguous()
         k = k.view(BSIZE, -1, CHUNK_LEN * DUPS, HID)[:, ::args.head_groups, :, :].permute(0, 2, 1, 3).contiguous()
         v = v.view(BSIZE, -1, CHUNK_LEN * DUPS, HID)[:, ::args.head_groups, :, :].permute(0, 2, 1, 3).contiguous()
@@ -1700,11 +1688,7 @@ def main_latency_benchmark():
         q = q.view(BSIZE, -1, QUERY_SIZE, HID).contiguous()
         k = k.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).contiguous()
         v = v.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).contiguous()
-    elif METHOD in ['h2o', 'h2o_stream']: # TODO NOTE args.head_groups automatically detected??
-        k = k.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).repeat(1, q.shape[0] // k.shape[0], 1, 1).contiguous() # [128, 8, 32k, 128]
-        v = v.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).repeat(1, q.shape[0] // v.shape[0], 1, 1).contiguous() # [128, 8, 32k, 128]
-        q = q.view(BSIZE, -1, QUERY_SIZE, HID).contiguous() # [128, 32, 32k, 128]
-    elif METHOD in ['streaming', 'hyper',]:
+    elif METHOD in ['streaming', 'hyper']:
         k = k.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).repeat(q.shape[0] // k.shape[0], 1, 1, 1).view(q.shape[0], -1, q.shape[2])
         v = v.view(BSIZE, -1, CHUNK_LEN * DUPS, HID).repeat(q.shape[0] // v.shape[0], 1, 1, 1).view(q.shape[0], -1, q.shape[2])
     
@@ -1721,68 +1705,6 @@ def main_latency_benchmark():
     
     hip_attention_mask = torch.full((q.shape[0], k.shape[1]), True, dtype=torch.bool, device=q.device)
     
-    from hip.models.h2o.h2o_llama import H2OLlamaAttention
-    from hip.models.h2o.h2o_llama import H2OLlamaAttention_streaming
-    from transformers.models.llama.configuration_llama import LlamaConfig
-    
-    # import os
-    # os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
-    # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-    # os.environ["TORCH_USE_CUDA_DSA"] = '1'
-    
-    past_key_value = None
-    if METHOD in ['h2o', 'h2o_stream']:
-        from hip.main.model_eval import MODELS
-        config = LlamaConfig.from_pretrained(MODELS[args.h2o_model])
-        config.hh_size = args.k // 2
-        config.recent_size = args.k // 2
-        config._attn_implementation = config.attn_implementation = 'eager'
-        config.h2o_shift_q_pos = args.h2o_shift_q_pos
-        config.h2o_streaming = args.h2o_streaming
-        config.reduction_for_gqa = args.h2o_reduce_for_gqa
-        if METHOD == 'h2o_stream':
-            config.h2o_streaming = True
-        
-        mask_k = args.k
-                    
-        bsz, num_heads, q_len, head_dim = q.shape
-        _, kv_num_heads, kv_seq_len, _ = k.shape
-        
-        if q_len == 1:
-            config.is_decoding=True
-        else:
-            config.is_decoding=False
-        
-        # attention_mask = torch.zeros(bsz, 1, q_len, kv_seq_len).to(q.device)
-        attention_mask = None
-        num_key_value_groups = num_heads // kv_num_heads
-        
-        from transformers import DynamicCache
-        
-        past_key_value = DynamicCache()
-        if QUERY_SIZE == 1:
-            past_key_value = DynamicCache()
-            for i in range(config.num_hidden_layers):
-                past_key_value.key_cache.append(k[:, :, -mask_k:, :].clone())
-                past_key_value.value_cache.append(v[:, :, -mask_k:, :].clone())
-            
-            from hip.models.h2o.h2o_llama import repeat_kv
-            k = repeat_kv(k, num_key_value_groups)
-            v = repeat_kv(v, num_key_value_groups)
-                
-        h2o_attention = H2OLlamaAttention(config, layer_idx=0).to(q.device).to(q.dtype) # TODO set layer_idx?
-        
-        h2o_attention.q_proj = torch.nn.Identity()
-        h2o_attention.k_proj = torch.nn.Identity()
-        h2o_attention.v_proj = torch.nn.Identity()
-        h2o_attention.o_proj = torch.nn.Identity()
-        
-        bsz, num_heads, q_len, head_dim = q.shape
-        cos = sin = torch.randn(bsz, q_len, head_dim).to('cuda').to(q.dtype)
-
-        position_ids = torch.arange(0, QUERY_SIZE).repeat(bsz, 1).to(q.device)
-        cache_position = torch.arange(QUERY_SIZE).to(q.device)
-        
     from hip.models.hyper_attention.hyper_attn import HyperAttention
     hyper_attention = HyperAttention(
         input_dim=q.shape[-1],
@@ -1793,7 +1715,7 @@ def main_latency_benchmark():
         cuda=True, 
     ).to('cuda').to(q.dtype)
     
-    def sample(state = None, past_key_value = None):
+    def sample(state = None):
         with torch.no_grad():
             if METHOD in ['torch', 'none', 'default']:
                 torch_attention(q, k, v)
@@ -1813,101 +1735,6 @@ def main_latency_benchmark():
                     causal=True, 
                     scale=1
                 )
-            elif METHOD in ['h2o', 'h2o_stream']:                
-                q_len = QUERY_SIZE
-                measure_decode_style = False
-                if (q_len > mask_k) and measure_decode_style:
-                    assert QUERY_SIZE > 1
-                    assert QUERY_SIZE == CHUNK_LEN * DUPS
-
-                    # compute_final_attn_output = True
-                    
-                    position_ids_k = position_ids[:, :mask_k]
-                    position_ids_loop = position_ids[:, mask_k:]
-                    
-                    query_states_k = q[:, :, :mask_k, :]
-                    query_states_loop = q[:, :, mask_k:, :]
-                    key_states_k = k[:, :, :mask_k, :]
-                    key_states_loop = k[:, :, mask_k:, :]
-                    value_states_k = v[:, :, :mask_k, :]
-                    value_states_loop = v[:, :, mask_k:, :]
-
-                    # assert past_key_value is None # TODO CHECK
-                    past_key_value = DynamicCache()
-                    # print('========== prompt_attn')
-                    attn_output, attn_weights, past_key_value = h2o_attention._h2o_attention( # , hh_score
-                        query_states_k,
-                        key_states_k,
-                        value_states_k,
-                        
-                        position_ids_k,
-                        past_key_value=past_key_value,
-                        output_attentions=False,
-                        use_cache=True,
-                        # hh_score=hh_score,
-                        bsz=bsz,
-                        cache_position=cache_position,
-                        reduction_for_gqa=h2o_attention.config.reduction_for_gqa,
-                        kv_seq_len=None,
-                        decoding_loop_for_prefill=True,
-                        compute_final_attn_output=False,
-                        
-                        cos=cos,
-                        sin=sin,
-                    )
-                    # loop one by one
-                    # print('========== prompt_loop_attn')
-                    assert query_states_loop.shape[-2] == q_len - mask_k
-                    for i in range(q_len - mask_k):
-                        # print(f'>> loop {i}')
-                        attn_output_, attn_weights_, past_key_value = h2o_attention._h2o_attention( # , hh_score
-                            query_states_loop[:, :, i, :][:, :, None, :],
-                            key_states_loop[:, :, i, :][:, :, None, :],
-                            value_states_loop[:, :, i, :][:, :, None, :],
-                            
-                            position_ids_loop[:, i][:, None],
-                            past_key_value=past_key_value,
-                            output_attentions=False,
-                            use_cache=True,
-                            # hh_score=hh_score,
-                            bsz=bsz,
-                            cache_position=cache_position,
-                            reduction_for_gqa=h2o_attention.config.reduction_for_gqa,
-                            kv_seq_len=None,
-                            decoding_loop_for_prefill=True,
-                            compute_final_attn_output=False,
-                            
-                            cos=cos,
-                            sin=sin,
-                            i=i
-                        )
-                        
-                    #     attn_output_loop[:, i:i+1, :].copy_(attn_output_, non_blocking=True)
-                    
-                    # attn_output = torch.cat((attn_output, attn_output_loop), dim=1)
-
-                            
-                else:
-                    # compute_final_attn_output = False
-                    k_cache, v_cache = past_key_value[0]
-                    # print(k_cache.shape, v_cache.shape)
-                    attn_output, attn_weights= h2o_attention._h2o_attention_itself(
-                        q,
-                        torch.cat([k_cache, k[:, :, -1:, :]], dim=2),
-                        torch.cat([v_cache, v[:, :, -1:, :]], dim=2),
-                        
-                        bsz, num_heads, head_dim, q_len, kv_seq_len,
-                        attention_mask,
-                        
-                        past_key_value,
-                        num_key_value_groups,
-                        h2o_attention.config.reduction_for_gqa,
-                        layer_idx=0,
-                    )
-                    
-                for m in h2o_attention.modules():
-                    if hasattr(m, '_clean_cache'):
-                        m._clean_cache()
             elif METHOD == 'hip1.1':
                 assert is_causal
                 if state is None:
@@ -1992,20 +1819,20 @@ def main_latency_benchmark():
         
         if i < 5:
             s.wait_stream(torch.cuda.current_stream())
-            state = sample(past_key_value=past_key_value)
+            state = sample()
             if args.refresh_interval > 0:
-                sample(state, past_key_value)
+                sample(state)
             torch.cuda.current_stream().wait_stream(s)
         elif args.trace:
-            sample(past_key_value=past_key_value)
+            sample()
         elif graph is None:
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
-                state = sample(past_key_value=past_key_value)
+                state = sample()
             if args.refresh_interval > 0:
                 graph_stateful = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(graph_stateful):
-                    sample(state, past_key_value=past_key_value)
+                    sample(state)
         else:
             if args.refresh_interval > 0:
                 if (i % args.refresh_interval) == 0:
