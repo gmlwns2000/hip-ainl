@@ -1,20 +1,3 @@
-"""
-block version of attention1
-score = reduce_fn(score[block_ptrs])
-
-k = 256 (16 block)
-scale_up = 2
-
-# infer by heuristics
-n_patches = 128 (8 block)
-w_start = 512 (32 block)
-
-> example of block scale
-1024: 64 block
-2048: 128 block
-4096: 256 block
-"""
-
 import gc
 import json
 import math
