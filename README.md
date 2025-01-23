@@ -1,3 +1,6 @@
+** MOVED TO [DeepAuto.ai/hip-attention](https://github.com/DeepAuto-AI/hip-attention) **
+
+
 ![demo gif](docs/demo.gif)
 
 | [**Demo**](docs/demo.mp4) | [**Preprint**](https://arxiv.org/abs/2406.09827) | [**SGlang Integration**](https://github.com/gmlwns2000/sglang-hip12) | [**vLLM Integration (Deprecated)**](https://github.com/DeepAuto-AI/vllm) |
